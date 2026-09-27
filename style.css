@@ -1,0 +1,106 @@
+/* Preset Manager v2 — floating window (Phase 1: Library tab) */
+
+#pm-window {
+    position: fixed;
+    top: 80px;
+    right: 24px;
+    z-index: 10050;
+    width: 460px;
+    max-height: 70vh;
+    display: flex;
+    flex-direction: column;
+    background: var(--SmartThemeBlurTintColor, #1b1b1b);
+    color: var(--SmartThemeBodyColor, #ddd);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 8px;
+    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+    font-size: 14px;
+}
+
+#pm-window .pm-titlebar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 10px;
+    cursor: move;
+    background: var(--SmartThemeBlurTintColor, #222);
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+    user-select: none;
+}
+
+#pm-window .pm-titlebar-buttons .pm-close {
+    cursor: pointer;
+    padding: 2px 6px;
+}
+
+#pm-window .pm-body {
+    padding: 10px;
+    overflow: auto;
+}
+
+.pm-library-toolbar {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.pm-library-toolbar .pm-tag-filter {
+    flex: 1;
+}
+
+.pm-slot-state {
+    font-size: 12px;
+    opacity: 0.75;
+    white-space: nowrap;
+}
+
+.pm-library-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 6px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #333);
+}
+
+.pm-library-row.pm-in-slot {
+    background: rgba(80, 160, 255, 0.12);
+}
+
+.pm-library-row .pm-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-tag {
+    display: inline-block;
+    background: var(--SmartThemeBlurTintColor, #333);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    border-radius: 6px;
+    padding: 0 5px;
+    margin-right: 3px;
+    font-size: 11px;
+}
+
+.pm-row-actions {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.pm-row-actions select {
+    max-width: 110px;
+}
+
+.pm-error {
+    color: #ff9c9c;
+    padding: 8px;
+}
+
+.pm-install-notice code {
+    background: rgba(255, 255, 255, 0.08);
+    padding: 1px 4px;
+    border-radius: 4px;
+}

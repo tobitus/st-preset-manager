@@ -1,0 +1,16 @@
+{
+    "compilerOptions": {
+        "target": "ES2022",
+        "module": "ES2022",
+        "moduleResolution": "bundler",
+        "lib": ["ES2022", "DOM", "DOM.Iterable"],
+        "checkJs": true,
+        "allowJs": true,
+        "noEmit": true,
+        "strict": false,
+        "noImplicitThis": true,
+        "alwaysStrict": true,
+        "skipLibCheck": true
+    },
+    "include": ["ext/**/*.js", "plugin/**/*.js", "shared/**/*.js", "test/**/*.js", "shared/*.d.ts", "node_modules/@types"]
+}
