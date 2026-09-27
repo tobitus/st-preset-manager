@@ -36,6 +36,12 @@ if [[ "$MODE" == "plugin" ]]; then
     MOUNTS+=(-v "$REPO:/home/node/app/plugins/st-preset-manager"
              -v "$REPO:/home/node/app/public/scripts/extensions/third-party/st-preset-manager")
 else
+    # acceptance 15: plugin mount omitted, but the UI extension must still
+    # load, so install it as a REGULAR user extension (dev data, gitignored).
+    # ST 1.19 does not serve third-party extensions without the mount.
+    mkdir -p "$REPO/dev/data/default-user/extensions/st-preset-manager"
+    cp -r "$REPO/index.js" "$REPO/style.css" "$REPO/manifest.json" "$REPO/ext" \
+        "$REPO/dev/data/default-user/extensions/st-preset-manager/"
     MOUNTS+=(-v "$REPO/manifest.json:/mnt/pm-manifest.json:ro")
 fi
 
