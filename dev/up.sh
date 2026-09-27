@@ -41,6 +41,7 @@ fi
 
 echo "[up] starting $NAME ($MODE)"
 podman run -d --name "$NAME" --network host --hostname st-pm-dev --restart no \
+    --security-opt label=disable \
     -e SILLYTAVERN_HEARTBEATINTERVAL=30 \
     "${MOUNTS[@]}" \
     "$IMAGE" >/dev/null

@@ -80,7 +80,9 @@ export async function applyCompiledToSlot(compiled) {
     // savePreset POSTs /api/presets/save and updateList() selects it;
     // onSettingsPresetChange runs via the select's change event. Await the
     // application promise so callers can measure settled state.
-    const openai = await /** @type {any} */ (globalThis).import('/scripts/openai.js');
+    // ST exports getPresetApplicationPromise from openai.js (openai.js:5015);
+    // a plain dynamic import of an absolute runtime URL — invisible to tsc.
+    const openai = await (0, eval)(`import('/scripts/openai.js')`);
     await openai.getPresetApplicationPromise();
     // ST sanitizes the name for the filesystem; use what it reports back.
     return ctx().chatCompletionSettings.preset_settings_openai ?? SLOT_NAME;

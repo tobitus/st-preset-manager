@@ -181,10 +181,13 @@ async function connectTab(tab) {
     const { child, port, target, pid } = await startChromium(tab);
     const cdp = new Cdp(target.webSocketDebuggerUrl);
     await cdp.connect();
-    // wait for SillyTavern to be ready
-    for (let i = 0; i < 120; i++) {
+    // wait for SillyTavern to be FULLY booted: script.js must have run
+    // getSettings() -> loadOpenAISettings, which fills the preset select.
+    // `SillyTavern.getContext()` exists long before that (module scope), so
+    // poll the select's option count instead (matches boot order in script.js).
+    for (let i = 0; i < 240; i++) {
         try {
-            const ready = await cdp.evaluate('typeof SillyTavern !== "undefined" && !!SillyTavern.getContext()?.onlineStatus && document.querySelector("#chat_completion_source") !== null');
+            const ready = await cdp.evaluate('(document.getElementById("settings_preset_openai")?.options.length ?? 0) > 1');
             if (ready) break;
         } catch { /* page still loading */ }
         await sleep(500);
@@ -209,7 +212,7 @@ const OAI_EXPR = `(() => {
 })()`;
 
 const DOM_EXPR = `(() => {
-    const rows = document.querySelectorAll('#openai_prompt_manager_list .prompt_manager_prompt');
+    const rows = document.querySelectorAll('#completion_prompt_manager_list li[data-pm-identifier]');
     return Array.from(rows).map(r => ({
         identifier: r.dataset.pmIdentifier,
         name: (r.querySelector('.prompt_manager_prompt_name') ?? {}).textContent ?? '',

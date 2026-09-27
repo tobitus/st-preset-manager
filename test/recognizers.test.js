@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { importStPreset, pickRecognizer } from '../shared/recognizers.js';
-import { flattenSeq, rebuildSeq } from '../shared/outline.js';
+import { rebuildSeq, flattenSeq } from '../shared/outline.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -85,17 +85,22 @@ test('recognizer: DEM -> 16 groups (15 pick-one + Card-Default bare run), 13 sec
         ['CORE', 'CARD & LORE', 'STORY', null, 'VISUALS', 'NARRATIVE MODE', 'NARRATIVE STYLES', 'FORMATTING', 'CONSTRAINTS', 'ADD-ONS', null, 'USER UTILITY', 'SYSTEM UTILITY']);
 });
 
-test('recognizer: Sola V1.2 -> 9 sections, 6 family groups', () => {
+test('recognizer: Sola V1.2 -> 9 sections, 6 family groups (after import normalize)', () => {
     const st = loadPreset('Sola V1.2 Flame.json');
     if (!st) return;
     const doc = importStPreset(st, 'Sola V1.2');
     assert.equal(doc.source.recognizer.kind, 'sola');
+    // v1's importer derives structure after recognition (derive_structure);
+    // the store's importPreset does the same. Consecutive headerless groups
+    // with the same shape merge exactly as in v1 (Voice 5+4=9, Tracker 4+2+6=12).
+    for (const seq of doc.sequences) seq.rows = rebuildSeq(flattenSeq(seq.rows));
     const rows = summarize(doc);
     assert.equal(rows.filter((x) => x.kind === 'section').length, 9);
     const groups = rows.filter((x) => x.kind === 'group');
     assert.equal(groups.length, 6);
     assert.deepEqual(groups.map((g) => g.name),
         ['Pacing options', 'Voice options', 'World options', 'Tracker options', 'Intimacy options', 'POV options']);
+    assert.deepEqual(groups.map((g) => g.options.length), [3, 9, 3, 12, 3, 5]);
     assert.deepEqual(groups.map((g) => g.cardinality),
         ['pick-one-or-more', 'pick-one-or-more', 'pick-one-or-more', 'pick-one-or-more', 'pick-one-or-more', 'pick-one']);
 });

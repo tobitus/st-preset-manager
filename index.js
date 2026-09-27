@@ -89,5 +89,16 @@ export async function init() {
     await start();
 }
 
+// ST loads the file as a module in the BROWSER only. Guard against the
+// plugin-loader's package.json-main fallback ever executing this file inside
+// the Node server (that must crash loudly, not touch the DOM — PLAN risk 3):
+if (typeof window === 'undefined' || typeof document === 'undefined') {
+    throw new Error(
+        'st-preset-manager/index.js is the BROWSER extension entry. The server '
+        + 'plugin must load plugin/index.js (package.json main). Do not import '
+        + 'the repo root from Node.',
+    );
+}
+
 // ST loads the file as a module; run immediately (no exported init contract).
 void init();
