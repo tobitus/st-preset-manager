@@ -46,7 +46,7 @@ async function start() {
         void refreshLibrary(w.body, bridge);
     });
 
-    win.__pmStarted = { stop: () => bridge.stop() };
+    win.__pmStarted = { bridge, stop: () => bridge.stop() };
 }
 
 /**

@@ -63,8 +63,13 @@ export class Bridge {
     /**
      * Apply a slot view into ST. Returns true when the page state changed.
      * @param {{ compiled: any, hash: string, rev: number }} slot
+     * @param {{ repost?: boolean }} [opts] repost=false when called FROM
+     *   postPanel: the panel state is already persisted server-side by that
+     *   very call, and re-entering postPanel would queue behind the
+     *   lastPanelPost chain that is waiting on this apply — a deadlock that
+     *   wedged the bridge for good (reconciling stuck true).
      */
-    async apply(slot) {
+    async apply(slot, { repost = true } = {}) {
         if (this.reconciling) return false;
         this.reconciling = true;
         try {
@@ -80,7 +85,7 @@ export class Bridge {
             // If ST normalised something (it does for a few keys), report the
             // normalisation to the plugin once via the panel path, but do not
             // loop: the plugin stores what ST reports.
-            if (JSON.stringify(before) !== JSON.stringify(after)) {
+            if (repost && JSON.stringify(before) !== JSON.stringify(after)) {
                 await this.postPanel(true);
             }
             return true;
@@ -140,7 +145,7 @@ export class Bridge {
                 this.appliedRev = res.rev;
                 this.appliedPanelHash = this.hashOf(snapshot);
                 if (this.hashOf(res.compiled) !== this.appliedPanelHash) {
-                    await this.apply({ compiled: res.compiled, hash: res.hash, rev: res.rev });
+                    await this.apply({ compiled: res.compiled, hash: res.hash, rev: res.rev }, { repost: false });
                 }
                 this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
             } catch (err) {
