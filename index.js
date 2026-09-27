@@ -100,5 +100,17 @@ if (typeof window === 'undefined' || typeof document === 'undefined') {
     );
 }
 
-// ST loads the file as a module; run immediately (no exported init contract).
-void init();
+// ST loads the file as a module. At module-evaluation time script.js has not
+// finished booting (getSettings() runs after extensions are discovered), so
+// wait for SETTINGS_LOADED before reconciling: the prompt manager exists, the
+// preset select is filled and settings saves from the panel will flow.
+// (Found by Phase 1 check 5: an init that ran early left panel write-back dead
+// because saveServiceSettings/SETTINGS_UPDATED only exist post-boot.)
+if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+    const c0 = ctx();
+    if (c0.eventSource?.eventTypes?.SETTINGS_LOADED) {
+        void c0.eventSource.once(c0.eventTypes.SETTINGS_LOADED, () => { void init(); });
+    } else {
+        void init();
+    }
+}

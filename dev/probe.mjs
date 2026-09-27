@@ -20,7 +20,7 @@
  * Tabs use separate --user-data-dir (dev/chrome-profile[-<tab>]) so cookies
  * stay isolated (F-050) and two tabs can differ (acceptance 5).
  */
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -104,16 +104,20 @@ class Cdp {
     send(method, params = undefined) {
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
-            this.pending.set(id, resolve);
-            this.pendingErrors.set(id, reject);
-            this.ws.send(JSON.stringify({ id, method, params }));
-            setTimeout(() => {
+            // the timer MUST be cleared on response: an outstanding setTimeout
+            // keeps node alive and every probe command would take 30 s to exit
+            const timer = setTimeout(() => {
                 if (this.pending.has(id)) {
                     this.pending.delete(id);
                     this.pendingErrors.delete(id);
                     reject(new Error(`CDP timeout: ${method}`));
                 }
             }, 30000);
+            const onOk = (result) => { clearTimeout(timer); resolve(result); };
+            const onErr = (error) => { clearTimeout(timer); reject(error); };
+            this.pending.set(id, onOk);
+            this.pendingErrors.set(id, onErr);
+            this.ws.send(JSON.stringify({ id, method, params }));
         });
     }
 
@@ -142,6 +146,28 @@ class Cdp {
 
 /** @param {string} tab */
 async function startChromium(tab) {
+    // a held tab (probe.mjs hold) already runs chromium on a CDP port; reuse
+    // it instead of spawning a second instance that dies with ECONNREFUSED
+    // (same user-data-dir lock). The port is found from the live process list.
+    if (fs.existsSync(pidFile(tab))) {
+        const heldPid = Number(fs.readFileSync(pidFile(tab), 'utf8').trim().split(/\s+/).pop());
+        if (heldPid && process.kill(heldPid, 0)) {
+            const out = execSync(`ss -ltnp 2>/dev/null | grep "pid=${heldPid}," | grep -oP '127\\.0\\.0\\.1:\\K[0-9]+' | head -1`).toString().trim();
+            if (out) {
+                const port = Number(out);
+                let target = null;
+                for (let i = 0; i < 20; i++) {
+                    try {
+                        const list = await httpJson(port, '/json/list');
+                        target = list.find((/** @type {any} */ t) => t.type === 'page' && t.url.startsWith(ST_URL));
+                        if (target) break;
+                    } catch { /* not accepting yet */ }
+                    await sleep(500);
+                }
+                if (target) return { child: { kill: () => {}, held: true }, port, target, pid: heldPid, held: true };
+            }
+        }
+    }
     const port = await freePort();
     const dir = profileDir(tab);
     fs.mkdirSync(dir, { recursive: true });
@@ -154,7 +180,6 @@ async function startChromium(tab) {
         '--disable-gpu',
         `${ST_URL}/`,
     ], { stdio: 'ignore', detached: false });
-    fs.writeFileSync(pidFile(tab), String(child.pid));
     // wait for the devtools endpoint
     for (let i = 0; i < 60; i++) {
         try {
@@ -232,6 +257,8 @@ async function main() {
         const ready = await cdp.evaluate('!!SillyTavern');
         if (!ready) throw new Error('SillyTavern not reachable');
         console.log(JSON.stringify({ ok: true, pid, tab, note: 'holding; kill via probe.mjs stop' }));
+        // append the BROWSER pid so later probe commands can reuse this chromium
+        fs.appendFileSync(pidFile(tab), ` ${pid}`);
         const heartbeat = setInterval(() => cdp.evaluate('1+1').catch(() => clearInterval(heartbeat)), 10000);
         process.on('SIGTERM', () => { child.kill(); process.exit(0); });
         process.on('SIGINT', () => { child.kill(); process.exit(0); });
@@ -326,7 +353,7 @@ async function main() {
         }
     } finally {
         cdp.close();
-        child.kill('SIGKILL');
+        if (!/** @type {any} */ (child).held) child.kill('SIGKILL');
     }
 }
 
