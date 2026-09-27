@@ -326,9 +326,9 @@ overrides, notes, tags all exist from the start even where the UI to edit them c
 
 Common tooling used by every phase (built in Phase 1): `dev/st-api.sh` (curl with cookie
 jar + CSRF: `dev/st-api.sh GET /slot`, `dev/st-api.sh POST /slot/load '{"presetId":…}'`),
-`dev/probe.mjs` (drives system Chromium per F-056 with `--user-data-dir=dev/chrome-profile`,
-injects a `<script type=module>` that writes `JSON.stringify(result)` to
-`document.documentElement.dataset.pm` per F-051, and prints it; subcommands `oai`
+`dev/probe.mjs` (drives system Chromium over raw CDP with `--user-data-dir=dev/chrome-profile`,
+evaluating in the page's main world via `Runtime.evaluate`, see §3 Browser recipe, and prints
+JSON results; subcommands `oai`
 (preset name, prompt_order, prompts, temperature), `dom` (prompt-manager rows + toggles as
 rendered), `click <selector>`, `set-slider <id> <value>`, `profile <name>`, `generate <text>`),
 and `dev/mock-llm.js` (`GET http://127.0.0.1:8099/last` → the last chat-completion request
@@ -564,15 +564,18 @@ container root to `jon`, so bind-mounted files stay owned by `jon` (checked on `
 
 **`dev/down.sh`** — `podman stop st-pm-dev && podman rm st-pm-dev`; kill the mock. Data stays.
 
-**Browser recipe** (`dev/probe.mjs`): omp `browser.open` with
-`app: {path: "/usr/bin/chromium-browser", args: ["--headless=new", "--window-size=1500,950",
-"--user-data-dir=<repo>/dev/chrome-profile"]}` (F-056; the profile dir isolates cookies from
-any live tab), URL `http://127.0.0.1:8002/`. `evaluate` runs in an isolated world (F-051):
-inject `<script type="module">` that reads `SillyTavern.getContext()` and writes JSON to
-`document.documentElement.dataset.pm`, then read the attribute. No request blocking is
-needed — this instance's `settings.json` is disposable — but the probe must end with the tab
-closed so acceptance 4's "no tab open" holds (check: `GET /health` reports the number of open
-`/events` clients as `clients`).
+**Browser recipe** (`dev/probe.mjs`, orchestrator correction 2026-09-27): a plain Node script
+cannot call omp's `browser` tool, so the probe drives **system Chromium over raw CDP** with
+zero deps. It spawns `/usr/bin/chromium-browser --headless=new --window-size=1500,950
+--remote-debugging-port=<free port> --user-data-dir=<repo>/dev/chrome-profile[-<tab>]
+http://127.0.0.1:8002/`, reads `/json/list`, connects with Node 22's global `WebSocket`, and
+uses `Runtime.evaluate` (`awaitPromise`, `returnByValue`). CDP's `Runtime.evaluate` runs in the
+page's **main world**, so `SillyTavern.getContext()` is directly reachable. F-051 is an omp
+`evaluate` limitation and does not apply. The separate profile dir isolates cookies from any
+live tab (F-050); two tabs (acceptance 5) use two profile dirs, or two targets in one
+instance. No request blocking is needed, because this instance's `settings.json` is disposable.
+The probe must kill Chromium on exit, so acceptance 4's "no tab open" holds (check: `GET
+/health` reports the number of open `/events` clients as `clients`).
 
 **Host tooling**: `npm install` (typescript only), `npm test` = `node --test test/`,
 `npm run typecheck` = `tsc -p jsconfig.json`. Nothing is built; the container reads the
