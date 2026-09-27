@@ -61,12 +61,12 @@ export class Bridge {
         if (this.reconciling) return false;
         this.reconciling = true;
         try {
-            const before = snapshotPanel();
+            const before = await snapshotPanel();
             await applyCompiledToSlot(slot.compiled);
             this.appliedHash = slot.hash;
             this.appliedRev = slot.rev;
             this.attached = true;
-            const after = snapshotPanel();
+            const after = await snapshotPanel();
             // If ST normalised something (it does for a few keys), report the
             // normalisation to the plugin once via the panel path, but do not
             // loop: the plugin stores what ST reports.
@@ -114,7 +114,7 @@ export class Bridge {
      * @param {boolean} [force] skip the unchanged check (used right after apply)
      */
     async postPanel(force = false) {
-        const snapshot = snapshotPanel();
+        const snapshot = await snapshotPanel();
         if (!snapshot) return;
         if (!force && this.appliedHash && this.hashOf(snapshot) === this.appliedHash) return;
         if (currentPresetName() !== SLOT_NAME) return; // detached: never write a foreign preset

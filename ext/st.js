@@ -91,12 +91,13 @@ export async function applyCompiledToSlot(compiled) {
 /**
  * Snapshot the current ST panel state (minus connection keys — the plugin
  * strips again, but avoid shipping secrets).
- * @returns {any}
+ * @returns {Promise<any>}
  */
-export function snapshotPanel() {
-    const full = ctx().getChatCompletionPreset
-        ? ctx().getChatCompletionPreset(ctx().chatCompletionSettings)
-        : null;
+export async function snapshotPanel() {
+    // openai.js's getChatCompletionPreset(settingsToUpdate view) is NOT on
+    // getContext() in ST 1.19.0 — import it from the module instead.
+    const openai = await (0, eval)(`import('/scripts/openai.js')`);
+    const full = openai.getChatCompletionPreset?.(ctx().chatCompletionSettings) ?? null;
     if (!full) return null;
     const out = { ...full };
     delete out.proxy_password;

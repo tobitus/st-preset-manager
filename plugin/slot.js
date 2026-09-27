@@ -127,6 +127,9 @@ export function routePanelDiff(doc, compiled, snapshot, model) {
             routed.push({ key, layer: 'settings' });
         }
     }
+    // defensive: a doc may already carry connection keys (e.g. routed by an
+    // earlier bug or hand-edited); validation refuses them on every save
+    for (const k of CONNECTION_KEYS) delete doc.settings[k];
     return { routed, globalTuning, warnings };
 }
 
