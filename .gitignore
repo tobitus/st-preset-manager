@@ -5,4 +5,6 @@ dev/fixtures/
 dev/chrome-profile*
 extensions/
 dev/*.pid
+dev/*.log
+dev/.cookies.jar
 dev/*.cookies
