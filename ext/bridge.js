@@ -14,6 +14,13 @@ export class Bridge {
     constructor() {
         this.appliedHash = null;
         this.appliedRev = 0;
+        /** Panel-visible projection of the last applied compiled output:
+         * getChatCompletionPreset can only echo settingsToUpdate keys, so
+         * hash(compiled) != hash(snapshot) whenever compiled carries keys
+         * beyond that set (base-injected group/sort keys). Comparing
+         * snapshots against hash(compiled) made postPanel post on every
+         * SETTINGS_UPDATED and loop apply<->panel forever (doc rev +1/s). */
+        this.appliedPanelHash = null;
         this.attached = false;
         this.es = null;
         /** @type {Set<(state: any) => void>} */
@@ -67,6 +74,9 @@ export class Bridge {
             this.appliedRev = slot.rev;
             this.attached = true;
             const after = await snapshotPanel();
+            // the projection ST actually shows — the honest baseline for the
+            // panel-unchanged gate in postPanel
+            this.appliedPanelHash = this.hashOf(after);
             // If ST normalised something (it does for a few keys), report the
             // normalisation to the plugin once via the panel path, but do not
             // loop: the plugin stores what ST reports.
@@ -116,7 +126,11 @@ export class Bridge {
     async postPanel(force = false) {
         const snapshot = await snapshotPanel();
         if (!snapshot) return;
-        if (!force && this.appliedHash && this.hashOf(snapshot) === this.appliedHash) return;
+        // unchanged gate on the panel-visible projection only: compiled may
+        // carry keys getChatCompletionPreset can never echo (see
+        // appliedPanelHash note); comparing against hash(compiled) here
+        // spammed /slot/panel on every SETTINGS_UPDATED.
+        if (!force && this.appliedPanelHash && this.hashOf(snapshot) === this.appliedPanelHash) return;
         if (currentPresetName() !== SLOT_NAME) return; // detached: never write a foreign preset
         // serialize concurrent panel events; only the last one matters
         const run = this.lastPanelPost.then(async () => {
@@ -124,7 +138,8 @@ export class Bridge {
                 const res = await api('POST', '/slot/panel', { clientId: clientId(), snapshot });
                 this.appliedHash = res.hash;
                 this.appliedRev = res.rev;
-                if (this.hashOf(res.compiled) !== this.hashOf(snapshot)) {
+                this.appliedPanelHash = this.hashOf(snapshot);
+                if (this.hashOf(res.compiled) !== this.appliedPanelHash) {
                     await this.apply({ compiled: res.compiled, hash: res.hash, rev: res.rev });
                 }
                 this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });

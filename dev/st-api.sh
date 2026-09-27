@@ -33,6 +33,6 @@ CURL_ARGS=(curl -s -b "$JAR" -X "$METHOD"
     -H "x-csrf-token: $TOKEN" -H 'Content-Type: application/json')
 case "$ARG3" in
     "")     exec "${CURL_ARGS[@]}" "$BASE/api/plugins/st-preset-manager$PATHPART" ;;
-    --raw)  exec "${CURL_ARGS[@]}" --data-binary "$2" "$BASE/api/plugins/st-preset-manager$PATHPART" ;;
+    --raw)  exec "${CURL_ARGS[@]}" --data-binary @- "$BASE/api/plugins/st-preset-manager$PATHPART" ;;
     *)      exec "${CURL_ARGS[@]}" --data-binary @"$ARG3" "$BASE/api/plugins/st-preset-manager$PATHPART" ;;
 esac

@@ -1,14 +1,16 @@
 /**
  * REST routes (PLAN §1.6). Mounted at /api/plugins/st-preset-manager.
- * Phase 1 subset: /health, /library, /presets (import + get/put/delete),
- * /slot/*, /events, /rescan, /revisions, /models GET, /profiles GET, /shelf.
- * The rest of the table lands with its phase.
+ * Phase 1 subset: /health, /library, /presets (import + get/put/delete +
+ * /ops toggle|setSettings), /slot/*, /events, /rescan, /revisions, /models
+ * GET, /profiles GET, /shelf. The rest of the table lands with its phase.
  */
 import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { compile, stripConnectionKeys } from '../shared/compile.js';
 import { routePanelDiff } from './slot.js';
+import { StoreError, rejectConnectionKeys } from './store.js';
+import { normalize } from '../shared/groups.js';
 import { resolveModel } from '../shared/models.js';
 import { canonicalHash } from '../shared/util.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
@@ -132,6 +134,41 @@ export function makeRouter() {
         res.json(req.pm.store.getRevision(req.params.id, Number(req.params.rev)));
     });
 
+    // ----------------------------------------------------------------- ops
+
+    // POST /presets/:id/ops {op, ...args} -> {doc, rev} (PLAN §1.6).
+    // Phase 1 carries the op set checks 6/8 need: `toggle` (one leaf,
+    // pick-one collapse via normalize, no override for a null Model) and
+    // `setSettings` (connection keys rejected 400 via the save guard).
+    // Structural ops (promote/demote/moveLeaf/editBlock/addBlock/... ) land
+    // with Phase 2 on this same endpoint.
+    router.post('/presets/:id/ops', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const doc = /** @type {any} */ (store.getPreset(req.params.id)); // throws 404
+            const { op } = req.body ?? {};
+            const enabled = doc.loadouts?.[doc.activeLoadoutId]?.enabled ?? null;
+            if (op === 'toggle') {
+                if (!enabled) throw new StoreError('preset has no active loadout', 409);
+                const { identifier, value } = req.body;
+                if (typeof identifier !== 'string') throw new StoreError('toggle needs identifier', 400);
+                if (!(identifier in enabled)) throw new StoreError(`unknown leaf ${identifier}`, 404);
+                enabled[identifier] = value !== undefined ? !!value : !enabled[identifier];
+                normalize(doc, enabled);
+            } else if (op === 'setSettings') {
+                rejectConnectionKeys(req.body?.settings ?? {});
+                Object.assign(doc.settings ?? (doc.settings = {}), req.body?.settings ?? {});
+            } else if (op) {
+                throw new StoreError(`op '${op}' arrives with Phase 2`, 400);
+            } else {
+                throw new StoreError('missing op', 400);
+            }
+            const saved = await store.savePreset(doc);
+            broadcast(req, 'preset', doc.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
     // ---------------------------------------------------------------- slot
 
     router.get('/slot', (req, res) => {
@@ -178,6 +215,16 @@ export function makeRouter() {
             const model = resolveModel(store.models, rawOf(store));
             const { compiled } = compile(doc, model, readBase(req));
             const { routed, globalTuning, warnings } = routePanelDiff(doc, compiled, clean, model);
+            // A panel observation that routes nothing is not a revision:
+            // saving unconditionally here turned every echo of our own apply
+            // into doc.rev+1 and fed the apply<->panel loop.
+            if (routed.length === 0 && !globalTuning) {
+                const view = slotView(req);
+                for (const w of warnings) {
+                    req.pm.hub.broadcast({ rev: store.rev, kind: 'warning', message: w });
+                }
+                return res.json({ rev: view.rev, compiled: view.compiled, hash: view.hash, routed });
+            }
             await store.savePreset(doc);
             if (globalTuning && model) {
                 await store.mutateModels((/** @type {any} */ reg) => {
