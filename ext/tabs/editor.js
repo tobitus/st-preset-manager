@@ -12,8 +12,9 @@
  * SAME key (the usual SSE-driven path) it only refreshes the parts the user
  * has not typed into since the last render/save (`dirtyContent` guards
  * name/role/content, `dirtyNotes` guards notes), so a re-render never eats
- * typing. A dirty flag is cleared on a fresh render and after a successful
- * save; a rejected save keeps it set. All user text goes through
+ * typing. A dirty flag is cleared on a fresh render, and after a save that
+ * saw no newer typing while it was in flight (revision counters); a rejected
+ * save keeps it set. All user text goes through
  * `.value` / `textContent` — never innerHTML.
  */
 import { findLeaf } from '../outline-model.js';
