@@ -203,6 +203,10 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
     On 200: set `appliedHash`/`appliedRev` from the response and `baseSnapshot = S`; if the
     response's compiled panel projection differs from `S` (e.g. a pick-one collapse), enqueue
     a reconcile — never apply inline. On 409 (stale): enqueue a reconcile, drop the snapshot.
+    The body lives in `flushPanel()`, which **reconcile ops also call first** (while the tab
+    is attached to the slot): unsent panel edits reach the server before any incoming state
+    is applied over them, so server receipt order stays most-recent-wins and a user edit made
+    mid-update is never lost.
 - **SSE handling.** `hello`, `slot` and `preset` events with `msg.rev > appliedRev` enqueue a
   (coalesced) reconcile; there are **no origin checks** — our own echo just re-reads and finds
   the hash already applied (a cheap no-op).

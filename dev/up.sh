@@ -76,11 +76,19 @@ cookie=$(curl -si http://127.0.0.1:8002/csrf-token | grep -i '^set-cookie:' | he
 echo "[up] ST is up (cookie: $cookie)"
 
 if [[ "$MODE" == "plugin" ]]; then
-    for i in $(seq 1 10); do
-        podman logs "$NAME" 2>&1 | grep -q 'st-preset-manager.*initialized' && break
+    # Gate on the LIVE plugin (GET /health), not on log greps: this box's
+    # grep (pi-uu-grep 0.2.0) intermittently misses the 'Initializing
+    # plugin from .*plugins/…' line in `podman logs | grep -q` pipelines,
+    # which failed a healthy bring-up (found by check-phase1 runs).
+    plugin_ok=0
+    for i in $(seq 1 15); do
+        if curl -sf http://127.0.0.1:8002/api/plugins/st-preset-manager/health >/dev/null 2>&1; then
+            plugin_ok=1
+            break
+        fi
         sleep 1
     done
-    if podman logs "$NAME" 2>&1 | grep -q 'Initializing plugin from .*plugins/st-preset-manager/plugin/index.js'; then
+    if [[ "$plugin_ok" == 1 ]]; then
         echo "[up] plugin initialized from plugins/st-preset-manager/plugin/index.js"
     else
         echo "[up] ERROR: plugin did not initialize" >&2
@@ -88,7 +96,7 @@ if [[ "$MODE" == "plugin" ]]; then
         exit 1
     fi
 else
-    if podman logs "$NAME" 2>&1 | grep -q 'st-preset-manager.*initialized'; then
+    if curl -sf http://127.0.0.1:8002/api/plugins/st-preset-manager/health >/dev/null 2>&1; then
         echo "[up] ERROR: plugin initialized despite --no-plugin" >&2
         exit 1
     fi

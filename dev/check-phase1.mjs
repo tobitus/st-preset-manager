@@ -803,10 +803,12 @@ async function main() {
             return slot.compiled.temperature === 0.42;
         }, 10000, 'API 0.42 lands');
         await setTemp(0.66, 'A');
+        let lastT = null;
         await until(async () => {
             const { slot, a, b } = await readAll();
+            lastT = { slot: slot.compiled.temperature, a: a.temperature, b: b.temperature };
             return slot.compiled.temperature === 0.66 && a.temperature === 0.66 && b.temperature === 0.66;
-        }, 10000, 'A-last wins');
+        }, 10000, 'A-last wins').catch((e) => { throw new Error(`${e.message} ${JSON.stringify(lastT)}`); });
         report('8 two tabs + API latest-write-wins', pass, evidence + ' (both orders)');
         // cleanup: restore FF's temperature routing state
         await api('POST', `/presets/${demId}/ops`, { op: 'setSettings', settings: { temperature: demDoc.settings?.temperature ?? 1 } });
@@ -818,12 +820,29 @@ async function main() {
         stopChrome();
         execFileSync(path.join(REPO, 'dev', 'down.sh'), { stdio: 'pipe' });
         execFileSync(path.join(REPO, 'dev', 'up.sh'), ['--no-plugin'], { stdio: 'pipe' });
+        const health404 = (await api('GET', '/health')).status === 404;
+        await startProbe(TAB_A);
+        // wait for ST's own boot-time settings save to flush FIRST: the
+        // guarantee under test is "no EXTENSION-driven writes", so the
+        // measured window must start after the browser's first boot save
+        await sleep(2500);
         const stBefore = mtimeOf(USER_DIR, 'settings.json');
         const slotFile = path.join(OPENAI_DIR, `${SLOT_NAME}.json`);
         const slotBefore = fs.existsSync(slotFile) ? fs.statSync(slotFile).mtimeMs : 0;
-        const health404 = (await api('GET', '/health')).status === 404;
-        await startProbe(TAB_A);
-        const clickRes = await evalInPage(`(() => { const m = document.getElementById('pm-menu-item'); if (!m) return {ok:false}; m.dispatchEvent(new MouseEvent('click',{bubbles:true})); return {ok:true}; })()`);
+        // the extension module initializes some beats after the preset select
+        // fills (SETTINGS_LOADED -> init -> pluginHealth round-trip); wait for
+        // the menu item instead of clicking into the void
+        let clickRes = null;
+        for (let i = 0; i < 40; i++) {
+            clickRes = await evalInPage(`(() => {
+                const m = document.getElementById('pm-menu-item');
+                if (!m) return { ok: false };
+                m.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                return { ok: true };
+            })()`);
+            if (clickRes?.ok) break;
+            await sleep(500);
+        }
         await sleep(1000);
         const notice = await evalInPage(`!!document.querySelector('.pm-install-notice')`);
         const stAfter = mtimeOf(USER_DIR, 'settings.json');
