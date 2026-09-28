@@ -265,10 +265,19 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   tab's panel base stale). On `CHATCOMPLETION_MODEL_CHANGED`/`CONNECTION_PROFILE_LOADED`
   (`events.js:36,81`) the tab reports and re-reconciles; a changed raw always re-applies.
   Panel write-back carries the raw its baseline was compiled for (`baseRaw`), so edits
-  route to the Model they were made under; while the live connection differs from
-  `baseRaw` (a switch in progress), sampler keys in the snapshot are ST's own transition
-  changes (e.g. the OpenRouter Claude clamp, `openai.js:5719`) and are not written back.
-  The v2 picker flushes genuine unsent edits before it runs `/profile` (finding 2).
+  route to the Model they were made under. While the live connection differs from
+  `baseRaw` (a switch in progress), the tab separates ST's own transition changes (e.g. the
+  OpenRouter Claude clamp, `openai.js:5719`) from user edits: it records the sampler values
+  the panel shows when `CONNECTION_PROFILE_LOADED`/`CHATCOMPLETION_MODEL_CHANGED` fires
+  (after ST applied the connection); values still equal to that record are ST's and are
+  not written back, values changed since then are the user's and route to the NEW
+  connection's layer (review 2, finding 1). An edit made while ST is still applying the
+  profile (before that event) is indistinguishable from ST's and is not kept. The v2
+  picker flushes genuine unsent edits before it runs `/profile` (finding 2).
+- **An apply never undoes another actor's preset choice.** A reconcile's apply checks,
+  just before ST selects the slot and while it waits for ST to show it, whether ST moved
+  to a foreign preset since the reconcile started (e.g. a profile that loads a preset);
+  if so it aborts and the tab stays detached (review 2, flake in check 6).
   Unresolved ids resolve to `modelId: null` so the Settings tab can offer "add as new Model".
 - No generation interceptor is used, so the `type === 'quiet'` re-entry rule does not apply.
 

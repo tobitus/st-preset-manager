@@ -18,7 +18,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { validateDoc, validateRegistry, nativeShapeErrors } from '../shared/schema.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
-import { ensureAllLeaves, completeOverride, iterLeaves } from '../shared/groups.js';
+import { ensureAllLeaves, completeOverride, iterLeaves, collectGroups } from '../shared/groups.js';
 import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
 import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
 import { resolveModel, seedFromProfiles, mergeModels } from '../shared/models.js';
@@ -202,7 +202,7 @@ export class Store {
         for (const doc of docs) {
             const entry = this.index.get(doc.id);
             if (!entry) throw new StoreError(`preset ${doc.id} not found`, 404);
-            if (sanitizeName(doc.name) !== sanitizeName(entry.name) || String(doc.folder ?? '') !== String(entry.folder ?? '')) {
+            if (sanitizeName(doc.name) !== sanitizeName(entry.name) || path.resolve(this._safeDir(doc.folder ?? '')) !== path.resolve(path.dirname(entry.path))) {
                 throw new StoreError(`_commit cannot rename or move ${doc.id}`, 400);
             }
             targets.push({ entry, doc });
@@ -654,7 +654,7 @@ export class Store {
         if (newest !== undefined && !label) {
             const snap = JSON.parse(await fsp.readFile(path.join(dir, `${newest}.json`), 'utf8'));
             const age = Date.now() - new Date(snap.at).getTime();
-            if (age < 5 * 60 * 1000) coalesce = true;
+            if (!snap.label && age < 5 * 60 * 1000) coalesce = true;
         }
         const revNo = coalesce ? newest : (newest ?? 0) + 1;
         const body = {
@@ -860,10 +860,42 @@ export class Store {
                     if (!loadout.overrides || !names.some((n) => Object.prototype.hasOwnProperty.call(loadout.overrides, n))) continue;
                     /** @type {Record<string, boolean>} */
                     const merged = {};
+                    /** @type {Record<string, Record<string, boolean>|undefined>} */
+                    const originalEnabled = {};
+                    for (const n of names) originalEnabled[n] = loadout.overrides[n]?.enabled;
                     for (let i = names.length - 1; i >= 0; i -= 1) {
-                        Object.assign(merged, loadout.overrides[names[i]]?.enabled ?? {});
+                        Object.assign(merged, originalEnabled[names[i]] ?? {});
                     }
                     for (const n of names) delete loadout.overrides[n];
+
+                    // pick-one winner: Model precedence (order of `names`)
+                    // decides, not merged's key insertion order. First Model
+                    // in `names` whose own override chose a member of the
+                    // group wins (last-in-that-map true if it chose several).
+                    for (const grp of collectGroups(doc)) {
+                        if (grp.cardinality !== 'pick-one') continue;
+                        const members = [];
+                        if (grp.header) members.push(grp.header);
+                        for (const opt of grp.options ?? []) members.push(opt);
+                        const ids = members.map((leaf) => leaf.ref ?? leaf.identifier).filter((id) => id != null);
+                        let winner;
+                        for (const n of names) {
+                            const enabled = originalEnabled[n];
+                            if (!enabled) continue;
+                            let candidate;
+                            for (const k of Object.keys(enabled)) {
+                                if (ids.includes(k) && enabled[k] === true) candidate = k;
+                            }
+                            if (candidate !== undefined) {
+                                winner = candidate;
+                                break;
+                            }
+                        }
+                        if (winner !== undefined) {
+                            for (const id of ids) merged[id] = id === winner;
+                        }
+                    }
+
                     loadout.overrides[target] = { enabled: completeOverride(doc, merged) };
                     touched = true;
                 }

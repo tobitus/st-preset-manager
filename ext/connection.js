@@ -11,6 +11,14 @@
  * raw connection id to the bridge either way, then — only when the loaded
  * profile links a preset — shows a small dialog offering to unlink it (so
  * future loads stay on the slot) or just re-attach this once.
+ *
+ * Fix A: both the CHATCOMPLETION_MODEL_CHANGED and CONNECTION_PROFILE_LOADED
+ * listeners call `bridge.noteTransition()` SYNCHRONOUSLY, before
+ * `reportModel()` — they fire right after ST already applied the new
+ * model/profile, so this captures exactly what the panel shows post-switch
+ * (including any sampler mutation ST performs itself, e.g. a temperature
+ * clamp) as the baseline flushPanel later diffs a genuine user tuning edit
+ * against.
  */
 import { ctx, connectionProfiles } from './st.js';
 
@@ -196,9 +204,10 @@ function showGuardDialog(bridge, profile, presetName) {
 
 /**
  * Wire the connection-manager hooks: force "bind preset to connection" off
- * once (presets never hold the connection in v2), report every model /
- * profile change to the bridge, and show the profile guard when a loaded
- * profile links a preset.
+ * once (presets never hold the connection in v2), record the transition
+ * (`bridge.noteTransition()`, synchronously, BEFORE reporting) and report
+ * every model / profile change to the bridge, and show the profile guard
+ * when a loaded profile links a preset.
  * @param {any} bridge
  */
 export function installConnectionHooks(bridge) {
@@ -220,9 +229,13 @@ export function installConnectionHooks(bridge) {
         void bridge.enqueueModelReport().catch((/** @type {any} */ err) => console.error('[preset-manager] model report failed', err));
     };
 
-    c.eventSource.on(c.eventTypes.CHATCOMPLETION_MODEL_CHANGED, reportModel);
+    c.eventSource.on(c.eventTypes.CHATCOMPLETION_MODEL_CHANGED, () => {
+        bridge.noteTransition();
+        reportModel();
+    });
 
     c.eventSource.on(c.eventTypes.CONNECTION_PROFILE_LOADED, (/** @type {string} */ name) => {
+        bridge.noteTransition();
         reportModel();
         const selectedProfile = ctx().extensionSettings?.connectionManager?.selectedProfile;
         const candidates = connectionProfiles().filter((p) => p.name === name);

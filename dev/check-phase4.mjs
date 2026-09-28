@@ -86,6 +86,13 @@ function st(pr = probe) {
             selectedProfile: c.extensionSettings.connectionManager.selectedProfile ?? null,
             blocker: !!document.querySelector('.pm-apply-blocker'),
             appliedSlotChangedRev: window.__pmStarted?.bridge?.appliedSlotChangedRev ?? -1,
+            settled: (() => {
+                const b = window.__pmStarted?.bridge;
+                if (!b) return false;
+                const r = { source: String(o.chat_completion_source ?? ''), model: String(c.getChatCompletionModel?.() ?? ''), profileId: c.extensionSettings.connectionManager.selectedProfile ?? null };
+                const same = !b.baseRaw || (b.baseRaw.source === r.source && b.baseRaw.model === r.model && (b.baseRaw.profileId ?? null) === r.profileId);
+                return same && !b.applying && !b._reconcileQueued && !b._modelQueued && !b._panelQueued;
+            })(),
             raw: { source: String(o.chat_completion_source ?? ''), model: String(c.getChatCompletionModel?.() ?? ''), profileId: c.extensionSettings.connectionManager.selectedProfile ?? null },
         };
     })()`);
@@ -132,7 +139,10 @@ async function converged(pr = probe) {
     // the tab has also processed the latest desired-slot change (a same-hash
     // reload looks converged before the tab saw it; an edit made then is
     // dropped by the stale-base 409 by design)
-    return !s.blocker && s.preset === SLOT_NAME && s.appliedSlotChangedRev >= (slot.slotChangedRev ?? 0)
+    // settled: the tab's baseline was built for its CURRENT connection and no
+    // bridge op is queued (a profile switch whose report/reconcile has not run
+    // yet looks converged when the compile hash is unchanged)
+    return !s.blocker && s.settled && s.preset === SLOT_NAME && s.appliedSlotChangedRev >= (slot.slotChangedRev ?? 0)
         && J(s.order) === J(slot.compiled?.prompt_order?.[0]?.order)
         && s.temperature === slot.compiled?.temperature ? { s, slot } : null;
 }
@@ -179,6 +189,37 @@ async function panelModel(/** @type {string} */ presetId, /** @type {string} */ 
 async function toolbarPick(/** @type {string} */ name) {
     await until(() => probe.eval(`[...(document.querySelector('#pm-window .pm-model-picker')?.options ?? [])].some((o) => o.value === ${J(name)})`), 8000, `toolbar lists ${name}`);
     return setValue('#pm-window .pm-model-picker', name, 'change');
+}
+
+/**
+ * Hold the next page fetch whose URL contains `urlPart` (and, if given, whose
+ * body contains `bodyPart`) until window.__chkRelease() is called;
+ * window.__chkHeld turns true while it is held. Restored by unhold().
+ */
+const holdFetch = (/** @type {string} */ urlPart, /** @type {string} */ bodyPart = '') => probe.eval(`(() => {
+    window.__chkHeld = false;
+    window.__chkOrigFetch = window.__chkOrigFetch ?? window.fetch;
+    const orig = window.__chkOrigFetch;
+    let armed = true;
+    window.fetch = async (...args) => {
+        const url = String(args[0]?.url ?? args[0]);
+        const body = String(args[1]?.body ?? '');
+        if (armed && url.includes(${J(urlPart)}) && body.includes(${J(bodyPart)})) {
+            armed = false;
+            window.__chkHeld = true;
+            await new Promise((r) => { window.__chkRelease = r; });
+        }
+        return orig(...args);
+    };
+    return true; })()`);
+const unhold = () => probe.eval(`(() => { window.__chkRelease?.(); if (window.__chkOrigFetch) window.fetch = window.__chkOrigFetch; window.__chkOrigFetch = undefined; return true; })()`);
+
+/** Close a guard dialog left open by an earlier (failed) check. */
+async function closeGuard() {
+    if (await exists('#pm-guard-dialog')) {
+        await click('#pm-guard-dialog .pm-guard-close');
+        console.error('[check] closed a guard dialog left open by an earlier check');
+    }
 }
 
 /** Precondition helper: ST on the given Model's connection (via the toolbar when it is not). */
@@ -446,6 +487,37 @@ async function main() {
         return `genuine 0.95 -> FF Kimi override; transition value 1 ignored; mock shows ${onMock.s.temperature}; back on Kimi ${back.s.temperature}`;
     });
 
+    // ------------------------------------------------------------------ 2c
+    await check('2c an ST edit made while the connection switch is still being reported lands on the NEW Model', async () => {
+        await loadViaLibrary(ids.ff);
+        await ensureModel(KIMI, HAP);
+        const mockT = (await getModels()).models[mockName].tuning.temperature;
+        const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+        must(mockT !== 1.33 && kimiOv !== 1.33, 'precondition: 1.33 is a fresh value');
+        try {
+            await holdFetch('/api/plugins/st-preset-manager/slot/model');
+            must(await pickStProfile('Mock'), 'dropdown pick failed');
+            await until(() => probe.eval('window.__chkHeld === true'), 10000, 'POST /slot/model held (profile applied, report in flight)');
+            const mid = await st();
+            must(mid.model === 'mock', `precondition: ST already on the new connection (${mid.model})`);
+            must(await setSlider('temp_openai', 1.33), 'no #temp_openai');
+            await sleep(1500); // ST's debounced save fires while the report is held
+        } finally {
+            await unhold();
+        }
+        await until(async () => (await getModels()).models[mockName].tuning.temperature === 1.33, 8000, 'the edit reached the mock global tuning');
+        const c = await until(async () => {
+            const x = await converged();
+            return x && x.s.model === 'mock' && x.s.temperature === 1.33 ? x : null;
+        }, 15000, 'ST on mock at 1.33');
+        const ff = await getDoc(ids.ff);
+        must(ff.tuningOverrides[KIMI].temperature === kimiOv, `FF Kimi override changed to ${ff.tuningOverrides[KIMI].temperature}`);
+        must(ff.tuningOverrides[mockName] === undefined, 'FF gained a mock override');
+        // restore the mock global for the later checks
+        must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: mockT } })).status === 200, 'restore mock tuning');
+        return `edit 1.33 during the held report -> mock global 1.33, ST ${c.s.temperature}; FF Kimi override kept ${kimiOv}; mock restored to ${mockT}`;
+    });
+
     // ------------------------------------------------------------------ 3
     await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
         await loadViaLibrary(ids.ff);
@@ -628,8 +700,37 @@ async function main() {
         return `Kimi slot (${c0.s.temperature}) -> "Mock links Default": ST on ${s1.preset} and stays there after Close; library load -> ${re.s.preset} at ${re.s.temperature}`;
     });
 
+    // ------------------------------------------------------------------ 6c
+    await check('6c a profile that loads a preset while a slot apply is in flight wins; the apply does not undo it', async () => {
+        await closeGuard();
+        must(await pickStProfile('Mock'), 'dropdown pick failed');
+        await until(async () => { const c = await converged(); return c && c.s.selectedProfile === prof.Mock ? c : null; }, 15000, 'precondition: settled on Mock');
+        const linked = (await liveProfiles()).find((/** @type {any} */ x) => x.name === 'Mock links Default');
+        must(linked.preset === 'Default' && !(linked.exclude ?? []).includes('preset'), 'precondition: profile links Default');
+        let s1;
+        try {
+            await holdFetch('/api/presets/save', 'working');
+            must(await pickStProfile('Kimi via hapuppy'), 'dropdown pick failed');
+            await until(() => probe.eval('window.__chkHeld === true'), 10000, 'the slot apply for Kimi is in flight (save held)');
+            must(await pickStProfile('Mock links Default'), 'dropdown pick failed');
+            await until(() => exists('#pm-guard-dialog'), 10000, 'guard dialog');
+            await until(async () => (await st()).preset === 'Default', 8000, 'the profile selected Default');
+        } finally {
+            await unhold();
+        }
+        await sleep(3000);
+        s1 = await st();
+        must(s1.preset === 'Default', `after the held apply finished ST is on "${s1.preset}" (the apply undid the profile's preset)`);
+        must(await exists('#pm-guard-dialog'), 'the guard dialog disappeared');
+        await dismissPopups();
+        await click('#pm-guard-dialog .pm-guard-close');
+        const re = await loadViaLibrary(ids.ff);
+        return `apply held while "Mock links Default" loaded Default: ST stayed on ${s1.preset}, guard open; library load re-attached (${re.s.preset})`;
+    });
+
     // ------------------------------------------------------------------ 6
     await check('6 acceptance 8: profile guard names "Mock links Default"; Unlink excludes preset and re-attaches', async () => {
+        await closeGuard();
         must(await pickStProfile('Mock'), 'dropdown pick failed');
         const mockT = (await getModels()).models[mockName].tuning.temperature;
         await until(async () => {
@@ -669,8 +770,10 @@ async function main() {
         const lid = prof['Mock links Default'];
         // test data: re-link the fixture profile (check 6 unlinked it) and give a Model only that profile
         await probe.eval(`(() => { const p = SillyTavern.getContext().extensionSettings.connectionManager.profiles.find((x) => x.id === ${J(lid)}); p.preset = 'Default'; p.exclude = []; return true; })()`);
+        await closeGuard();
         must(await pickStProfile('Mock'), 'dropdown pick failed');
         await until(async () => { const c = await converged(); return c && c.s.selectedProfile === prof.Mock ? c : null; }, 15000, 'on Mock');
+        must(!(await exists('#pm-guard-dialog')), 'precondition: no guard dialog');
         const reg = await getModels();
         reg.models['Linked Only'] = { id: 'm_linked_only', name: 'Linked Only', matches: [], profiles: [lid], preferredProfile: lid, tuning: {} };
         must((await api('PUT', '/models', reg)).status === 200, 'PUT /models');

@@ -10,7 +10,7 @@
  * The plugin mount (plugins/st-preset-manager) never loads browser code.
  */
 import { getPresetApplicationPromise, getChatCompletionPreset, promptManager } from '../../../../openai.js';
-import { CONNECTION_KEYS } from '../shared/st-keys.js';
+import { CONNECTION_KEYS, TUNING_KEYS } from '../shared/st-keys.js';
 
 /** @returns {any} SillyTavern.getContext() */
 export function ctx() {
@@ -124,9 +124,15 @@ export function listStPresets() {
 /**
  * Apply a compiled preset into ST's working slot through ST's own path.
  * @param {any} compiled full ST preset body
+ * @param {{abort?: () => boolean}} [opts] `abort`, checked right before the
+ *   state-changing `pm.updateList()` call and at the top of every poll
+ *   iteration — when it returns true, throws an Error with `aborted: true`
+ *   instead of proceeding (Fix B: another preset was selected mid-apply;
+ *   the ST-side save already landed but must not be adopted as the tab's
+ *   own state).
  * @returns {Promise<string>} canonical slot name as ST returned it
  */
-export async function applyCompiledToSlot(compiled) {
+export async function applyCompiledToSlot(compiled, opts = {}) {
     const pm = ctx().getPresetManager('openai');
     // LIVENESS BOUND (15 s): reproduce ST 1.19.0 PresetManager.savePreset()
     // (public/scripts/preset-manager.js:473-505, ~/tools/ST-dev read-only)
@@ -160,6 +166,14 @@ export async function applyCompiledToSlot(compiled) {
         throw new Error(`applyCompiledToSlot: /api/presets/save -> ${response.status}: ${detail}`);
     }
     const data = await response.json();
+    if (opts.abort?.()) {
+        // Fix B: another preset was selected while the save fetch was in
+        // flight — updateList() would select/rename the tab back onto
+        // this compile, stealing it from whatever the user/profile just
+        // chose. The ST-side save already landed (a new preset document
+        // now exists), but this tab must not adopt it as its own state.
+        throw Object.assign(new Error('applyCompiledToSlot: aborted, another preset was selected during the apply'), { aborted: true });
+    }
     // ST 1.19.0 preset-manager.js:497,504 — data.name then updateList.
     pm.updateList(data.name, compiled);
     // savePreset POSTs /api/presets/save and updateList() selects it;
@@ -187,6 +201,9 @@ export async function applyCompiledToSlot(compiled) {
     // above is only a fast path; this observation is the correctness check.
     const deadline = performance.now() + 5000;
     for (;;) {
+        if (opts.abort?.()) {
+            throw Object.assign(new Error('applyCompiledToSlot: aborted, another preset was selected during the apply'), { aborted: true });
+        }
         const shown = await snapshotPanel();
         if (shown && showsCompiled(shown, compiled)) break;
         if (performance.now() > deadline) {
@@ -266,6 +283,26 @@ export async function snapshotPanel() {
     // routed nothing.
     const out = JSON.parse(JSON.stringify(full));
     for (const key of CONNECTION_KEYS) delete out[key];
+    return out;
+}
+
+/**
+ * Deep-copied snapshot of every TUNING_KEYS value present in ST's current
+ * chat-completion preset (Fix A: used by Bridge.noteTransition() to
+ * capture what the panel shows right after a connection switch, so a
+ * later genuine user tuning edit can be told apart from ST's own
+ * transition mutation, e.g. a temperature clamp).
+ * @returns {Record<string, any>}
+ */
+export function panelTuningNow() {
+    const full = getChatCompletionPreset?.(ctx().chatCompletionSettings) ?? {};
+    /** @type {Record<string, any>} */
+    const out = {};
+    for (const key of TUNING_KEYS) {
+        if (Object.prototype.hasOwnProperty.call(full, key)) {
+            out[key] = JSON.parse(JSON.stringify(full[key]));
+        }
+    }
     return out;
 }
 

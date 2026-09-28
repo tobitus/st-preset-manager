@@ -219,3 +219,55 @@ test('F6 replaceModels: a failed write leaves the published registry and rev unc
     assert.deepEqual(store.models, before);
     assert.equal(store.rev, rev0);
 });
+
+// ------------------------------------------------------------ round 2
+
+test('R2-2 a migration revision survives the next ordinary save (labelled revisions never coalesce)', async () => {
+    const { store, id } = await fixture();
+    const before = store.getPreset(id);
+    await store.mergeModelsTx(['A', 'B'], 'AB');
+    const doc = store.getPreset(id);
+    doc.notes = 'an ordinary edit right after the merge';
+    await store.savePreset(doc);
+    await store.savePreset({ ...store.getPreset(id), notes: 'and another' });
+    const revs = store.listRevisions(id);
+    const r = revs.find((x) => x.label === 'Model merge: A + B -> AB');
+    assert.ok(r, `labels ${JSON.stringify(revs.map((x) => x.label))}`);
+    const snap = store.getRevision(id, r.rev);
+    assert.deepEqual((snap.doc ?? snap).tuningOverrides, before.tuningOverrides, 'the pre-merge values are still recoverable');
+    const unlabelled = revs.filter((x) => x.rev > r.rev && x.label === null);
+    assert.equal(unlabelled.length, 1, 'the two ordinary saves coalesce with each other, not into the labelled one');
+});
+
+test('R2-3 merge precedence decides the pick-one winner, not key insertion order', async () => {
+    const { store, id, lid } = await fixture();
+    const doc = store.getPreset(id);
+    // A (first listed) chose a; B turned a off and chose b (same pick-one group hdr/a/b)
+    doc.loadouts[lid].overrides = { A: { enabled: { a: true } }, B: { enabled: { a: false, b: true } } };
+    await store.savePreset(doc);
+    await store.mergeModelsTx(['A', 'B'], 'AB');
+    const ov = store.getPreset(id).loadouts[lid].overrides.AB.enabled;
+    assert.equal(ov.a, true, `A's choice must win: ${JSON.stringify(ov)}`);
+    assert.equal(ov.b, false);
+    // and the other way round: B listed first wins with b
+    const { store: s2, id: id2, lid: lid2 } = await fixture();
+    const d2 = s2.getPreset(id2);
+    d2.loadouts[lid2].overrides = { A: { enabled: { a: true } }, B: { enabled: { a: false, b: true } } };
+    await s2.savePreset(d2);
+    await s2.mergeModelsTx(['B', 'A'], 'BA');
+    const ov2 = s2.getPreset(id2).loadouts[lid2].overrides.BA.enabled;
+    assert.equal(ov2.b, true, `B's choice must win: ${JSON.stringify(ov2)}`);
+    assert.equal(ov2.a, false);
+});
+
+test('R2-4 rename migrates a preset whose folder was given with a trailing slash', async () => {
+    const store = await tmpStore();
+    await store.replaceModels(reg2());
+    const imp = await store.importPreset({ st: sampleSt(), name: 'InSub', folder: 'sub/' });
+    const doc = store.getPreset(imp.id);
+    doc.tuningOverrides = { A: { temperature: 0.9 } };
+    await store.savePreset(doc);
+    const res = await store.renameModel('A', 'Alpha');
+    assert.deepEqual(res.migrated, [imp.id]);
+    assert.deepEqual(store.getPreset(imp.id).tuningOverrides, { Alpha: { temperature: 0.9 } });
+});

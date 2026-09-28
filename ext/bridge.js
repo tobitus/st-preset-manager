@@ -63,8 +63,31 @@
  * samplers in ST as a side effect, and that mutation is not a genuine user
  * tuning edit. A controlled switch (bridge.edit) flushes real edits BEFORE
  * the switch, so this never drops one.
+ *
+ * GENUINE-EDIT-DURING-TRANSITION (Fix A): the restore above would also
+ * discard a real tuning edit the user makes AFTER a connection switch but
+ * BEFORE the new baseline lands (e.g. while POST /slot/model is in
+ * flight). connection.js calls `noteTransition()` synchronously right
+ * after ST applies a model/profile switch, capturing what the panel shows
+ * then (`_transition`, including any transition mutation ST itself
+ * performs, e.g. a temperature clamp — that is NOT a user edit either).
+ * flushPanel diffs a later snapshot against `_transition.tuning`: a key
+ * that changed since is a genuine edit and is POSTed on top of the old
+ * baseline restore, addressed at the NEW connection's Model (raw =
+ * currentRaw()) so it survives the reconcile that follows, instead of
+ * being silently restored away.
+ *
+ * DETACH-RACE (Fix B): an in-flight apply (POST /api/presets/save) must
+ * never stomp a preset another actor selected while it was running (e.g.
+ * a connection profile that loads a foreign preset mid-apply). `_detachGen`
+ * counts every PRESET_CHANGED-to-a-foreign-preset; `_reconcileInner`
+ * captures it plus the preset name at entry and threads an `abort()`
+ * predicate through `apply()` into `applyCompiledToSlot`, which checks it
+ * right before the state-changing `pm.updateList()` call and at the top
+ * of every poll iteration. An abort throws before any bridge state is
+ * mutated, so the tab stays correctly detached on the foreign preset.
  */
-import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, currentRaw, slotPath, SLOT_NAME, PLUGIN_BASE } from './st.js';
+import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, currentRaw, slotPath, panelTuningNow, SLOT_NAME, PLUGIN_BASE } from './st.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
 
 /**
@@ -106,11 +129,26 @@ export class Bridge {
          * compile/baseline was fetched for — used to detect a connection
          * change under an unchanged compiled hash. */
         this.baseRaw = null;
+        /** Panel tuning captured by noteTransition() right after ST
+         * applied a new connection (a model switch or profile load), while
+         * `baseRaw` still names the OLD connection — `{raw, tuning}`.
+         * flushPanel diffs a later snapshot against `tuning` to tell a
+         * genuine user tuning edit made during the transition apart from
+         * ST's own transition mutation. Null when no transition is
+         * pending, cleared on every successful apply. */
+        this._transition = null;
         this.attached = false;
         /** ST is currently showing a foreign (non-v2) preset. While true, a
          * reconcile not forced by a genuine library load or reattach()
          * never re-applies the working slot over it. */
         this.detached = false;
+        /** Bumped every time the PRESET_CHANGED watcher moves ST onto a
+         * foreign (non-slot) preset. `_reconcileInner` captures this at
+         * entry and threads an abort() through apply() so an in-flight
+         * apply notices a detach that happened mid-flight and stops before
+         * it steals the tab back from whatever the user/profile just
+         * selected. */
+        this._detachGen = 0;
         this.es = null;
         /** @type {Set<(state: any) => void>} */
         this.listeners = new Set();
@@ -207,6 +245,28 @@ export class Bridge {
     }
 
     /**
+     * Record what the panel shows right after ST finished applying a new
+     * connection (a model or profile switch). Called by connection.js
+     * SYNCHRONOUSLY, right after the switch, BEFORE reportModel() —
+     * capturing the state ST left behind (including any transition
+     * mutation ST performs itself, e.g. a temperature clamp — that is not
+     * a genuine user edit either). No-op (clears any stale transition)
+     * when the panel does not actually differ from `baseRaw`'s baseline
+     * (nothing to protect). flushPanel later diffs a snapshot against
+     * `_transition.tuning` to tell a genuine user tuning edit made during
+     * the switch apart from ST's own mutation.
+     * @returns {void}
+     */
+    noteTransition() {
+        const raw = currentRaw();
+        if (this.baseRaw && this.hashOf(raw) !== this.hashOf(this.baseRaw)) {
+            this._transition = { raw, tuning: panelTuningNow() };
+        } else {
+            this._transition = null;
+        }
+    }
+
+    /**
      * Report the tab's current raw connection id to the plugin so it can
      * resolve the Model and desired loadout for that connection. No-op
      * when the raw id is unchanged since the last report. Flushes unsent
@@ -297,6 +357,15 @@ export class Bridge {
     }
 
     async _reconcileInner(force) {
+        // Fix B: an in-flight apply must never stomp a preset another
+        // actor (user click, connection profile) selected while it was
+        // running. Capture the detach generation and preset name NOW, at
+        // entry — a change to either by the time apply() gets to the
+        // point of no return means this op's own idea of "what to apply
+        // over" is stale.
+        const gen = this._detachGen;
+        const startName = currentPresetName();
+        const abort = () => this._detachGen !== gen || (currentPresetName() !== startName && currentPresetName() !== SLOT_NAME);
         if (currentPresetName() === SLOT_NAME && this.baseSnapshot) {
             // A failed flush means unsent user edits would be overwritten by
             // the apply below — abort this op entirely (Finding: "Abort
@@ -327,10 +396,11 @@ export class Bridge {
                 // A changed connection always re-applies even at an
                 // unchanged compiled hash: ST may have mutated samplers
                 // itself while switching.
-                await this.apply(slot);
+                await this.apply(slot, abort);
                 this.appliedSlotChangedRev = slotChangedRev;
                 this.baseRaw = raw;
                 this.detached = false;
+                this._transition = null;
             } else {
                 // Same compiled hash, same connection. Three sub-cases
                 // (Finding: "Advance the panel base after a same-hash slot
@@ -379,13 +449,22 @@ export class Bridge {
      * it in `finally`. Edits made before the op are sent by its flush; none
      * can land after it, so no timing heuristic decides what counts as a
      * user edit.
+     *
+     * Fix B: `abort` is threaded through into applyCompiledToSlot, which
+     * checks it right before the state-changing pm.updateList() call and
+     * at the top of every poll iteration. When it fires, applyCompiledToSlot
+     * throws BEFORE this method's success path runs, so appliedHash /
+     * appliedRev / attached / baseSnapshot are left untouched — the caller
+     * (`_reconcileInner`) also skips its own baseRaw/detached update
+     * because the `await this.apply(...)` above it throws too.
      * @param {{ compiled: any, hash: string, rev: number }} slot
+     * @param {() => boolean} [abort] see _reconcileInner
      */
-    async apply(slot) {
+    async apply(slot, abort) {
         if (this.applying) throw new Error('bridge: overlapping apply (queue invariant violated)');
         this.applying = true;
         try {
-            await applyCompiledToSlot(slot.compiled);
+            await applyCompiledToSlot(slot.compiled, { abort });
             this.appliedHash = slot.hash;
             this.appliedRev = Math.max(this.appliedRev, slot.rev);
             this.attached = true;
@@ -501,6 +580,17 @@ export class Bridge {
      * FIRST, before the switch runs). Then, if the (possibly restored)
      * snapshot differs from the baseline, POST the delta (base + snapshot)
      * and let the plugin route only what the user changed.
+     *
+     * Fix A: the restore above would also discard a GENUINE tuning edit
+     * made after the switch but before the new baseline lands. Diff the
+     * fresh (unrestored) snapshot against `_transition.tuning` (what the
+     * panel showed right after the switch, captured by noteTransition())
+     * — a TUNING_KEYS value that changed since is a real user edit, not
+     * ST's own transition mutation. Any such edits are POSTed in a SECOND
+     * request, on top of the restore, addressed at the NEW connection
+     * (raw = currentRaw()) so they land on the new Model instead of being
+     * silently restored away, and are then folded into `_transition.tuning`
+     * so they are never resent.
      * @param {any} [given] a snapshot taken earlier; skips the fresh
      *   snapshot when provided
      * @returns {Promise<any>} the snapshot sent, or null if nothing was sent
@@ -517,8 +607,22 @@ export class Bridge {
         if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
         let snapshot = given ?? await snapshotPanel();
         if (!snapshot) return null;
+        /** @type {Record<string, any>|null} genuine tuning edits made since the transition (null: no transition to diff against) */
+        let genuine = null;
+        /** @type {Record<string, any>|null} this._transition.tuning, only when it still names the CURRENT raw */
+        let transitionTuning = null;
         if (this.baseRaw && this.hashOf(currentRaw()) !== this.hashOf(this.baseRaw)) {
-            const restored = { ...snapshot };
+            const S = snapshot;
+            transitionTuning = this._transition && this.hashOf(this._transition.raw) === this.hashOf(currentRaw()) ? this._transition.tuning : null;
+            genuine = {};
+            if (transitionTuning) {
+                for (const key of TUNING_KEYS) {
+                    if (Object.prototype.hasOwnProperty.call(S, key) && this.hashOf(S[key]) !== this.hashOf(transitionTuning[key])) {
+                        genuine[key] = S[key];
+                    }
+                }
+            }
+            const restored = { ...S };
             for (const key of TUNING_KEYS) {
                 if (this.baseSnapshot && Object.prototype.hasOwnProperty.call(this.baseSnapshot, key)) {
                     restored[key] = this.baseSnapshot[key];
@@ -529,47 +633,87 @@ export class Bridge {
             snapshot = restored;
         }
         const sameBase = this.baseSnapshot && this.hashOf(snapshot) === this.hashOf(this.baseSnapshot);
-        if (sameBase) return null;
-        let res;
-        try {
-            res = await api('POST', '/slot/panel', {
-                clientId: clientId(),
-                baseRev: this.appliedRev,
-                base: this.baseSnapshot,
-                snapshot,
-                raw: this.baseRaw ?? currentRaw(),
-            });
-        } catch (err) {
-            if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
-            // 409 — stale base: the desired preset/loadout changed after this
-            // baseline was taken (the server's slotChangedRev guard). The
-            // user's stale edit is dropped BY DESIGN: replaying the old
-            // preset's delta onto the new document would pour its state into
-            // a preset the tab is no longer showing. Drop the stale baseline
-            // and force a re-apply, then RETURN (never rethrow):
-            // - baseSnapshot = null → a reconcile op's flush precondition
-            //   (`... && this.baseSnapshot`) is false, so it proceeds to
-            //   GET /slot and applies the new desired state (apply() rebuilds
-            //   the baseline from the applied projection);
-            // - appliedHash = null → even a same-hash view re-applies and
-            //   re-baselines instead of advancing a dead base in place;
-            // - _flushStale = true → panelOp's finally enqueues the reconcile
-            //   that converges the tab.
-            this.baseSnapshot = null;
-            this.appliedHash = null;
-            this._flushStale = true;
-            return null;
+        if (!sameBase) {
+            let res;
+            try {
+                res = await api('POST', '/slot/panel', {
+                    clientId: clientId(),
+                    baseRev: this.appliedRev,
+                    base: this.baseSnapshot,
+                    snapshot,
+                    raw: this.baseRaw ?? currentRaw(),
+                });
+            } catch (err) {
+                if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
+                // 409 — stale base: the desired preset/loadout changed after this
+                // baseline was taken (the server's slotChangedRev guard). The
+                // user's stale edit is dropped BY DESIGN: replaying the old
+                // preset's delta onto the new document would pour its state into
+                // a preset the tab is no longer showing. Drop the stale baseline
+                // and force a re-apply, then RETURN (never rethrow):
+                // - baseSnapshot = null → a reconcile op's flush precondition
+                //   (`... && this.baseSnapshot`) is false, so it proceeds to
+                //   GET /slot and applies the new desired state (apply() rebuilds
+                //   the baseline from the applied projection);
+                // - appliedHash = null → even a same-hash view re-applies and
+                //   re-baselines instead of advancing a dead base in place;
+                // - _flushStale = true → panelOp's finally enqueues the reconcile
+                //   that converges the tab.
+                this.baseSnapshot = null;
+                this.appliedHash = null;
+                this._flushStale = true;
+                return null;
+            }
+            this.appliedHash = res.hash;
+            this.appliedRev = Math.max(this.appliedRev, res.rev);
+            this.baseSnapshot = snapshot;
+            // pick-one collapse and friends: the stored projection differs from
+            // what the panel shows — let the caller converge via the queue
+            // (panelOp enqueues the reconcile; never apply inline).
+            if (this.hashOf(res.compiled) !== this.hashOf(snapshot)) {
+                this.appliedHash = null;
+            }
+            this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
         }
-        this.appliedHash = res.hash;
-        this.appliedRev = Math.max(this.appliedRev, res.rev);
-        this.baseSnapshot = snapshot;
-        // pick-one collapse and friends: the stored projection differs from
-        // what the panel shows — let the caller converge via the queue
-        // (panelOp enqueues the reconcile; never apply inline).
-        if (this.hashOf(res.compiled) !== this.hashOf(snapshot)) {
+        if (genuine && Object.keys(genuine).length > 0) {
+            // A real tuning edit made during the transition: send it on top
+            // of the (possibly just-posted) old-connection restore,
+            // addressed at the NEW connection so it survives the reconcile
+            // this forces (appliedHash = null below) instead of being
+            // overwritten by it.
+            const B2 = { ...snapshot };
+            for (const key of TUNING_KEYS) {
+                if (Object.prototype.hasOwnProperty.call(transitionTuning, key)) {
+                    B2[key] = transitionTuning[key];
+                } else {
+                    delete B2[key];
+                }
+            }
+            const S2 = { ...B2, ...genuine };
+            let res2;
+            try {
+                res2 = await api('POST', '/slot/panel', {
+                    clientId: clientId(),
+                    baseRev: this.appliedRev,
+                    base: B2,
+                    snapshot: S2,
+                    raw: currentRaw(),
+                });
+            } catch (err) {
+                if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
+                this.baseSnapshot = null;
+                this.appliedHash = null;
+                this._flushStale = true;
+                return null;
+            }
+            this.appliedRev = Math.max(this.appliedRev, res2.rev);
+            // forces the reconcile that follows to re-apply the new Model's
+            // compile instead of comparing a hash taken against the old one
             this.appliedHash = null;
+            // never resend: fold the sent edits into the transition tuning
+            for (const key of Object.keys(genuine)) this._transition.tuning[key] = genuine[key];
+            this.emit({ slot: { rev: res2.rev, desired: null, compiled: res2.compiled, hash: res2.hash }, attached: true });
         }
-        this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
         return snapshot;
     }
 
@@ -600,6 +744,7 @@ export class Bridge {
             if (name && name !== SLOT_NAME) {
                 this.attached = false;
                 this.detached = true;
+                this._detachGen++;
                 this.emit({ attached: false });
             } else if (name === SLOT_NAME) {
                 this.attached = true;
