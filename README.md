@@ -88,3 +88,38 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   container was started before the label mattered. Verified 2026-09-27.
 - The mock LLM answers `/v1/chat/completions` (SSE when `stream:true`) and
   keeps the last request body at `GET :8099/last`.
+
+## Phase 4: Models, tunings, model switching, profile guard and tidy
+
+- **Models** (`models.json`, keyed by Model name): Settings tab → *Seed from
+  profiles* adds one Model per distinct `(source, model)` in the tab's
+  connection profiles; *Merge suggestions* group ids with the same tail
+  (lower-case, provider prefix dropped). Nothing merges until you tick the
+  ids, name the Model and click *Merge*. Each Model lists its ids, its
+  profiles and the profile it switches through (*Switch via*).
+- **Toolbar Model picker** runs `/profile <Switch via profile>`; the preset
+  and loadout never change. The tab reports every model/profile change
+  (`POST /slot/model {raw}`); the plugin resolves the Model and recompiles.
+- **Tuning panel** (Presets tab): per Model, global tuning or, with
+  *Override for this preset*, the preset's `tuningOverrides[Model]`. ST panel
+  sampler edits go to the override when one exists, else the global.
+- **Loadout override editor** (Presets tab): per loadout × Model, each block
+  inherit/on/off. ST panel toggles go to the override only for blocks it
+  lists; a pick-one option switched on turns its siblings off in the override.
+- **Profile guard**: a profile that still loads a preset shows a dialog naming
+  it; *Unlink* adds `preset` to its `exclude` (in the tab, ST saves it) and
+  re-applies the slot. `bind_preset_to_connection` is forced off once at
+  start with a toast.
+- **Tidy** (Settings tab): tick the profiles to keep, *Keep selected, delete
+  the rest* writes `preset-manager/backups/profiles-<iso>.json` first, then
+  deletes in the tab. *Backup profiles* writes the same file on its own.
+- REST added: `PUT /models`, `PUT /models/:modelId/tuning`, `POST
+  /models/seed {profiles?}`, `POST /profiles/backup {profiles?}`; `POST
+  /slot/model` now takes `{raw}` and `GET /slot`'s `desired.modelId` is the
+  resolved Model.
+- Known gaps: renaming or merging a Model does not re-key documents'
+  `tuningOverrides` / loadout overrides stored under the old name. The slot's
+  raw connection id is global, so two tabs on different connections
+  alternate it (last report wins). `POST /slot/model` needs `raw`; setting a
+  Model by name alone (for MCP) is not supported yet.
+- Check: `node dev/check-phase4.mjs` (resets dev data; tidy is destructive).

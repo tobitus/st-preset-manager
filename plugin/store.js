@@ -17,6 +17,8 @@ import { canonicalHash, newId, ulid } from '../shared/util.js';
 import { ensureAllLeaves } from '../shared/groups.js';
 import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
 import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
+import { resolveModel, seedFromProfiles } from '../shared/models.js';
+import { TUNING_KEYS } from '../shared/st-keys.js';
 
 export class StoreError extends Error {
     /**
@@ -547,6 +549,76 @@ export class Store {
         }
     }
 
+    /**
+     * Current resolved Model name for the slot's raw connection id, or
+     * null. `this.state.raw` is absent on a fresh store.
+     */
+    _resolvedModelName() {
+        const raw = this.state.raw ?? { source: null, model: null, profileId: null };
+        return resolveModel(this.models, raw)?.name ?? null;
+    }
+
+    /**
+     * Seed the registry from ST connection profiles: one Model per distinct
+     * raw id not already resolved by the registry. A re-seed of the same
+     * profiles adds nothing and performs no write (no rev bump).
+     * @param {any[]} profiles
+     */
+    async seedModels(profiles) {
+        return this.enqueue(async () => {
+            if (!Array.isArray(profiles)) throw new StoreError('profiles must be an array', 400);
+            const { models: fresh, mergeSuggestions } = seedFromProfiles(profiles, this.models);
+            if (Object.keys(fresh).length === 0) {
+                return { added: [], models: this.models.models, mergeSuggestions };
+            }
+            await this._mutateModelsNow((reg) => { Object.assign(reg.models, fresh); });
+            return { added: Object.keys(fresh), models: this.models.models, mergeSuggestions };
+        });
+    }
+
+    /**
+     * Replace the whole registry (validated). If this changes which Model
+     * the slot's raw connection id resolves to, marks the slot changed and
+     * persists the new resolution onto state.modelId — same transaction
+     * shape as /slot/load: the marker lands BEFORE the state write.
+     * @param {any} reg
+     */
+    async replaceModels(reg) {
+        return this.enqueue(async () => {
+            const before = this._resolvedModelName();
+            const saved = await this._mutateModelsNow((r) => {
+                r.version = reg.version;
+                r.models = structuredClone(reg.models);
+                return structuredClone(r);
+            });
+            const after = this._resolvedModelName();
+            if (before !== after) {
+                this._markSlotChanged();
+                await this._mutateStateNow((st) => { st.modelId = after; });
+            }
+            return saved;
+        });
+    }
+
+    /**
+     * Replace one Model's global tuning wholesale.
+     * @param {string} name
+     * @param {any} tuning
+     */
+    async setModelTuning(name, tuning) {
+        return this.enqueue(async () => {
+            if (!this.models.models[name]) throw new StoreError(`Model ${name} not found`, 404);
+            if (typeof tuning !== 'object' || tuning === null || Array.isArray(tuning)) {
+                throw new StoreError('tuning must be an object', 400);
+            }
+            for (const k of Object.keys(tuning)) {
+                if (!TUNING_KEYS.includes(k)) throw new StoreError(`"${k}" is not a tuning key`, 400);
+            }
+            await this._mutateModelsNow((reg) => { reg.models[name].tuning = { ...tuning }; });
+            return structuredClone(this.models.models[name]);
+        });
+    }
+
     // ----------------------------------------------------------------- state
 
     /** @param {(state: any) => any} fn */
@@ -569,6 +641,65 @@ export class Store {
             await this._bumpRev();
             return structuredClone(st);
         }
+    }
+
+    /**
+     * Resolve `raw` and set it as the slot's connection id. A canonically
+     * identical raw is a no-op (no write, no rev bump). Marks the slot
+     * changed only when the resolved Model actually differs — the marker
+     * lands BEFORE the state write, same transaction shape as /slot/load.
+     * @param {{ source?: string|null, model?: string|null, profileId?: string|null }} raw
+     */
+    async setSlotModel(raw) {
+        return this.enqueue(async () => {
+            if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+                throw new StoreError('raw must be an object', 400);
+            }
+            const normalized = { source: raw.source ?? null, model: raw.model ?? null, profileId: raw.profileId ?? null };
+            const current = this.state.raw ?? { source: null, model: null, profileId: null };
+            if (JSON.stringify(current) === JSON.stringify(normalized)) {
+                return { changed: false, modelChanged: false, modelId: resolveModel(this.models, normalized)?.name ?? null };
+            }
+            const prev = resolveModel(this.models, current)?.name ?? null;
+            const next = resolveModel(this.models, normalized)?.name ?? null;
+            if (prev !== next) this._markSlotChanged();
+            await this._mutateStateNow((st) => {
+                st.raw = normalized;
+                st.modelId = next;
+            });
+            return { changed: true, modelChanged: prev !== next, modelId: next };
+        });
+    }
+
+    // -------------------------------------------------------------- profiles
+
+    /**
+     * Snapshot `profiles` verbatim into `<root>/backups/profiles-<iso>.json`
+     * (never overwrites an existing file — appends `-2`, `-3`, … instead).
+     * @param {any[]} profiles
+     */
+    async backupProfiles(profiles) {
+        return this.enqueue(async () => {
+            if (!Array.isArray(profiles)) throw new StoreError('profiles must be an array', 400);
+            const dir = path.join(this.root, 'backups');
+            await fsp.mkdir(dir, { recursive: true });
+            const at = new Date().toISOString();
+            const stem = at.replace(/[:.]/g, '-');
+            let file = path.join(dir, `profiles-${stem}.json`);
+            let n = 2;
+            while (fs.existsSync(file)) {
+                file = path.join(dir, `profiles-${stem}-${n}.json`);
+                n += 1;
+            }
+            const body = {
+                format: 'st-preset-manager/profiles-backup',
+                version: 1,
+                at,
+                profiles,
+            };
+            await atomicWrite(file, JSON.stringify(body, null, 2));
+            return { file, count: profiles.length };
+        });
     }
 
     // ----------------------------------------------------------------- shelf

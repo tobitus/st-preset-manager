@@ -579,10 +579,14 @@ async function main() {
 
     // --------------------------------------------------------------- leak
     // (after the screenshots: it closes and reopens the window) Reopening
-    // or closing the window releases the old Presets tab's bridge listener
-    // (review finding 4).
+    // or closing the window releases every bridge listener the old window
+    // owned (review finding 4; since Phase 4 the window owns several: the
+    // Presets tab, each open preset's Model panel, the Settings tab and the
+    // toolbar picker). Nothing outside the window subscribes, so a closed
+    // window leaves 0, and a replaced window holds exactly what a fresh one
+    // holds (a fresh window has no preset open, hence <= the first count).
     if (wanted('leak')) {
-        const name = 'leak: close/reopen releases the Presets listener';
+        const name = 'leak: close/reopen releases the window\'s listeners';
         try {
             const size = () => probe.eval('window.__pmStarted.bridge.listeners.size');
             const n0 = await size();
@@ -592,7 +596,7 @@ async function main() {
             const nClosed = await size();
             await click('#pm-menu-item');
             const nReopen = await size();
-            report(name, nReplace === n0 && nClosed === n0 - 1 && nReopen === n0,
+            report(name, n0 > 0 && nReplace > 0 && nReplace <= n0 && nClosed === 0 && nReopen === nReplace,
                 `listeners open=${n0} after 3 replacements=${nReplace} closed=${nClosed} reopened=${nReopen}`);
         } catch (err) {
             report(name, false, /** @type {Error} */ (err).message);

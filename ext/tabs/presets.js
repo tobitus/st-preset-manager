@@ -11,6 +11,7 @@
 import { api } from '../st.js';
 import { createOutline } from './outline.js';
 import { createEditor } from './editor.js';
+import { createModelPanel } from './model-panel.js';
 
 /**
  * @typedef {object} PresetView
@@ -25,6 +26,7 @@ import { createEditor } from './editor.js';
  * @property {HTMLButtonElement[]} rankButtons promote/demote/move up/down
  * @property {HTMLTextAreaElement} notes preset notes textarea
  * @property {{ render(doc: any, selectedKey: string|null): void, destroy(): void }} outline
+ * @property {{ render(): void, destroy(): void }} modelPanel
  * @property {{ show(doc: any, key: string|null): void }} editor
  * @property {boolean} notesDirty user typed into the notes textarea
  * @property {number} notesRev bumped each time the user types into notes
@@ -150,6 +152,7 @@ export function createPresetsTab(pane, bridge) {
         if (!view) return;
         if (view.deleteTimer) clearTimeout(view.deleteTimer);
         view.outline.destroy();
+        view.modelPanel.destroy();
         view.root.remove();
         view = null;
     }
@@ -187,6 +190,7 @@ export function createPresetsTab(pane, bridge) {
                         <textarea class="pm-preset-notes text_pole" rows="4"></textarea>
                         <button class="pm-preset-notes-save menu_button" title="Save the preset notes to the library">Save preset notes</button>
                     </div>
+                    <div class="pm-model-panel-host"></div>
                 </div>
             </div>`;
         const q = (/** @type {string} */ sel) => /** @type {any} */ (root.querySelector(sel));
@@ -219,7 +223,16 @@ export function createPresetsTab(pane, bridge) {
             deleteArmed: false,
             deleteTimer: null,
             selectNextLid: null,
+            modelPanel: /** @type {any} */ (null),
         };
+        nextView.modelPanel = createModelPanel(q('.pm-model-panel-host'), {
+            bridge,
+            presetId: id,
+            getDoc: () => docs.get(id),
+            setDoc: (/** @type {any} */ d) => setDoc(id, d),
+            getLoadoutId: () => nextView.picker.value,
+        });
+        nextView.picker.addEventListener('change', () => nextView.modelPanel.render());
         q('.pm-loadout-new').addEventListener('click', () => void newLoadout(nextView));
         q('.pm-loadout-rename').addEventListener('click', () => void renameLoadout(nextView));
         q('.pm-loadout-delete').addEventListener('click', () => void deleteLoadout(nextView));
@@ -304,6 +317,7 @@ export function createPresetsTab(pane, bridge) {
         if (!view.notesDirty) view.notes.value = doc.notes ?? '';
         view.outline.render(doc, key);
         view.editor.show(doc, key);
+        view.modelPanel.render();
     }
 
     async function newLoadout(/** @type {PresetView} */ v) {

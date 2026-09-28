@@ -1,8 +1,9 @@
 /**
  * REST routes (PLAN §1.6). Mounted at /api/plugins/st-preset-manager.
  * Phase 1 subset: /health, /library, /presets (import + get/put/delete +
- * /ops toggle|setSettings), /presets/:id/export, /slot/*, /events, /rescan,
- * /revisions, /models GET, /profiles GET, /shelf. The rest of the table
+ * /ops toggle|setSettings), /presets/:id/export, /slot/* (load, model,
+ * panel), /events, /rescan, /revisions, /models (GET/PUT + :modelId/tuning
+ * + seed), /profiles GET, /profiles/backup, /shelf. The rest of the table
  * lands with its phase.
  */
 import { Router } from 'express';
@@ -12,7 +13,7 @@ import { compile, stripConnectionKeys, exportSt } from '../shared/compile.js';
 import { routePanelDiff, panelDelta } from './slot.js';
 import { StoreError } from './store.js';
 import { applyDocOp } from '../shared/docops.js';
-import { iterLeaves } from '../shared/groups.js';
+import { iterLeaves, completeOverride } from '../shared/groups.js';
 import { resolveModel } from '../shared/models.js';
 import { canonicalHash, ulid, newId } from '../shared/util.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
@@ -40,6 +41,18 @@ function rawOf(store) {
 }
 
 /**
+ * ST connection profiles from the user's settings.json, unfiltered and
+ * verbatim (seed/backup need every profile, not just `mode: 'cc'`).
+ * @param {any} req
+ * @returns {any[]}
+ */
+function readSettingsProfiles(req) {
+    const settingsFile = path.join(req.user.directories.root, 'settings.json');
+    const settings = JSON.parse(fs.readFileSync(settingsFile, 'utf8'));
+    return settings?.extension_settings?.connectionManager?.profiles ?? [];
+}
+
+/**
  * Current slot view: {rev, slotChangedRev, desired, compiled, hash}. The
  * compile input is the DESIRED loadout (state.loadoutId), not the
  * document's activeLoadoutId: /slot/load stores the requested loadout in
@@ -55,12 +68,12 @@ function rawOf(store) {
 function slotView(req) {
     const { store } = req.pm;
     const doc = store.state.presetId ? store.getDocNow(store.state.presetId) : null;
-    const model = doc ? resolveModel(store.models, rawOf(store)) : null;
+    const model = resolveModel(store.models, rawOf(store));
     if (!doc) {
         return {
             rev: store.rev,
             slotChangedRev: store.slotChangedRev ?? 0,
-            desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: store.state.modelId },
+            desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: model?.name ?? null },
             compiled: null,
             hash: null,
         };
@@ -70,7 +83,7 @@ function slotView(req) {
     return {
         rev: store.rev,
         slotChangedRev: store.slotChangedRev ?? 0,
-        desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: store.state.modelId },
+        desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: model?.name ?? null },
         compiled,
         hash,
     };
@@ -507,7 +520,7 @@ export function makeRouter() {
                     if (!leaves.has(id)) throw new StoreError(`unknown leaf ${id}`, 404);
                 }
                 loadout.overrides ??= {};
-                loadout.overrides[req.params.modelId] = { enabled: { ...enabled } };
+                loadout.overrides[req.params.modelId] = { enabled: completeOverride(doc, { ...enabled }) };
                 return store._savePresetNow(doc);
             });
             // the slot recompiles against overrides when its Model matches
@@ -614,19 +627,14 @@ export function makeRouter() {
 
     router.post('/slot/model', async (req, res, next) => {
         try {
-            const { modelId, raw } = req.body ?? {};
+            const { raw } = req.body ?? {};
+            if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+                return res.status(400).json({ error: 'raw required' });
+            }
             const store = req.pm.store;
-            // same transaction shape as /slot/load: the state write lands on
-            // disk inside the queue turn (see the load comment above)
-            await store.enqueue(() => {
-                store._markSlotChanged();
-                return store._mutateStateNow((/** @type {any} */ st) => {
-                    st.modelId = modelId ?? null;
-                    if (raw) st.raw = raw;
-                });
-            });
+            const r = await store.setSlotModel(raw);
             const view = slotView(req);
-            broadcast(req, 'slot', null);
+            if (r.modelChanged) broadcast(req, 'slot', null);
             res.json(view);
         } catch (err) { next(err); }
     });
@@ -716,6 +724,40 @@ export function makeRouter() {
         res.json(req.pm.store.models);
     });
 
+    router.put('/models', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.replaceModels(req.body ?? {});
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            res.json(saved);
+        } catch (err) { next(err); }
+    });
+
+    router.put('/models/:modelId/tuning', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const entry = await store.setModelTuning(req.params.modelId, req.body ?? {});
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            res.json(entry);
+        } catch (err) { next(err); }
+    });
+
+    router.post('/models/seed', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const body = req.body ?? {};
+            const profiles = Array.isArray(body.profiles) ? body.profiles : readSettingsProfiles(req);
+            const result = await store.seedModels(profiles);
+            if (result.added.length > 0) {
+                broadcast(req, 'models', null);
+                if (store.state.presetId) broadcast(req, 'slot', null);
+            }
+            res.json(result);
+        } catch (err) { next(err); }
+    });
+
     // ------------------------------------------------------------ profiles
 
     router.get('/profiles', (req, res) => {
@@ -733,6 +775,16 @@ export function makeRouter() {
         } catch (err) {
             res.status(500).json({ error: `cannot read settings.json: ${err.message}` });
         }
+    });
+
+    router.post('/profiles/backup', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const body = req.body ?? {};
+            const profiles = Array.isArray(body.profiles) ? body.profiles : readSettingsProfiles(req);
+            const result = await store.backupProfiles(profiles);
+            res.json(result);
+        } catch (err) { next(err); }
     });
 
     // --------------------------------------------------------------- shelf

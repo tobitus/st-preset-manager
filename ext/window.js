@@ -1,14 +1,19 @@
 /**
- * Floating window shell (2b): one window, three tabs. Library = preset list
- * (load into slot, open in the Presets tab); Presets = per-preset editor
- * tabs (ext/tabs/*); Import/Export = file import/export (ext/tabs/io.js).
+ * Floating window shell (2b/4): one window, four tabs plus a connection
+ * toolbar. Library = preset list (load into slot, open in the Presets tab);
+ * Presets = per-preset editor tabs (ext/tabs/*); Import/Export = file
+ * import/export (ext/tabs/io.js); Settings = Model registry + connection
+ * profile tidy (ext/tabs/settings.js). The toolbar above the tabs holds a
+ * Model picker that switches ST's live connection to a Model's profile.
  * Uses plain DOM + CSS from style.css; jQuery UI draggable/resizable are
  * available globally in ST and used for the window. The window also swallows
  * file drag/drop events anywhere inside it so ST's body-level importer never sees them (see below).
  */
-import { api, SLOT_NAME } from './st.js';
+import { api, SLOT_NAME, currentRaw, connectionProfiles } from './st.js';
+import { switchToModel } from './connection.js';
 import { createPresetsTab } from './tabs/presets.js';
 import { createIoTab } from './tabs/io.js';
+import { createSettingsTab } from './tabs/settings.js';
 
 /**
  * @param {{ title: string, content: string, onClose?: () => void }} opts
@@ -45,8 +50,10 @@ export function openWindow({ title, content, onClose }) {
 }
 
 /**
- * Open the main window: tab strip + Library and Presets panes, wired to the
- * bridge. Library "Open" switches to the Presets tab and opens the preset.
+ * Open the main window: tab strip + Library/Presets/Import-Export/Settings
+ * panes, wired to the bridge. Library "Open" switches to the Presets tab and
+ * opens the preset. The connection toolbar above the tabs switches ST's live
+ * connection to a Model's profile.
  * @param {import('./bridge.js').Bridge} bridge
  * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void, presets: { open(presetId: string): Promise<void>, destroy(): void } }}
  */
@@ -55,20 +62,31 @@ export function openMainWindow(bridge) {
     let presets;
     /** @type {any} */
     let io;
+    /** @type {any} */
+    let settings;
+    /** @type {(() => void)|null} */
+    let unwireModelPicker = null;
     const win = openWindow({
         title: 'Preset Manager',
-        onClose: () => { presets?.destroy(); io?.destroy(); },
+        onClose: () => { presets?.destroy(); io?.destroy(); settings?.destroy(); unwireModelPicker?.(); },
         content: `
+            <div class="pm-toolbar">
+                <label class="pm-model-label">Model</label>
+                <select class="pm-model-picker text_pole" title="Switch SillyTavern's connection to this Model's profile"></select>
+                <span class="pm-model-status"></span>
+            </div>
             <div class="pm-tabs">
                 <button type="button" class="pm-tab menu_button pm-active" data-tab="library">Library</button>
                 <button type="button" class="pm-tab menu_button" data-tab="presets">Presets</button>
                 <button type="button" class="pm-tab menu_button" data-tab="io">Import/Export</button>
+                <button type="button" class="pm-tab menu_button" data-tab="settings">Settings</button>
             </div>
             <div class="pm-pane" data-pane="library">
                 <div class="pm-root"></div>
             </div>
             <div class="pm-pane" data-pane="presets" hidden></div>
-            <div class="pm-pane" data-pane="io" hidden></div>`,
+            <div class="pm-pane" data-pane="io" hidden></div>
+            <div class="pm-pane" data-pane="settings" hidden></div>`,
     });
     const root = win.root;
 
@@ -94,6 +112,7 @@ export function openMainWindow(bridge) {
             pane.hidden = pane.dataset.pane !== name;
         }
         if (name === 'io') void io.refresh();
+        if (name === 'settings') void settings.refresh();
     };
     for (const tab of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-tab')))) {
         tab.addEventListener('click', () => showTab(/** @type {string} */ (tab.dataset.tab)));
@@ -116,10 +135,110 @@ export function openMainWindow(bridge) {
         { onOpen, onLibraryChanged: () => void refresh(libRoot, bridge, { onOpen }) },
     );
 
+    settings = createSettingsTab(
+        /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="settings"]')),
+        bridge,
+    );
+
+    unwireModelPicker = wireModelPicker(root, bridge);
+
     renderLibrary(libRoot, bridge, { onOpen });
     void refresh(libRoot, bridge, { onOpen });
 
     return { root: win.root, body: win.body, close: win.close, presets };
+}
+
+/**
+ * Wire the toolbar's Model picker: lists Models from the registry, shows the
+ * currently-resolved one (or "— no Model —" when unresolved), and switches
+ * ST's live connection to a Model's profile on selection. Refreshes on
+ * window open and on bridge updates that can move the resolved Model
+ * (`s.model`, `s.slot`, or an SSE `models`/`slot`/`hello` event); never
+ * re-renders the options while the select has focus during an in-flight
+ * switch, so the user's own pick is never yanked out from under them.
+ * @param {HTMLElement} root the window root
+ * @param {import('./bridge.js').Bridge} bridge
+ * @returns {() => void} unsubscribe
+ */
+function wireModelPicker(root, bridge) {
+    const select = /** @type {HTMLSelectElement} */ (root.querySelector('.pm-model-picker'));
+    const status = /** @type {HTMLElement} */ (root.querySelector('.pm-model-status'));
+    /** @type {any} */
+    let registry = { version: 1, models: {} };
+    /** @type {string|null} */
+    let modelId = null;
+    let switching = false;
+
+    function renderOptions() {
+        const names = Object.keys(registry.models ?? {});
+        const known = modelId !== null && !!registry.models?.[modelId];
+        select.replaceChildren();
+        if (!known) {
+            const opt = document.createElement('option');
+            opt.value = '';
+            opt.textContent = '— no Model —';
+            opt.selected = true;
+            select.append(opt);
+        }
+        for (const name of names) {
+            const opt = document.createElement('option');
+            opt.value = name;
+            opt.textContent = name;
+            if (known && name === modelId) opt.selected = true;
+            select.append(opt);
+        }
+    }
+
+    async function refreshToolbar() {
+        try {
+            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', '/slot')]);
+            registry = reg;
+            modelId = slot?.desired?.modelId ?? null;
+            if (document.activeElement === select && switching) return;
+            renderOptions();
+        } catch { /* leave stale state on a transient failure */ }
+    }
+
+    select.addEventListener('change', () => {
+        const name = select.value;
+        if (!name) return;
+        void (async () => {
+            switching = true;
+            status.classList.remove('pm-error');
+            status.textContent = 'switching…';
+            try {
+                const model = registry.models[name];
+                await switchToModel(model);
+                modelId = name;
+                const raw = currentRaw();
+                const profile = raw.profileId ? connectionProfiles().find((/** @type {any} */ p) => p.id === raw.profileId) : null;
+                status.textContent = `on ${profile ? profile.name : (raw.profileId ?? 'connection')}`;
+                renderOptions();
+            } catch (err) {
+                status.classList.add('pm-error');
+                status.textContent = err instanceof Error ? err.message : String(err);
+                renderOptions();
+            } finally {
+                switching = false;
+            }
+        })();
+    });
+
+    const unsubscribe = bridge.onUpdate((/** @type {any} */ s) => {
+        if (s.model) {
+            modelId = s.model.modelId;
+            if (document.activeElement === select && switching) return;
+            renderOptions();
+            return;
+        }
+        if (s.slot || (s.event && ['models', 'slot', 'hello'].includes(s.event.kind))) {
+            void refreshToolbar();
+        }
+    });
+
+    void refreshToolbar();
+
+    return unsubscribe;
 }
 
 /**

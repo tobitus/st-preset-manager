@@ -43,6 +43,7 @@ if (cm?.profiles) {
         cm.profiles = cm.profiles.filter((/** @type {any} */ p) => p.name !== fx.name);
         cm.profiles.push({
             id: crypto.randomUUID(),
+            name: fx.name,
             mode: 'cc',
             exclude: [...fx.exclude],
             api: fx.api,

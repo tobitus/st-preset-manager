@@ -149,3 +149,33 @@ function walkLeaves(rows, out) {
         }
     }
 }
+
+/**
+ * Complete a per-Model loadout override: for every pick-one group, if a
+ * member's override value is `true`, its siblings are forced `false` (the
+ * last-in-`enabled`-key-order winner if more than one is on). Members of
+ * non-pick-one groups and plain blocks are left exactly as given.
+ * @param {any} doc
+ * @param {Record<string, boolean>} enabled override map (not mutated)
+ * @returns {Record<string, boolean>} a new map
+ */
+export function completeOverride(doc, enabled) {
+    /** @type {Record<string, boolean>} */
+    const out = { ...enabled };
+    for (const grp of collectGroups(doc)) {
+        if (grp.cardinality !== 'pick-one') continue;
+        const members = [];
+        if (grp.header) members.push(grp.header);
+        for (const opt of grp.options ?? []) members.push(opt);
+        const idents = members
+            .map((leaf) => leaf.ref ?? leaf.identifier)
+            .filter((id) => id != null);
+        const onKeys = Object.keys(enabled).filter((k) => idents.includes(k) && enabled[k]);
+        if (onKeys.length === 0) continue;
+        const winner = onKeys[onKeys.length - 1];
+        for (const id of idents) {
+            if (id !== winner) out[id] = false;
+        }
+    }
+    return out;
+}

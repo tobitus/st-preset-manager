@@ -6,9 +6,12 @@
  * here; panelDelta computes the SEMANTIC delta (base -> snapshot) and
  * routePanelDiff routes each user change to its layer:
  *
- *   - prompt_order[].enabled for identifier i -> L.overrides[M].enabled[i] if
- *     that override exists, else L.enabled[i]; a pick-one option turned on
- *     turns its siblings off. Bits the delta omits are untouched.
+ *   - prompt_order[].enabled for identifier i -> L.overrides[M].enabled[i]
+ *     when that override already controls i (i is a key in it), else
+ *     L.enabled[i]; a pick-one option turned on turns its siblings off
+ *     (within the override when override-routed — completeOverride fills in
+ *     and normalises the override's own pick-one groups — within the
+ *     loadout otherwise). Bits the delta omits are untouched.
  *   - prompt_order SEQUENCE change -> blocks layer: the new order applied to
  *     the current doc, preserving identifiers the doc has that the snapshot
  *     sequence lacks (concurrent API reorder survives at its position).
@@ -21,7 +24,7 @@
  */
 import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
 import { stripConnectionKeys, compile } from '../shared/compile.js';
-import { normalize } from '../shared/groups.js';
+import { normalize, completeOverride } from '../shared/groups.js';
 
 /**
  * Route panel differences to layers. Mutates `doc` (and optionally the
@@ -175,23 +178,27 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
         const id = entry?.identifier;
         if (entry?.enabled === undefined) continue; // untouched bit (or pure-order entry)
         const on = !!entry.enabled;
-        if (overrideModel && id in (overrideModel.enabled ?? {})) {
-            overrideModel.enabled[id] = on;
-            routed.push({ key: id, layer: `override:${model?.name}` });
-        } else if (overrideModel && model) {
-            // the override exists for this model: route there (item 21) and list the identifier
-            overrideModel.enabled[id] = on;
+        const overrideControls = !!(overrideModel && overrideModel.enabled && id in overrideModel.enabled);
+        if (overrideControls) {
+            if (on) {
+                const next = { ...overrideModel.enabled };
+                delete next[id];
+                next[id] = true; // last key: wins the override's own pick-one collapse
+                overrideModel.enabled = completeOverride(doc, next);
+            } else {
+                overrideModel.enabled[id] = false;
+            }
             routed.push({ key: id, layer: `override:${model?.name}` });
         } else {
             loadout.enabled[id] = on;
             routed.push({ key: id, layer: 'loadout' });
-        }
-        // pick-one: the option just switched on turns its siblings off
-        const changed = [];
-        normalize(doc, loadout.enabled, changed, on ? id : null);
-        const norm = changed.filter((x) => x !== id);
-        if (norm.length > 0 && !overrideModel) {
-            routed.push({ key: norm.join(','), layer: 'group:pick-one' });
+            // pick-one: the option just switched on turns its siblings off
+            const changed = [];
+            normalize(doc, loadout.enabled, changed, on ? id : null);
+            const norm = changed.filter((x) => x !== id);
+            if (norm.length > 0) {
+                routed.push({ key: norm.join(','), layer: 'group:pick-one' });
+            }
         }
     }
 

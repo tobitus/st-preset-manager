@@ -272,3 +272,25 @@ export async function snapshotPanel() {
 export function currentPresetName() {
     return ctx().chatCompletionSettings.preset_settings_openai ?? '';
 }
+
+/**
+ * Raw connection id ST currently shows: source, model and the selected
+ * connection profile (or null when none is selected).
+ * @returns {{source: string, model: string, profileId: string|null}}
+ */
+export function currentRaw() {
+    return {
+        source: String(ctx().chatCompletionSettings.chat_completion_source ?? ''),
+        model: String(ctx().getChatCompletionModel?.() ?? ''),
+        profileId: ctx().extensionSettings?.connectionManager?.selectedProfile ?? null,
+    };
+}
+
+/**
+ * The LIVE connection-manager profiles array (not a copy) — callers that
+ * mutate it are editing settings.json directly (F-052: the tab owns it).
+ * @returns {any[]}
+ */
+export function connectionProfiles() {
+    return ctx().extensionSettings?.connectionManager?.profiles ?? [];
+}

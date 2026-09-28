@@ -11,7 +11,7 @@
  *   probe.mjs dom [tab]             prompt-manager rows + toggles as rendered
  *   probe.mjs click <sel> [tab]     click a selector
  *   probe.mjs set-slider <id> <v> [tab]  set an input range/number and fire input
- *   probe.mjs profile <name> [tab]  run /profile <name> via slash command
+ *   probe.mjs profile <name> [tab]  pick a connection profile in ST's own dropdown
  *   probe.mjs generate <text> [tab] send a message and wait for the reply
  *   probe.mjs eval <expr> [tab]     arbitrary JS in the main world (last resort)
  *   probe.mjs hold [tab]            keep the tab open for other commands (writes dev/probe-<tab>.pid)
@@ -319,13 +319,23 @@ async function main() {
                 break;
             }
             case 'profile': {
+                // ST's OWN connection-profile dropdown (#connection_profiles
+                // change handler applies the profile and emits
+                // CONNECTION_PROFILE_LOADED), not /profile and not v2
                 const [name] = argsPass;
                 const res = await cdp.evaluate(`(async () => {
                     const ctx = SillyTavern.getContext();
-                    await ctx.executeSlashCommandsWithOptions('/profile ${name.replace(/'/g, "\\'")}');
-                    return { ok: true };
+                    const p = ctx.extensionSettings.connectionManager.profiles.find((x) => x.name === ${JSON.stringify(name)});
+                    const sel = document.getElementById('connection_profiles');
+                    if (!p || !sel) return { ok: false, error: p ? 'no #connection_profiles' : 'no such profile' };
+                    const loaded = new Promise((resolve) => ctx.eventSource.once(ctx.eventTypes.CONNECTION_PROFILE_LOADED, resolve));
+                    sel.value = p.id;
+                    sel.dispatchEvent(new Event('change'));
+                    await loaded;
+                    return { ok: true, profile: p.name };
                 })()`);
                 console.log(JSON.stringify(res));
+                if (!res.ok) process.exitCode = 1;
                 await sleep(1000);
                 break;
             }

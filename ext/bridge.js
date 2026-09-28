@@ -31,8 +31,19 @@
  * While an apply runs the bridge blocks panel input (transparent overlay on
  * the prompt manager + sampler panel), so user edits cannot interleave with
  * an apply and no timing-based sampling heuristic is needed.
+ *
+ * model op (enqueueModelReport / modelReportOp): reports the tab's current
+ * raw connection id (source/model/profileId) to the plugin so it can
+ * resolve the Model and desired loadout for that connection. Flushes
+ * unsent panel edits first when attached (a Model switch can move ST onto
+ * a different desired slot state), POSTs /slot/model, records the plugin's
+ * resolved modelId and enqueues a reconcile so the new desired state lands.
+ * No-ops when the raw id is unchanged since the last report. `reattach()`
+ * forces the next reconcile to re-apply even when the hash did not
+ * change — used after a connection profile moved ST off the working slot
+ * and the caller re-attaches without a genuinely new desired state.
  */
-import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, SLOT_NAME, PLUGIN_BASE } from './st.js';
+import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, currentRaw, SLOT_NAME, PLUGIN_BASE } from './st.js';
 
 /**
  * Surfaces the user edits a chat-completion preset from, covered by the
@@ -81,6 +92,14 @@ export class Bridge {
         this._panelQueued = false;
         /** Last flushPanel hit 409 (stale): the panel op follows with a reconcile. */
         this._flushStale = false;
+        /** @type {boolean} a model op is queued but NOT yet started */
+        this._modelQueued = false;
+        /** Plugin-resolved Model name for the tab's current raw connection id
+         * (null when unresolved). */
+        this.modelId = null;
+        /** Last raw connection id reported to /slot/model (hash-compared to
+         * skip redundant reports). */
+        this._reportedRaw = null;
     }
 
     /**
@@ -90,18 +109,20 @@ export class Bridge {
      * stacking another op (repeated SSE events collapse into one re-read).
      * @template T
      * @param {() => Promise<T>} op
-     * @param {{key?: 'reconcile'|'panel'}} [opts]
+     * @param {{key?: 'reconcile'|'panel'|'model'}} [opts]
      * @returns {Promise<T>} this op's completion (a coalesced-away caller
      *   gets the queued op's completion instead — same converged state)
      */
     _enqueue(op, { key } = {}) {
-        const coalescing = key === 'reconcile' ? this._reconcileQueued : key === 'panel' ? this._panelQueued : false;
+        const coalescing = key === 'reconcile' ? this._reconcileQueued : key === 'panel' ? this._panelQueued : key === 'model' ? this._modelQueued : false;
         if (coalescing) return this._queue;
         if (key === 'reconcile') this._reconcileQueued = true;
         if (key === 'panel') this._panelQueued = true;
+        if (key === 'model') this._modelQueued = true;
         const run = this._queue.then(async () => {
             if (key === 'reconcile') this._reconcileQueued = false;
             if (key === 'panel') this._panelQueued = false;
+            if (key === 'model') this._modelQueued = false;
             try {
                 return await op();
             } finally {
@@ -148,6 +169,47 @@ export class Bridge {
     /** Queue a panel op (coalesced with any not-yet-started one). */
     enqueuePanel() {
         return this._enqueue(() => this.panelOp(), { key: 'panel' });
+    }
+
+    /** Queue a model report op (coalesced with any not-yet-started one). */
+    enqueueModelReport() {
+        return this._enqueue(() => this.modelReportOp(), { key: 'model' });
+    }
+
+    /**
+     * Report the tab's current raw connection id to the plugin so it can
+     * resolve the Model and desired loadout for that connection. No-op
+     * when the raw id is unchanged since the last report. Flushes unsent
+     * panel edits first when attached (a Model switch can move the desired
+     * slot state), then POSTs /slot/model, records the resolved modelId,
+     * emits it and enqueues a reconcile so the new desired state lands.
+     * @returns {Promise<any|null>} the slot view, or null when unchanged
+     */
+    async modelReportOp() {
+        const raw = currentRaw();
+        if (this._reportedRaw && this.hashOf(raw) === this.hashOf(this._reportedRaw)) return null;
+        if (currentPresetName() === SLOT_NAME && this.baseSnapshot) await this.flushPanel();
+        const view = await api('POST', '/slot/model', { raw });
+        this._reportedRaw = raw;
+        this.modelId = view?.desired?.modelId ?? null;
+        this.emit({ model: { raw, modelId: this.modelId } });
+        this.enqueueReconcile();
+        return view;
+    }
+
+    /**
+     * Force the next reconcile to re-apply the desired slot state even
+     * when the compiled hash did not change (e.g. after a connection
+     * profile moved ST onto another preset and the caller re-attaches
+     * without a genuinely new desired state). NOT coalesced: every call
+     * runs its own reconcile.
+     * @returns {Promise<any>} the reconcile op's slot view
+     */
+    reattach() {
+        return this._enqueue(() => {
+            this.appliedHash = null;
+            return this.reconcileOp();
+        });
     }
 
     /**

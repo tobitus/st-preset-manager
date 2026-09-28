@@ -482,3 +482,239 @@ ul.pm-list ul.pm-list {
 .pm-io-export-row .pm-io-format {
     flex: 0 0 auto;
 }
+
+/* ---- Phase 4: toolbar + Settings tab ---- */
+.pm-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 4px;
+}
+
+.pm-toolbar .pm-model-picker {
+    min-width: 200px;
+}
+
+.pm-model-status {
+    opacity: 0.8;
+    font-size: 0.9em;
+}
+
+.pm-settings {
+    flex: 1;
+    min-height: 0;
+    overflow: auto;
+    padding: 4px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.pm-settings-current {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.pm-models,
+.pm-profiles {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.pm-models h4,
+.pm-profiles h4 {
+    margin: 0;
+}
+
+.pm-models-toolbar,
+.pm-profiles-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.pm-merge-suggestions {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pm-merge-suggestions h5 {
+    margin: 0;
+}
+
+.pm-merge-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    border: 1px dashed rgba(255, 255, 255, 0.35);
+    border-radius: 6px;
+    padding: 8px;
+}
+
+.pm-model-list,
+.pm-profile-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pm-model-row,
+.pm-profile-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 6px;
+    padding: 6px 8px;
+}
+
+.pm-model-matches,
+.pm-model-profiles {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+}
+
+.pm-model-match,
+.pm-model-profile {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: rgba(255, 255, 255, 0.08);
+    border-radius: 4px;
+    padding: 1px 6px;
+}
+
+.pm-model-row input,
+.pm-model-row select,
+.pm-profile-row input,
+.pm-profile-row select {
+    width: auto;
+}
+
+.pm-model-name {
+    min-width: 120px;
+}
+
+.pm-model-tuning {
+    opacity: 0.8;
+    font-size: 0.9em;
+}
+
+.pm-profile-links {
+    color: var(--warning, #e8a33d);
+    border: 1px solid var(--warning, #e8a33d);
+    border-radius: 4px;
+    padding: 1px 6px;
+    font-size: 0.9em;
+}
+
+.pm-profiles-summary {
+    opacity: 0.8;
+    font-size: 0.9em;
+}
+
+.pm-settings-status {
+    padding: 4px 0;
+}
+
+/* ---- Phase 4: Presets tab Model panel (tuning + loadout override) ---- */
+.pm-model-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5em;
+    margin-top: 0.75em;
+    padding-top: 0.75em;
+    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+.pm-mp-empty {
+    opacity: 0.7;
+    font-style: italic;
+}
+
+.pm-mp-head {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+}
+
+.pm-mp-head select.pm-mp-model {
+    flex: 1 1 auto;
+    min-width: 8em;
+}
+
+.pm-mp-active {
+    opacity: 0.7;
+    font-size: 0.9em;
+    white-space: nowrap;
+}
+
+.pm-tuning-row {
+    display: grid;
+    grid-template-columns: 10em 1fr 4em;
+    align-items: center;
+    gap: 0.5em;
+    margin: 0.15em 0;
+}
+
+.pm-tuning-input {
+    width: 7em;
+}
+
+.pm-tuning-src {
+    opacity: 0.6;
+    font-size: 0.85em;
+    text-align: right;
+}
+
+.pm-ov-list {
+    max-height: 240px;
+    overflow: auto;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 4px;
+    padding: 0.25em;
+}
+
+.pm-ov-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5em;
+    padding: 0.15em 0.25em;
+}
+
+.pm-ov-row .pm-ov-name {
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-ov-row .pm-ov-base {
+    opacity: 0.6;
+    font-size: 0.85em;
+    white-space: nowrap;
+}
+
+.pm-mp-status {
+    min-height: 1.2em;
+    font-size: 0.9em;
+}
+
+.pm-mp-status.pm-error {
+    color: var(--warning, #d9534f);
+}
+
+.pm-tuning-override-label {
+    display: flex;
+    align-items: center;
+    gap: 0.4em;
+}

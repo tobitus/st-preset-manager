@@ -8,6 +8,7 @@
  */
 import { pluginHealth, ctx } from './ext/st.js';
 import { Bridge } from './ext/bridge.js';
+import { installConnectionHooks } from './ext/connection.js';
 import { openWindow, openMainWindow } from './ext/window.js';
 
 const NOTICE_HTML = `
@@ -40,6 +41,7 @@ async function start() {
     }
 
     await bridge.start();
+    installConnectionHooks(bridge);
     registerMenu(() => openMainWindow(bridge));
 
     win.__pmStarted = { bridge, stop: () => bridge.stop() };

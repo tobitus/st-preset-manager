@@ -47,6 +47,16 @@ interface PmHandle {
         enqueue<T>(fn: () => T): Promise<T>;
         /** mark the desired slot changed at rev+1 (call inside mutateState) */
         _markSlotChanged(): void;
+        /** resolve raw and set it as the slot's connection id (no-op on identical raw) */
+        setSlotModel(raw: { source?: string | null; model?: string | null; profileId?: string | null }): Promise<{ changed: boolean; modelChanged: boolean; modelId: string | null }>;
+        /** whole-registry replace, validated */
+        replaceModels(reg: Record<string, unknown>): Promise<unknown>;
+        /** replace one Model's global tuning wholesale */
+        setModelTuning(name: string, tuning: Record<string, unknown>): Promise<unknown>;
+        /** seed the registry from ST connection profiles */
+        seedModels(profiles: unknown[]): Promise<{ added: string[]; models: Record<string, unknown>; mergeSuggestions: string[][] }>;
+        /** snapshot profiles verbatim into backups/profiles-<iso>.json */
+        backupProfiles(profiles: unknown[]): Promise<{ file: string; count: number }>;
     };
     hub: {
         clientCount: number;
