@@ -114,7 +114,16 @@ function validateRows(rows, path, errs) {
             if (!['pick-one', 'pick-one-or-more'].includes(row.cardinality)) errs.push(`${p}.cardinality`);
             if (typeof row.guessed !== 'boolean') errs.push(`${p}.guessed`);
             if (!Array.isArray(row.options)) errs.push(`${p}.options`);
-            else validateRows(row.options, `${p}.options`, errs);
+            else {
+                // a group always ends at a marker: markers are fixed ST
+                // slots, never group members (v1 validate_canonical; also
+                // what flatten/rebuild enforce on every op — this guards
+                // hand-edited and PUT docs)
+                row.options.forEach((/** @type {any} */ opt, /** @type {number} */ j) => {
+                    if (opt?.kind === 'marker') errs.push(`${path}[${i}].options[${j}] (marker in group options — a group always ends at a marker)`);
+                });
+                validateRows(row.options, `${p}.options`, errs);
+            }
         } else {
             errs.push(`${p}.kind`);
         }

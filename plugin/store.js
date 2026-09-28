@@ -13,11 +13,10 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { validateDoc, validateRegistry } from '../shared/schema.js';
-import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
 import { ensureAllLeaves } from '../shared/groups.js';
 import { ImportError, importStPreset } from '../shared/recognizers.js';
-import { rebuildSeq, flattenSeq } from '../shared/outline.js';
+import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
 
 export class StoreError extends Error {
     /**
@@ -191,6 +190,10 @@ export class Store {
                     continue; // unreadable entries are skipped, not fatal (v1 rule)
                 }
                 if (doc?.format !== 'st-preset-manager/library') continue;
+                // v1 `load_canonical`: derive structure on every load so
+                // rank ops are byte-exact invertible and hand-edited files
+                // normalize too (no-op for docs the store wrote itself).
+                deriveStructure(doc);
                 next.set(doc.id, {
                     id: doc.id,
                     path: full,
@@ -230,6 +233,25 @@ export class Store {
         const entry = this.index.get(id);
         if (!entry) throw new StoreError(`preset ${id} not found`, 404);
         return structuredClone(entry.doc);
+    }
+
+    /**
+     * Write a NEW document (fork) inside an existing queue transaction:
+     * validates, refuses a taken name, writes the file and indexes it. No
+     * revision snapshot (the fork's first revision is its first save) and
+     * no rename logic (a new file by definition). Call from inside the
+     * queue only — same single-writer rule as _savePresetNow.
+     * @param {any} doc
+     */
+    async _writeNewDocNow(doc) {
+        const errs = validateDoc(doc);
+        if (errs.length) throw new StoreError(`invalid document: ${errs.join(', ')}`);
+        const existing = this.findByName(doc.name);
+        if (existing) {
+            throw Object.assign(new StoreError(`name "${doc.name}" is already taken`, 409), { conflict: existing.id });
+        }
+        await this._writeDoc(doc, this._safeDir(doc.folder ?? ''));
+        return structuredClone(doc);
     }
 
     /**
@@ -582,12 +604,6 @@ export function ensureDefaultLoadout(doc) {
     doc.activeLoadoutId = lid;
     ensureAllLeaves(doc, doc.loadouts[lid].enabled);
     return doc;
-}
-
-/** connection-key guard used by ops that accept arbitrary settings */
-export function rejectConnectionKeys(/** @type {Record<string, any>} */ obj) {
-    const bad = Object.keys(obj ?? {}).filter((k) => CONNECTION_KEYS.includes(k));
-    if (bad.length) throw new StoreError(`connection keys are never stored: ${bad.join(', ')}`);
 }
 
 export { newId };

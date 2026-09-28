@@ -1,17 +1,21 @@
 /**
- * Outline flatten/rebuild — the leaf-rank model, ported from v1 outline.py
- * (roadmap: Phase 1 ports flatten/rebuild only; promote/demote/moveLeaf are
- * Phase 2 and reuse exactly these two functions).
+ * Outline ops — the leaf-rank model, ported from v1 outline.py.
  *
  * v2 leaf kinds: marker | block | ghost (v1: marker|component|ghost).
  * Governing invariant: screen order top to bottom IS compile order; sections
  * and groups never change which leaves compile or in which order.
  *
  * Flat entries: { leaf, rank: option|item|group|section, gmeta, sname }.
- * rebuild_seq derives container keys from heading leaves ("grp:<key>" /
+ * rebuildSeq derives container keys from heading leaves ("grp:<key>" /
  * "sec:<key>"), so any op sequence restoring the same flat sequence restores
  * identical rows. gmeta rides on group heading AND members (survives
  * promote/demote of any leaf); sname rides on the section heading leaf.
+ *
+ * Every structural op is flatten -> mutate ranks/order -> rebuildSeq, so the
+ * nested `rows` stay the persisted form (schema unchanged) and rank/move ops
+ * never touch enabled bits. Markers are only ever items: every op that would
+ * make a marker a heading or an option raises OutlineError (ghosts cannot be
+ * re-ranked at all — they have no name/content).
  */
 import { newKey } from './util.js';
 
@@ -167,4 +171,360 @@ export function rebuildSeq(entries) {
     }
     sclose();
     return out;
+}
+
+// ------------------------------------------------------------ structural ops
+// (port of v1 outline.py: derive_structure / promote / demote / move_leaf /
+// insert_entries; v1 `component` leaves are v2 `block` leaves)
+
+/** Label used for derived group/section names (v1 `_label`). */
+function label(doc, leaf) {
+    if (leaf.kind === 'ghost') return leaf.identifier ?? '(order-only)';
+    const comp = doc.blocks?.[leaf.ref];
+    return comp?.name || leaf.ref || '(row)';
+}
+
+/**
+ * Re-derive every sequence's structure from its flat leaf sequence (v1
+ * `derive_structure`). Run after import: the nested rows become EXACTLY what
+ * `rebuildSeq(flattenSeq(rows))` produces, so every rank op is byte-exact
+ * invertible from the first application. Leaf order, leaf content and
+ * enabled bits are untouched.
+ * @param {any} doc
+ */
+export function deriveStructure(doc) {
+    for (const seq of doc.sequences ?? []) {
+        seq.rows = rebuildSeq(flattenSeq(seq.rows ?? []));
+    }
+}
+
+/**
+ * (seq, entries, index) for the sequence holding leaf `key`.
+ * @param {any} doc
+ * @param {string} key
+ */
+function findSeq(doc, key) {
+    for (const seq of doc.sequences ?? []) {
+        const entries = flattenSeq(seq.rows ?? []);
+        for (let i = 0; i < entries.length; i++) {
+            if (entries[i].leaf.key === key) return { seq, entries, i };
+        }
+    }
+    throw new OutlineError(`no row with key ${JSON.stringify(key)}`);
+}
+
+/** Markers are fixed ST slots; ghosts have nothing to re-rank. */
+function checkRankable(leaf) {
+    if (leaf.kind === 'marker') {
+        throw new OutlineError('markers are fixed ST slots — they can never be headings or options');
+    }
+    if (leaf.kind === 'ghost') {
+        throw new OutlineError('order-only entries have no name or content and cannot be re-ranked');
+    }
+}
+
+/**
+ * Move a row one step UP the ladder: option -> item -> group -> section.
+ *
+ * Exactly invertible: state the inverse op cannot re-derive (a swallowed
+ * group's metadata, a section's exact name) is stashed ON the leaf row
+ * (`_gmeta` / `_sname`) and popped by the inverse op. A completed
+ * promote∘demote round-trip leaves the doc byte-identical — a stash is
+ * written only when its inverse needs it and popped when consumed.
+ * @param {any} doc
+ * @param {string} key
+ * @returns {any} the moved leaf row
+ */
+export function promote(doc, key) {
+    const { seq, entries, i } = findSeq(doc, key);
+    const e = entries[i];
+    const leaf = e.leaf;
+    checkRankable(leaf);
+    const r = e.rank;
+    if (r === 'option') {
+        e.rank = 'item';
+        leaf._gmeta = e.gmeta; // demote(item) restores the group exactly
+    } else if (r === 'item') {
+        e.rank = 'group';
+        if (leaf._gmeta != null) { // it used to be an option: reuse its group
+            e.gmeta = leaf._gmeta;
+            delete leaf._gmeta;
+        } else {
+            e.gmeta = { name: label(doc, leaf), cardinality: 'pick-one-or-more', guessed: false };
+        }
+        if (e.sname != null && e.sname !== label(doc, leaf)) {
+            leaf._sname = e.sname; // demote(group) restores the section name
+        }
+    } else if (r === 'group') {
+        e.rank = 'section';
+        const gm = e.gmeta;
+        const stash = leaf._sname ?? null;
+        if (stash !== undefined && leaf._sname !== undefined) delete leaf._sname;
+        e.sname = stash ?? (gm?.name ? gm.name : label(doc, leaf));
+        // stash the group identity only when demote cannot re-derive it
+        if (gm && JSON.stringify(gm) !== JSON.stringify({ name: label(doc, leaf), cardinality: 'pick-one-or-more', guessed: false })) {
+            leaf._gmeta = gm;
+        }
+    } else {
+        throw new OutlineError('row is already a section heading (top of the ladder)');
+    }
+    seq.rows = rebuildSeq(entries);
+    return leaf;
+}
+
+/**
+ * Move a row one step DOWN the ladder: section -> group -> item -> option.
+ * Exact inverse of promote: pops the stashes promote left (see there).
+ * @param {any} doc
+ * @param {string} key
+ * @returns {any} the moved leaf row
+ */
+export function demote(doc, key) {
+    const { seq, entries, i } = findSeq(doc, key);
+    const e = entries[i];
+    const leaf = e.leaf;
+    checkRankable(leaf);
+    const r = e.rank;
+    if (r === 'section') {
+        e.rank = 'group';
+        e.gmeta = leaf._gmeta !== undefined ? leaf._gmeta : null;
+        if (leaf._gmeta !== undefined) delete leaf._gmeta;
+        if (e.gmeta === null) {
+            e.gmeta = { name: label(doc, leaf), cardinality: 'pick-one-or-more', guessed: false };
+        }
+        // stash the section name only when promote(group) could not re-derive it
+        const gm = e.gmeta;
+        if (e.sname != null && e.sname !== (gm?.name ? gm.name : label(doc, leaf))) {
+            leaf._sname = e.sname;
+        }
+    } else if (r === 'group') {
+        e.rank = 'item';
+        const stash = leaf._sname;
+        if (stash !== undefined) {
+            delete leaf._sname;
+            e.sname = stash;
+        } else {
+            const sname = e.gmeta?.name ?? null;
+            if (e.sname === null && sname && sname !== label(doc, leaf)) {
+                e.sname = sname; // the section continues under the (former) group name
+            }
+        }
+    } else if (r === 'item') {
+        e.rank = 'option';
+        if (leaf._gmeta !== undefined) {
+            e.gmeta = leaf._gmeta;
+            delete leaf._gmeta;
+        } else {
+            e.gmeta = e.gmeta ?? null;
+        }
+    } else {
+        throw new OutlineError('row is already an option (bottom of the ladder)');
+    }
+    seq.rows = rebuildSeq(entries);
+    return leaf;
+}
+
+/**
+ * Maximal structural block [start, end) containing index i.
+ * - option -> the single option (moves within its group only)
+ * - group heading -> heading + its whole option run
+ * - section heading -> the whole section (until the next section heading)
+ * - item -> the single row
+ * @param {any[]} entries
+ * @param {number} i
+ */
+function blockAt(entries, i) {
+    const r = entries[i].rank;
+    const n = entries.length;
+    if (r === 'option') return [i, i + 1];
+    if (r === 'group') {
+        let e = i + 1;
+        while (e < n && entries[e].rank === 'option') e++;
+        return [i, e];
+    }
+    if (r === 'section') {
+        let e = i + 1;
+        while (e < n && entries[e].rank !== 'section') e++;
+        return [i, e];
+    }
+    return [i, i + 1]; // item
+}
+
+/**
+ * The block STARTING at position j (j must be a block start in the tiling:
+ * a heading, an item, or the first option of a headerless run).
+ * @param {any[]} entries
+ * @param {number} j
+ */
+function blockStart(entries, j) {
+    const r = entries[j].rank;
+    const n = entries.length;
+    if (r === 'group') {
+        let e = j + 1;
+        while (e < n && entries[e].rank === 'option') e++;
+        return [j, e];
+    }
+    if (r === 'section') {
+        let e = j + 1;
+        while (e < n && entries[e].rank !== 'section') e++;
+        return [j, e];
+    }
+    if (r === 'option' && (j === 0 || entries[j - 1].rank !== 'option')
+            && (j === 0 || entries[j - 1].rank !== 'group')) {
+        let e = j + 1;
+        while (e < n && entries[e].rank === 'option') e++;
+        return [j, e]; // a headerless option run is one block (one group)
+    }
+    return [j, j + 1]; // item, or a single option of a headed group
+}
+
+/**
+ * The block ENDING at position b0 (the tiling neighbor above).
+ * - the row above is an option -> its option run plus the group heading
+ *   that owns it (if any)
+ * - the row above is a section heading -> that single heading (a boundary:
+ *   moveLeaf refuses crossing it unless the mover is a section)
+ * - otherwise (item) -> that single row
+ * @param {any[]} entries
+ * @param {number} b0
+ */
+function blockBefore(entries, b0) {
+    let j = b0 - 1;
+    const r = entries[j].rank;
+    if (r === 'option') {
+        while (j > 0 && entries[j - 1].rank === 'option') j--;
+        if (j > 0 && entries[j - 1].rank === 'group') j--; // the heading owning this run
+    }
+    return [j, b0];
+}
+
+/**
+ * Swap the row (or its whole block, for headings) with the adjacent sibling
+ * block at the same level. Never changes enabled bits.
+ *
+ * Sections are move limits: a row inside a section cannot swap across the
+ * section's heading (promote the heading down first); section blocks swap
+ * with whole sibling blocks (items, groups, whole sections).
+ *
+ * Note (v1 parity): a section moving up across the document's leading run
+ * takes the run with it (sections cannot sit above their own rows); its
+ * single-step inverse is therefore two presses, not one, when a run rode
+ * along. Only section headings are affected — every option/item/group move
+ * is exactly one-step invertible.
+ * @param {any} doc
+ * @param {string} key
+ * @param {number} delta -1 = up one sibling block, +1 = down one, 0 = no-op
+ */
+export function moveLeaf(doc, key, delta) {
+    if (delta === 0) return;
+    const { seq, entries, i } = findSeq(doc, key);
+    const r = entries[i].rank;
+    const [b0, b1] = blockAt(entries, i);
+    /** @type {[number, number]} */
+    let p;
+    if (delta < 0) {
+        if (b0 === 0) throw new OutlineError('already at the top');
+        if (r === 'option') {
+            if (entries[b0 - 1].rank !== 'option') {
+                throw new OutlineError('cannot move above the group heading (promote it out first)');
+            }
+            p = [b0 - 1, b0]; // the sibling option directly above
+        } else if (r === 'section') {
+            // the sibling above is the previous section block, or — before
+            // the first section — the last block of the leading run
+            let k = b0 - 1;
+            while (k > 0 && entries[k].rank !== 'section') k--;
+            p = (k > 0 || entries[0].rank === 'section') ? [k, b0] : [0, b0]; // the whole leading run
+        } else {
+            const [q0, q1] = blockBefore(entries, b0);
+            p = [q0, q1];
+            // level check: walk back from my block; if a section heading sits
+            // at or above the neighbor's start, the swap would cross sections
+            let j = b0 - 1;
+            while (j >= p[0] && entries[j].rank !== 'section') j--;
+            if (j >= p[0]) {
+                throw new OutlineError('cannot move above the section heading (demote the section first)');
+            }
+        }
+        entries.splice(p[0], b1 - p[0], ...entries.slice(b0, b1), ...entries.slice(p[0], p[1]));
+    } else {
+        if (b1 >= entries.length) throw new OutlineError('already at the bottom');
+        if (r === 'option') {
+            if (entries[b1].rank !== 'option') {
+                throw new OutlineError('cannot move below the group (promote it out first)');
+            }
+            p = [b1, b1 + 1]; // the sibling option directly below
+        } else {
+            const [q0, q1] = blockStart(entries, b1);
+            p = [q0, q1];
+            if (entries[p[0]].rank === 'section' && r !== 'section') {
+                throw new OutlineError('cannot move below the section (bottom of it)');
+            }
+        }
+        entries.splice(b0, p[1] - b0, ...entries.slice(p[0], p[1]), ...entries.slice(b0, b0 + (p[0] - b0)));
+    }
+    seq.rows = rebuildSeq(entries);
+}
+
+/**
+ * Splice flat rank entries into a sequence at a drop position (v1
+ * `insert_entries`). `beforeKey` null appends to the end of the first
+ * sequence. An anchor row adjusts the landing: dropping onto a group heading
+ * inserts INTO the group (as its first option); a group/section payload
+ * snaps to a clean sibling position instead of splitting the anchor's
+ * container.
+ * @param {any} doc
+ * @param {string|null} beforeKey
+ * @param {any[]} newEntries
+ */
+export function insertEntries(doc, beforeKey, newEntries) {
+    if (!newEntries.length) return;
+    if (beforeKey === null) {
+        const seq = doc.sequences[0];
+        if (!seq) throw new OutlineError('document has no sequences');
+        seq.rows = rebuildSeq([...flattenSeq(seq.rows ?? []), ...newEntries]);
+        return;
+    }
+    const { seq, entries, i } = findSeq(doc, beforeKey);
+    let anchor = entries[i];
+    const kind0 = newEntries[0].rank;
+    if (kind0 === 'group' || kind0 === 'section') {
+        // containers never land INSIDE a group: snap above the anchor's group
+        let at = i;
+        if (anchor.rank === 'option') {
+            let j = i;
+            while (j > 0 && entries[j].rank === 'option') j--;
+            if (j > 0 && entries[j].rank === 'group') at = j;
+        } else if (anchor.rank === 'group') {
+            // land right above that group
+        } else if (anchor.rank === 'section') {
+            at = i + 1; // just inside the section, above its first row
+        }
+        // kind0 == "section" landing inside a section would nest — snap above it
+        if (kind0 === 'section') {
+            let j = at;
+            while (j > 0 && entries[j].rank !== 'section') j--;
+            if (entries[j].rank === 'section' && j < at) at = j;
+        }
+        entries.splice(at, 0, ...newEntries);
+    } else {
+        let at = i;
+        if (anchor.rank === 'group') {
+            // dropped ON a group heading: become its first option
+            newEntries = newEntries.map((e) => ({ ...e, rank: 'option', gmeta: { ...(anchor.gmeta ?? {}) } }));
+            at = i + 1;
+        } else if (anchor.rank === 'section') {
+            newEntries = newEntries.map((e) => ({ ...e, rank: 'item' }));
+            at = i + 1;
+        } else {
+            newEntries = newEntries.map((e) => ({
+                ...e,
+                rank: anchor.rank,
+                gmeta: anchor.gmeta ? { ...anchor.gmeta } : null,
+                sname: anchor.sname,
+            }));
+        }
+        entries.splice(at, 0, ...newEntries);
+    }
+    seq.rows = rebuildSeq(entries);
 }

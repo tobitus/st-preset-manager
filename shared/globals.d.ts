@@ -30,6 +30,10 @@ interface PmHandle {
         getDocNow(id: string): Record<string, unknown> | null;
         /** save body WITHOUT taking the queue (call only inside enqueue) */
         _savePresetNow(doc: Record<string, unknown>, opts?: { label?: string }): Promise<unknown>;
+        /** write a NEW document (fork) WITHOUT taking the queue (call only inside enqueue) */
+        _writeNewDocNow(doc: Record<string, unknown>): Promise<unknown>;
+        /** first index entry by name, or null */
+        findByName(name: string): { id: string } | null;
         /** state mutation body WITHOUT taking the queue (call only inside enqueue) */
         _mutateStateNow(fn: (st: Record<string, unknown>) => void): Promise<unknown>;
         /** models mutation body WITHOUT taking the queue (call only inside enqueue) */

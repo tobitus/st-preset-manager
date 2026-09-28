@@ -9,10 +9,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { compile, stripConnectionKeys } from '../shared/compile.js';
 import { routePanelDiff, panelDelta } from './slot.js';
-import { StoreError, rejectConnectionKeys } from './store.js';
-import { normalize } from '../shared/groups.js';
+import { StoreError } from './store.js';
+import { applyDocOp } from '../shared/docops.js';
+import { iterLeaves } from '../shared/groups.js';
 import { resolveModel } from '../shared/models.js';
-import { canonicalHash } from '../shared/util.js';
+import { canonicalHash, ulid, newId } from '../shared/util.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
 
 /**
@@ -149,34 +150,420 @@ export function makeRouter() {
     // ----------------------------------------------------------------- ops
 
     // POST /presets/:id/ops {op, ...args} -> {doc, rev} (PLAN §1.6).
-    // Phase 1 carries the op set checks 6/8 need: `toggle` (one leaf,
-    // pick-one collapse via normalize, no override for a null Model) and
-    // `setSettings` (connection keys rejected 400 via the save guard).
-    // Structural ops (promote/demote/moveLeaf/editBlock/addBlock/... ) land
-    // with Phase 2 on this same endpoint.
+    // ONE store-queue transaction per request: read the doc, apply the op,
+    // validate, write — no interleaving with a queued /slot/panel or
+    // /slot/load (review-3 rule). Exactly one typed event per mutation.
+    // Op set (Phase 2): outline ops (promote/demote/moveLeaf operate on
+    // sequence structure and never touch enabled bits), switches
+    // (toggle/setGroup — the only ops writing loadout bits; pick-one is
+    // normalised here like every write path), group shape (createGroup/
+    // renameGroup/setCardinality), options (addOption/removeOption), blocks
+    // (setContent/editBlock/setBlockNotes/renameBlock/addBlock/deleteBlock),
+    // and settings/notes (setSettings/setNotes — notes are library-only and
+    // never compiled).
+    const OPS = /** @type {const} */ ([
+        'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'moveLeaf',
+        'createGroup', 'renameGroup', 'addOption', 'removeOption',
+        'setContent', 'editBlock', 'renameBlock', 'addBlock', 'deleteBlock',
+        'setSettings', 'setBlockNotes', 'setNotes',
+    ]);
     router.post('/presets/:id/ops', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const doc = /** @type {any} */ (store.getPreset(req.params.id)); // throws 404
             const { op } = req.body ?? {};
-            const enabled = doc.loadouts?.[doc.activeLoadoutId]?.enabled ?? null;
-            if (op === 'toggle') {
-                if (!enabled) throw new StoreError('preset has no active loadout', 409);
-                const { identifier, value } = req.body;
-                if (typeof identifier !== 'string') throw new StoreError('toggle needs identifier', 400);
-                if (!(identifier in enabled)) throw new StoreError(`unknown leaf ${identifier}`, 404);
-                enabled[identifier] = value !== undefined ? !!value : !enabled[identifier];
-                normalize(doc, enabled, undefined, enabled[identifier] ? identifier : null);
-            } else if (op === 'setSettings') {
-                rejectConnectionKeys(req.body?.settings ?? {});
-                Object.assign(doc.settings ?? (doc.settings = {}), req.body?.settings ?? {});
-            } else if (op) {
-                throw new StoreError(`op '${op}' arrives with Phase 2`, 400);
-            } else {
-                throw new StoreError('missing op', 400);
-            }
-            const saved = await store.savePreset(doc);
-            broadcast(req, 'preset', doc.id);
+            if (!op) throw new StoreError('missing op', 400);
+            if (!OPS.includes(op)) throw new StoreError(`unknown op '${op}'`, 400);
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                await applyDocOp(doc, op, req.body ?? {});
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, 'preset', req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // --------------------------------------------------------- preset meta
+
+    // PATCH /presets/:id/meta {name?, folder?, tags?, notes?, blockNotes?}
+    // -> {doc, rev}. Library metadata; never compiled.
+    router.patch('/presets/:id/meta', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const body = req.body ?? {};
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (body.name !== undefined) {
+                    if (typeof body.name !== 'string' || !body.name.trim()) throw new StoreError('name must be a non-empty string', 400);
+                    doc.name = body.name.trim();
+                }
+                if (body.folder !== undefined) {
+                    if (typeof body.folder !== 'string') throw new StoreError('folder must be a string', 400);
+                    doc.folder = body.folder; // _safeDir validates on save
+                }
+                if (body.tags !== undefined) {
+                    if (!Array.isArray(body.tags) || body.tags.some((/** @type {any} */ t) => typeof t !== 'string')) {
+                        throw new StoreError('tags must be an array of strings', 400);
+                    }
+                    doc.tags = body.tags;
+                }
+                if (body.notes !== undefined) {
+                    if (typeof body.notes !== 'string') throw new StoreError('notes must be a string', 400);
+                    doc.notes = body.notes;
+                }
+                if (body.blockNotes !== undefined) {
+                    if (typeof body.blockNotes !== 'object' || body.blockNotes === null) throw new StoreError('blockNotes must be an object', 400);
+                    for (const [id, notes] of Object.entries(body.blockNotes)) {
+                        if (typeof notes !== 'string') throw new StoreError(`blockNotes.${id} must be a string`, 400);
+                        if (doc.blocks?.[id] === undefined) throw new StoreError(`no block ${id}`, 404);
+                        doc.blocks[id].notes = notes;
+                    }
+                }
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, 'preset', req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // ----------------------------------------------------- fork / save-as
+
+    // POST /presets/:id/fork {name, folder?, tags?, notes?} -> 201 {doc, rev}.
+    // Save-as: a deep copy under a new id with every block identifier
+    // re-minted (and every leaf ref/ghost identifier re-pointed). The fork's
+    // loadout bits, groups and notes copy over unchanged.
+    router.post('/presets/:id/fork', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { name, folder, tags, notes } = req.body ?? {};
+            if (typeof name !== 'string' || !name.trim()) throw new StoreError('fork needs {name}', 400);
+            const saved = await store.enqueue(async () => {
+                const src = store.getDocNow(req.params.id);
+                if (!src) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (store.findByName(name.trim())) {
+                    throw Object.assign(new StoreError(`name "${name.trim()}" is already taken`, 409), { conflict: store.findByName(name.trim()).id });
+                }
+                const doc = structuredClone(src);
+                doc.id = `p_${ulid()}`;
+                doc.name = name.trim();
+                doc.folder = typeof folder === 'string' ? folder : src.folder;
+                if (tags !== undefined) {
+                    if (!Array.isArray(tags) || tags.some((/** @type {any} */ t) => typeof t !== 'string')) throw new StoreError('tags must be an array of strings', 400);
+                    doc.tags = tags;
+                }
+                if (notes !== undefined) {
+                    if (typeof notes !== 'string') throw new StoreError('notes must be a string', 400);
+                    doc.notes = notes;
+                }
+                // re-mint every block identifier; re-point all leaf refs
+                const remap = new Map(/** @type {[string, string][]} */ ([]));
+                doc.blocks ??= {};
+                for (const ident of /** @type {string[]} */ (Object.keys(doc.blocks))) {
+                    remap.set(ident, newId());
+                }
+                const reblock = /** @type {Record<string, any>} */ ({});
+                for (const [ident, block] of Object.entries(doc.blocks)) {
+                    const fresh = structuredClone(block);
+                    fresh.identifier = remap.get(ident);
+                    reblock[fresh.identifier] = fresh;
+                }
+                doc.blocks = reblock;
+                const repoint = (/** @type {any} */ leaf) => {
+                    if (leaf && leaf.kind === 'block' && remap.has(leaf.ref)) leaf.ref = remap.get(leaf.ref);
+                    if (leaf && leaf.kind === 'ghost' && typeof leaf.identifier === 'string' && remap.has(leaf.identifier)) {
+                        leaf.identifier = remap.get(leaf.identifier);
+                    }
+                };
+                const walkRows = (/** @type {any[]} */ rows) => {
+                    for (const row of rows) {
+                        if (['marker', 'block', 'ghost'].includes(row.kind)) { repoint(row); continue; }
+                        if (row.kind === 'section') { repoint(row.header); walkRows(row.rows ?? []); }
+                        if (row.kind === 'group') { repoint(row.header); (row.options ?? []).forEach(repoint); }
+                    }
+                };
+                for (const seq of /** @type {any[]} */ (doc.sequences ?? [])) walkRows(seq.rows ?? []);
+                // markers keep their fixed ST identifiers — never re-minted
+                // new loadout ids (ids are per-document) with the copied
+                // bits — and every enabled/override map re-keyed onto the
+                // re-minted identifiers
+                const rekeyEnabled = (/** @type {Record<string, any>} */ map) => {
+                    const out = /** @type {Record<string, boolean>} */ ({});
+                    for (const [leafId, on] of Object.entries(map)) {
+                        out[remap.get(leafId) ?? leafId] = /** @type {boolean} */ (on);
+                    }
+                    return out;
+                };
+                const loadouts = /** @type {Record<string, any>} */ ({});
+                for (const lo of /** @type {any[]} */ (Object.values(doc.loadouts ?? {}))) {
+                    const lid = `l_${ulid()}`;
+                    const overrides = /** @type {Record<string, any>} */ ({});
+                    for (const [modelName, ov] of Object.entries(/** @type {Record<string, any>} */ (lo.overrides ?? {}))) {
+                        overrides[modelName] = { enabled: rekeyEnabled(ov.enabled ?? {}) };
+                    }
+                    loadouts[lid] = {
+                        ...structuredClone(lo),
+                        id: lid,
+                        enabled: rekeyEnabled(lo.enabled ?? {}),
+                        overrides,
+                    };
+                }
+                doc.loadouts = loadouts;
+                // the fork's active loadout is the copy of the source's
+                // active one (same position in the new id map)
+                const oldIds = /** @type {string[]} */ (Object.keys(src.loadouts ?? {}));
+                const newPos = oldIds.indexOf(/** @type {string} */ (src.activeLoadoutId));
+                const newIds = /** @type {string[]} */ (Object.keys(doc.loadouts));
+                doc.activeLoadoutId = newIds[newPos] ?? newIds[0] ?? null;
+                doc.createdAt = new Date().toISOString();
+                if (doc.source && typeof doc.source === 'object') {
+                    (/** @type {Record<string, any>} */ (doc.source)).forkedFrom = src.id;
+                }
+                await store._writeNewDocNow(doc);
+                await store._bumpRev();
+                return structuredClone(doc);
+            });
+            broadcast(req, 'preset', /** @type {string} */ (saved.id));
+            res.status(201).json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // POST /presets/:id/move {folder?, name?} -> {doc, rev}: rename = move.
+    router.post('/presets/:id/move', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { folder, name } = req.body ?? {};
+            if (folder === undefined && name === undefined) throw new StoreError('move needs {folder?, name?}', 400);
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (folder !== undefined) {
+                    if (typeof folder !== 'string') throw new StoreError('folder must be a string', 400);
+                    doc.folder = folder;
+                }
+                if (name !== undefined) {
+                    if (typeof name !== 'string' || !name.trim()) throw new StoreError('name must be a non-empty string', 400);
+                    doc.name = name.trim();
+                }
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, 'preset', req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // ------------------------------------------------------------ loadouts
+
+    // POST /presets/:id/loadouts {name, from?} -> {doc, rev}: create a
+    // loadout copying `from` (or the current active one when omitted).
+    router.post('/presets/:id/loadouts', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { name, from } = req.body ?? {};
+            if (typeof name !== 'string' || !name.trim()) throw new StoreError('loadouts create needs {name}', 400);
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (Object.values(doc.loadouts ?? {}).some((/** @type {any} */ l) => l.name === name.trim())) {
+                    throw new StoreError(`loadout name "${name.trim()}" is already taken`, 409);
+                }
+                const srcId = from ?? doc.activeLoadoutId;
+                const src = srcId ? doc.loadouts?.[srcId] : null;
+                if (!src) throw new StoreError(`no loadout ${String(srcId)}`, 404);
+                const lid = `l_${ulid()}`;
+                doc.loadouts[lid] = {
+                    id: lid,
+                    name: name.trim(),
+                    notes: '',
+                    enabled: { ...structuredClone(src.enabled) },
+                    overrides: structuredClone(src.overrides ?? {}),
+                };
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, 'preset', req.params.id);
+            res.status(201).json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // PATCH /presets/:id/loadouts/:lid {name?, notes?} -> {doc, rev}
+    router.patch('/presets/:id/loadouts/:lid', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                const loadout = doc.loadouts?.[req.params.lid];
+                if (!loadout) throw new StoreError(`no loadout ${req.params.lid}`, 404);
+                const { name, notes } = req.body ?? {};
+                if (name !== undefined) {
+                    if (typeof name !== 'string' || !name.trim()) throw new StoreError('name must be a non-empty string', 400);
+                    if (Object.values(doc.loadouts).some((/** @type {any} */ l) => l.id !== req.params.lid && l.name === name.trim())) {
+                        throw new StoreError(`loadout name "${name.trim()}" is already taken`, 409);
+                    }
+                    loadout.name = name.trim();
+                }
+                if (notes !== undefined) {
+                    if (typeof notes !== 'string') throw new StoreError('notes must be a string', 400);
+                    loadout.notes = notes;
+                }
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, 'preset', req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // DELETE /presets/:id/loadouts/:lid -> {doc, rev} (never the last one).
+    // Deleting the loadout the slot desires changes the desired state: the
+    // in-queue marker + state write clear it so the slot view falls back to
+    // the document's active loadout.
+    router.delete('/presets/:id/loadouts/:lid', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { doc, wasDesired } = await store.enqueue(async () => {
+                const d = store.getDocNow(req.params.id);
+                if (!d) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (!d.loadouts?.[req.params.lid]) throw new StoreError(`no loadout ${req.params.lid}`, 404);
+                if (Object.keys(d.loadouts).length <= 1) throw new StoreError('cannot delete the last loadout', 409);
+                delete d.loadouts[req.params.lid];
+                if (d.activeLoadoutId === req.params.lid) {
+                    d.activeLoadoutId = Object.keys(d.loadouts)[0];
+                }
+                const desired = store.state.presetId === req.params.id
+                    && (store.state.loadoutId === req.params.lid);
+                if (desired) {
+                    store._markSlotChanged();
+                    await store._mutateStateNow((/** @type {any} */ st) => {
+                        st.loadoutId = null;
+                    });
+                }
+                const saved = await store._savePresetNow(d);
+                return { doc: saved, wasDesired: desired };
+            });
+            broadcast(req, wasDesired ? 'slot' : 'preset', wasDesired ? null : req.params.id);
+            res.json({ doc, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // POST /presets/:id/loadouts/:lid/activate -> {slot view}. Recompiles
+    // (via GET /slot semantics) when this preset is the slot's preset.
+    router.post('/presets/:id/loadouts/:lid/activate', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const view = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (!doc.loadouts?.[req.params.lid]) throw new StoreError(`no loadout ${req.params.lid}`, 404);
+                doc.activeLoadoutId = req.params.lid;
+                await store._savePresetNow(doc);
+                if (store.state.presetId === req.params.id) {
+                    // the desired slot changes with it: marker BEFORE the
+                    // state write (same transaction shape as /slot/load)
+                    store._markSlotChanged();
+                    await store._mutateStateNow((/** @type {any} */ st) => {
+                        st.loadoutId = req.params.lid;
+                    });
+                }
+                return null;
+            });
+            void view;
+            const out = slotView(req);
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset', store.state.presetId === req.params.id ? null : req.params.id);
+            res.json(out);
+        } catch (err) { next(err); }
+    });
+
+    // PUT/DELETE /presets/:id/loadouts/:lid/overrides/:modelId {enabled:{…}}
+    // -> {doc, rev}. Per-Model loadout override (roadmap item 21). PUT with
+    // {} deletes... no: PUT replaces the override (creating it), DELETE
+    // removes it. Enabled identifiers must be known leaves.
+    router.put('/presets/:id/loadouts/:lid/overrides/:modelId', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                const loadout = doc.loadouts?.[req.params.lid];
+                if (!loadout) throw new StoreError(`no loadout ${req.params.lid}`, 404);
+                const { enabled } = req.body ?? {};
+                if (typeof enabled !== 'object' || enabled === null || Array.isArray(enabled)) {
+                    throw new StoreError('override needs {enabled: {identifier: bool}}', 400);
+                }
+                const leaves = new Set(iterLeaves(doc).map((/** @type {any} */ l) => l.ref ?? l.identifier));
+                for (const [id, on] of Object.entries(enabled)) {
+                    if (typeof on !== 'boolean') throw new StoreError(`override.${id} must be a boolean`, 400);
+                    if (!leaves.has(id)) throw new StoreError(`unknown leaf ${id}`, 404);
+                }
+                loadout.overrides ??= {};
+                loadout.overrides[req.params.modelId] = { enabled: { ...enabled } };
+                return store._savePresetNow(doc);
+            });
+            // the slot recompiles against overrides when its Model matches
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    router.delete('/presets/:id/loadouts/:lid/overrides/:modelId', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                const loadout = doc.loadouts?.[req.params.lid];
+                if (!loadout) throw new StoreError(`no loadout ${req.params.lid}`, 404);
+                if (loadout.overrides?.[req.params.modelId] === undefined) {
+                    throw new StoreError(`no override for ${req.params.modelId}`, 404);
+                }
+                delete loadout.overrides[req.params.modelId];
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // -------------------------------------------------- tuning overrides
+
+    // PUT/DELETE /presets/:id/tuning-overrides/:modelId {…TUNING_KEYS}
+    // -> {doc, rev} (roadmap item 16).
+    router.put('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                const body = req.body ?? {};
+                for (const k of Object.keys(body)) {
+                    if (!TUNING_KEYS.includes(k)) throw new StoreError(`"${k}" is not a tuning key`, 400);
+                }
+                doc.tuningOverrides ??= {};
+                doc.tuningOverrides[req.params.modelId] = { ...body };
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    router.delete('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.enqueue(async () => {
+                const doc = store.getDocNow(req.params.id);
+                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
+                if (doc.tuningOverrides?.[req.params.modelId] === undefined) {
+                    throw new StoreError(`no tuning override for ${req.params.modelId}`, 404);
+                }
+                delete doc.tuningOverrides[req.params.modelId];
+                return store._savePresetNow(doc);
+            });
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
             res.json({ doc: saved, rev: store.rev });
         } catch (err) { next(err); }
     });
