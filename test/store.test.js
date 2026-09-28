@@ -206,7 +206,8 @@ test('slot routing: toggle in panel goes to loadout; pick-one sibling collapses'
     // panel turns o2 on while o1 is on: loadout gets o2 on, normalize turns o1 off
     const snap = structuredClone(compiled);
     snap.prompt_order[0].order.find((o) => o.identifier === 'o2').enabled = true;
-    const { routed } = routePanelDiff(doc, compiled, snap, null);
+    const delta = panelDelta(compiled, snap);
+    const { routed } = routePanelDiff(doc, compiled, delta, null);
     assert.ok(routed.some((r) => r.key === 'o2' && r.layer === 'loadout'));
     assert.ok(routed.some((r) => r.layer === 'group:pick-one'));
     assert.equal(doc.loadouts[doc.activeLoadoutId].enabled.o2, true);
@@ -220,7 +221,8 @@ test('slot routing: no Model -> temperature goes to doc settings with warning', 
     const { compiled } = compile(doc, null, {});
     const snap = structuredClone(compiled);
     snap.temperature = 0.42;
-    const { routed, warnings, globalTuning } = routePanelDiff(doc, compiled, snap, null);
+    const delta = panelDelta(compiled, snap);
+    const { routed, warnings, globalTuning } = routePanelDiff(doc, compiled, delta, null);
     assert.equal(doc.settings.temperature, 0.42);
     assert.ok(routed.some((r) => r.key === 'temperature' && r.layer === 'settings'));
     assert.equal(warnings.length, 1);
@@ -235,7 +237,8 @@ test('slot routing: with a Model override, tuning goes to the preset override (i
     const { compiled } = compile(doc, { name: 'Kimi K3', tuning: {} }, {});
     const snap = structuredClone(compiled);
     snap.temperature = 0.55;
-    const { routed } = routePanelDiff(doc, compiled, snap, /** @type {{name: string, tuning?: Record<string, unknown>|null}|null} */ ({ name: 'Kimi K3', tuning: {} }));
+    const delta = panelDelta(compiled, snap);
+    const { routed } = routePanelDiff(doc, compiled, delta, /** @type {{name: string, tuning?: Record<string, unknown>|null}|null} */ ({ name: 'Kimi K3', tuning: {} }));
     assert.equal(doc.tuningOverrides['Kimi K3'].temperature, 0.55);
     assert.ok(routed.some((r) => r.key === 'temperature' && r.layer === 'tuningOverride:Kimi K3'));
 });
@@ -250,7 +253,8 @@ test('slot routing: reorder in panel reorders sequences (blocks layer)', () => {
     // move b before a: a, b, c -> b, a, c
     const reordered = [order.find((o) => o.identifier === 'chatHistory'), order.find((o) => o.identifier === 'b'), order.find((o) => o.identifier === 'a'), order.find((o) => o.identifier === 'c')];
     snap.prompt_order[0].order = reordered;
-    const { routed } = routePanelDiff(doc, compiled, snap, null);
+    const delta = panelDelta(compiled, snap);
+    const { routed } = routePanelDiff(doc, compiled, delta, null);
     assert.ok(routed.some((r) => r.key === 'prompt_order.order'));
     const flat = doc.sequences[0].rows.filter((r) => r.kind === 'block').map((r) => r.ref);
     assert.deepEqual(flat, ['b', 'a', 'c']);
@@ -311,7 +315,8 @@ test('slot routing: panel DELTA preserves concurrent API writes (temperature sur
 
     const delta = panelDelta(baseWith066, snapshot);
     assert.equal(delta.temperature, undefined); // untouched by the user
-    assert.ok(delta.prompt_order.length > 0); // toggle rides in the order section
+    assert.deepEqual(delta.prompt_order.order, [{ identifier: 'b', enabled: false }]); // only the toggle
+    assert.equal(delta.prompt_order.changed, false); // sequence untouched
 
     const { routed } = routePanelDiff(doc, current, delta, null);
     assert.ok(routed.some((r) => r.key === 'b' && r.layer === 'loadout'));
@@ -329,8 +334,8 @@ test('slot routing: unchanged panel sections collapse to empty in the delta (no 
     const snapshot = structuredClone(base);
     snapshot.wi_format = 'user edited this'; // only a settings key changes
     const delta = panelDelta(base, snapshot);
-    assert.deepEqual(delta.prompt_order, []); // sections untouched -> absent
-    assert.deepEqual(delta.prompts, []);
+    assert.deepEqual(delta.prompt_order, { changed: false, order: [] }); // untouched -> no entries
+    assert.deepEqual(delta.prompts, []); // no changed prompts
     assert.equal(delta.wi_format, 'user edited this');
     // rerouted against the CURRENT compiled output: enabled bits are not
     // clobbered by an empty section, and only wi_format routes

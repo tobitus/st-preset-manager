@@ -58,9 +58,14 @@ export async function init(router) {
     router.use((/** @type {any} */ err, _req, res, _next) => {
         const status = err?.status ?? 500;
         if (status >= 500) console.error('[st-preset-manager]', err);
+        // structured extras (e.g. the stale 409's slotChangedRev) ride the
+        // body; `conflict` keeps its historical shape
+        const { status: _s, message, conflict, ...extra } = err ?? {};
+        delete extra.status;
         res.status(status).json({
-            error: String(err?.message ?? err),
-            ...(err?.conflict ? { conflict: err.conflict } : {}),
+            error: String(message ?? err),
+            ...(conflict !== undefined ? { conflict } : {}),
+            ...extra,
         });
     });
 

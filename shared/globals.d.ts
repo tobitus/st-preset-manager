@@ -26,11 +26,21 @@ interface PmHandle {
         getRevision(presetId: string, rev: number): unknown;
         mutateState(fn: (st: Record<string, unknown>) => void): Promise<unknown>;
         mutateModels(fn: (reg: Record<string, unknown>) => unknown): Promise<unknown>;
+        /** slot preset doc without taking the queue (null instead of 404) */
+        getDocNow(id: string): Record<string, unknown> | null;
+        /** save body WITHOUT taking the queue (call only inside enqueue) */
+        _savePresetNow(doc: Record<string, unknown>, opts?: { label?: string }): Promise<unknown>;
+        /** state mutation body WITHOUT taking the queue (call only inside enqueue) */
+        _mutateStateNow(fn: (st: Record<string, unknown>) => void): Promise<unknown>;
+        /** models mutation body WITHOUT taking the queue (call only inside enqueue) */
+        _mutateModelsNow(fn: (reg: Record<string, unknown>) => unknown): Promise<unknown>;
+        /** bump the global rev (call only inside enqueue); skipWrite leaves the state.json write to the caller */
+        _bumpRev(opts?: { skipWrite?: boolean }): Promise<void>;
         shelfAdd(body: Record<string, unknown>): Promise<unknown>;
         shelfList(): unknown[];
         shelfRemove(id: string): Promise<void>;
         rescan(): Promise<void>;
-        enqueue(fn: () => unknown): Promise<unknown>;
+        enqueue<T>(fn: () => T): Promise<T>;
         /** mark the desired slot changed at rev+1 (call inside mutateState) */
         _markSlotChanged(): void;
     };

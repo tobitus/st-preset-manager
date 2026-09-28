@@ -38,18 +38,26 @@ function rawOf(store) {
 }
 
 /**
- * Current slot view: {rev, desired, compiled, hash}. The compile input is
- * the DESIRED loadout (state.loadoutId), not the document's
- * activeLoadoutId: /slot/load stores the requested loadout in state.json,
- * and loading a non-active loadout must return/push that loadout.
+ * Current slot view: {rev, slotChangedRev, desired, compiled, hash}. The
+ * compile input is the DESIRED loadout (state.loadoutId), not the
+ * document's activeLoadoutId: /slot/load stores the requested loadout in
+ * state.json, and loading a non-active loadout must return/push that
+ * loadout. `slotChangedRev` is the global rev of the last desired-slot
+ * change (preset/loadout swap); panel posts carry it in their base so the
+ * tab can re-base, and the same-hash reconcile can advance the applied rev
+ * (bridge side). Call OUTSIDE the store queue: GET /slot is a read of the
+ * last committed state (the panel route builds its view after its
+ * transaction commits).
+ * @param {any} req
  */
 function slotView(req) {
     const { store } = req.pm;
-    const doc = store.state.presetId ? store.getPreset(store.state.presetId) : null;
+    const doc = store.state.presetId ? store.getDocNow(store.state.presetId) : null;
     const model = doc ? resolveModel(store.models, rawOf(store)) : null;
     if (!doc) {
         return {
             rev: store.rev,
+            slotChangedRev: store.slotChangedRev ?? 0,
             desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: store.state.modelId },
             compiled: null,
             hash: null,
@@ -59,6 +67,7 @@ function slotView(req) {
     const { compiled, hash } = compile(doc, model, readBase(req), desiredLoadout);
     return {
         rev: store.rev,
+        slotChangedRev: store.slotChangedRev ?? 0,
         desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: store.state.modelId },
         compiled,
         hash,
@@ -181,14 +190,18 @@ export function makeRouter() {
     router.post('/slot/load', async (req, res, next) => {
         try {
             const { presetId, loadoutId } = req.body ?? {};
+            const store = req.pm.store;
             const doc = /** @type {{activeLoadoutId?: string, loadouts?: Record<string, unknown>}} */ (req.pm.store.getPreset(presetId));
             if (!doc) return res.status(404).json({ error: `preset ${presetId} not found` });
             const lid = loadoutId ?? doc.activeLoadoutId;
             if (!lid || !doc.loadouts?.[lid]) return res.status(400).json({ error: `no loadout ${lid}` });
-            await req.pm.store.mutateState((/** @type {any} */ st) => {
-                req.pm.store._markSlotChanged();
-                st.presetId = presetId;
-                st.loadoutId = lid;
+            // one transaction: the marker, the state write and the rev bump
+            // cannot interleave with a queued /slot/panel
+            await store.enqueue(() => {
+                store._markSlotChanged();
+                store.state.presetId = presetId;
+                store.state.loadoutId = lid;
+                return store._bumpRev({ skipWrite: true });
             });
             const view = slotView(req);
             broadcast(req, 'slot', null);
@@ -199,10 +212,12 @@ export function makeRouter() {
     router.post('/slot/model', async (req, res, next) => {
         try {
             const { modelId, raw } = req.body ?? {};
-            await req.pm.store.mutateState((/** @type {any} */ st) => {
-                req.pm.store._markSlotChanged();
-                st.modelId = modelId ?? null;
-                if (raw) st.raw = raw;
+            const store = req.pm.store;
+            await store.enqueue(() => {
+                store._markSlotChanged();
+                store.state.modelId = modelId ?? null;
+                if (raw) store.state.raw = raw;
+                return store._bumpRev({ skipWrite: true });
             });
             const view = slotView(req);
             broadcast(req, 'slot', null);
@@ -214,61 +229,70 @@ export function makeRouter() {
         try {
             const { clientId, baseRev, base, snapshot } = req.body ?? {};
             const store = req.pm.store;
-            const doc = store.state.presetId
-                ? /** @type {any} */ (store.getPreset(/** @type {string} */ (store.state.presetId)))
-                : null;
-            if (!doc) return res.status(409).json({ error: 'no preset in the slot' });
             if (typeof baseRev !== 'number' || !base || typeof base !== 'object') {
                 return res.status(409).json({ error: 'missing baseRev or base panel projection' });
             }
-            // Stale desired-state guard: if the desired preset or loadout
-            // changed after the client's base snapshot was taken, the panel
-            // delta was diffed against a different document — replaying it
-            // here would pour the OLD preset's fields into the NEW one. The
-            // client must re-reconcile and re-base instead (409).
-            if ((store.slotChangedRev ?? 0) > baseRev) {
-                return res.status(409).json({ error: 'stale: desired preset or loadout changed after baseRev' });
-            }
-            const clean = stripConnectionKeys(snapshot ?? {});
-            const cleanBase = stripConnectionKeys(base);
-            const model = resolveModel(store.models, rawOf(store));
-            // route against the loadout the tab is actually showing (the
-            // desired one), not the document's active default
-            const desiredLoadout = /** @type {string|null} */ (store.state.loadoutId) ?? doc.activeLoadoutId;
-            const { compiled: currentCompiled } = compile(doc, model, readBase(req), desiredLoadout);
-            // DELTA = what the USER changed in the panel (base -> snapshot),
-            // not what the panel shows against currentCompiled. Concurrent
-            // API writes to untouched fields therefore survive: most recent
-            // wins per field, never wholesale.
-            const delta = panelDelta(cleanBase, clean);
-            if (delta === null) {
-                // Panel section shape damage (missing prompt_order/prompts)
-                // cannot be diffed field-wise; reject rather than guess.
-                return res.status(409).json({ error: 'snapshot or base lost prompt_order/prompts structure' });
-            }
-            const { routed, globalTuning, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
-            // A panel observation that routes nothing is not a revision:
-            // saving unconditionally here turned every echo of our own apply
-            // into doc.rev+1 and fed the apply<->panel loop.
-            if (routed.length === 0 && !globalTuning) {
-                const view = slotView(req);
-                for (const w of warnings) {
-                    req.pm.hub.broadcast({ rev: store.rev, kind: 'warning', message: w });
+            // ONE store-queue transaction: the stale check, the current
+            // compile, the delta routing and every resulting write observe
+            // the same state and cannot interleave with another queued
+            // mutation (e.g. a /slot/load queued ahead of this post must
+            // turn the guard stale BEFORE the deltas route, not after the
+            // save). Queue order and the 409 decision are identical.
+            const view = await store.enqueue(/** @returns {Promise<{routed: {key: string, layer: string}[], warnings: string[]}>} */ async () => {
+                const doc = store.state.presetId
+                    ? store.getDocNow(/** @type {string} */ (store.state.presetId))
+                    : null;
+                if (!doc) throw new StoreError('no preset in the slot', 409);
+                // Stale desired-state guard: if the desired preset or loadout
+                // changed after the client's base snapshot was taken, the panel
+                // delta was diffed against a different document — replaying it
+                // here would pour the OLD preset's fields into the NEW one. The
+                // client must re-reconcile and re-base instead (409).
+                if ((store.slotChangedRev ?? 0) > baseRev) {
+                    throw new StoreError('stale: desired preset or loadout changed after baseRev', 409, {
+                        stale: true,
+                        slotChangedRev: store.slotChangedRev ?? 0,
+                    });
                 }
-                return res.json({ rev: view.rev, compiled: view.compiled, hash: view.hash, routed });
-            }
-            await store.savePreset(doc);
-            if (globalTuning && model) {
-                await store.mutateModels((/** @type {any} */ reg) => {
-                    reg.models[model.name].tuning = { ...reg.models[model.name].tuning, ...globalTuning };
-                });
-            }
-            const view = slotView(req);
-            for (const w of warnings) {
+                const clean = stripConnectionKeys(snapshot ?? {});
+                const cleanBase = stripConnectionKeys(base);
+                const model = resolveModel(store.models, rawOf(store));
+                // route against the loadout the tab is actually showing (the
+                // desired one), not the document's active default
+                const desiredLoadout = /** @type {string} */ (store.state.loadoutId ?? doc.activeLoadoutId);
+                const { compiled: currentCompiled } = compile(doc, model, readBase(req), desiredLoadout);
+                // DELTA = what the USER changed in the panel (base -> snapshot),
+                // as a semantic delta (per identifier/field/key): concurrent
+                // API edits to other blocks, bits or keys survive. Most recent
+                // wins per field, never wholesale.
+                const delta = panelDelta(cleanBase, clean);
+                if (delta === null) {
+                    // Panel section shape damage (missing prompt_order/prompts)
+                    // cannot be diffed field-wise; reject rather than guess.
+                    throw new StoreError('snapshot or base lost prompt_order/prompts structure', 409);
+                }
+                const { routed, globalTuning, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
+                // A panel observation that routes nothing is not a revision:
+                // saving unconditionally here turned every echo of our own apply
+                // into doc.rev+1 and fed the apply<->panel loop.
+                if (routed.length > 0 || globalTuning) {
+                    await store._savePresetNow(doc);
+                    if (globalTuning && model) {
+                        await store._mutateModelsNow((/** @type {any} */ reg) => {
+                            reg.models[model.name].tuning = { ...reg.models[model.name].tuning, ...globalTuning };
+                        });
+                    }
+                }
+                return { routed, warnings };
+            });
+            const slot = slotView(req);
+            for (const w of view.warnings) {
                 req.pm.hub.broadcast({ rev: store.rev, kind: 'warning', message: w });
             }
-            broadcast(req, 'slot', null, clientId);
-            res.json({ rev: view.rev, compiled: view.compiled, hash: view.hash, routed });
+            if (view.routed.length > 0) {
+                broadcast(req, 'slot', null, clientId);
+            }
+            res.json({ rev: slot.rev, slotChangedRev: slot.slotChangedRev, compiled: slot.compiled, hash: slot.hash, routed: view.routed });
         } catch (err) { next(err); }
     });
 

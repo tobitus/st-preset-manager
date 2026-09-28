@@ -23,10 +23,14 @@ export class StoreError extends Error {
     /**
      * @param {string} message
      * @param {number} [status]
+     * @param {Record<string, unknown>} [extra] additional JSON body fields
+     *   the error middleware merges into the response (e.g. the stale 409's
+     *   `slotChangedRev`)
      */
-    constructor(message, status = 400) {
+    constructor(message, status = 400, extra = undefined) {
         super(message);
         this.status = status;
+        if (extra) Object.assign(this, extra);
     }
 }
 
@@ -133,20 +137,27 @@ export class Store {
         await this.rescan();
     }
 
-    async _bumpRev() {
+    /**
+     * Bump the global rev. Inside a store-queue transaction pass
+     * `{ skipWrite: true }` when the transaction writes state.json itself
+     * afterwards, so `rev` and `slotChangedRev` land on disk exactly once;
+     * standalone callers let this write.
+     * @param {{ skipWrite?: boolean }} [opts]
+     */
+    async _bumpRev(opts = {}) {
         this.rev += 1;
         this.state.rev = this.rev;
         this.state.updatedAt = new Date().toISOString();
-        await atomicWrite(this.stateFile, JSON.stringify(this.state, null, 2));
+        if (!opts.skipWrite) await atomicWrite(this.stateFile, JSON.stringify(this.state, null, 2));
     }
 
     /**
      * Mark the desired slot as changed (preset swapped or loadout switched):
      * records the global rev the change happened at, so /slot/panel can
      * reject stale panel deltas with 409. Call from inside mutateState
-     * callbacks (single-writer), BEFORE the fn's own mutations: the marker
-     * must name the rev where the change became visible, i.e. the rev this
-     * mutation will bump to.
+     * callbacks or store-queue transactions (single-writer), BEFORE the
+     * callback's own mutations: the marker must name the rev where the
+     * change becomes visible, i.e. the rev this mutation bumps to.
      */
     _markSlotChanged() {
         this.slotChangedRev = this.rev + 1;
@@ -219,6 +230,20 @@ export class Store {
     getPreset(id) {
         const entry = this.index.get(id);
         if (!entry) throw new StoreError(`preset ${id} not found`, 404);
+        return structuredClone(entry.doc);
+    }
+
+    /**
+     * The slot's preset document WITHOUT the queue (for callers already
+     * inside a store-queue transaction): same content as getPreset, minus
+     * the queue-tail latency and the not-found StoreError (callers check
+     * `null` instead — the panel route answers 409 on it).
+     * @param {string} id
+     * @returns {any|null}
+     */
+    getDocNow(id) {
+        const entry = this.index.get(id);
+        if (!entry) return null;
         return structuredClone(entry.doc);
     }
 
@@ -307,7 +332,20 @@ export class Store {
      * @param {{ label?: string }} [opts]
      */
     async savePreset(doc, opts = {}) {
-        return this.enqueue(async () => {
+        return this.enqueue(() => this._savePresetNow(doc, opts));
+    }
+
+    /**
+     * Body of savePreset WITHOUT taking the queue: call from inside a
+     * store-queue transaction that must read state, validate and write as
+     * one atomic operation (e.g. /slot/panel's stale check + delta routing
+     * + save). Never call outside the queue — the single-writer invariant
+     * is what makes its reads trustworthy.
+     * @param {any} doc
+     * @param {{ label?: string }} [opts]
+     */
+    async _savePresetNow(doc, opts = {}) {
+        {
             const errs = validateDoc(doc);
             if (errs.length) throw new StoreError(`invalid document: ${errs.join(', ')}`);
             const entry = this.index.get(doc.id);
@@ -326,7 +364,7 @@ export class Store {
             await this._writeDoc(doc, path.dirname(newPath));
             await this._bumpRev();
             return structuredClone(doc);
-        });
+        }
     }
 
     /** @param {string} id */
@@ -419,7 +457,17 @@ export class Store {
 
     /** @param {(reg: any) => any} fn */
     async mutateModels(fn) {
-        return this.enqueue(async () => {
+        return this.enqueue(() => this._mutateModelsNow(fn));
+    }
+
+    /**
+     * Body of mutateModels WITHOUT taking the queue: compose inside ONE
+     * store-queue transaction (see _savePresetNow). Never call outside the
+     * queue.
+     * @param {(reg: any) => any} fn
+     */
+    async _mutateModelsNow(fn) {
+        {
             const reg = structuredClone(this.models);
             const result = await fn(reg);
             const errs = validateRegistry(reg);
@@ -428,21 +476,31 @@ export class Store {
             await atomicWrite(this.modelsFile, JSON.stringify(reg, null, 2));
             await this._bumpRev();
             return result;
-        });
+        }
     }
 
     // ----------------------------------------------------------------- state
 
     /** @param {(state: any) => any} fn */
     async mutateState(fn) {
-        return this.enqueue(async () => {
+        return this.enqueue(() => this._mutateStateNow(fn));
+    }
+
+    /**
+     * Body of mutateState WITHOUT taking the queue: compose with other
+     * reads/writes inside ONE store-queue transaction (see _savePresetNow).
+     * Never call outside the queue.
+     * @param {(state: any) => any} fn
+     */
+    async _mutateStateNow(fn) {
+        {
             const st = structuredClone(this.state);
             await fn(st);
             this.state = st;
             await atomicWrite(this.stateFile, JSON.stringify(st, null, 2));
             await this._bumpRev();
             return structuredClone(st);
-        });
+        }
     }
 
     // ----------------------------------------------------------------- shelf
