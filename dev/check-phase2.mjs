@@ -437,7 +437,12 @@ async function main() {
         await click(nameOf(optIds(g.pov)[0]));
         await api('POST', `/presets/${ffId}/ops`, { op: 'setCardinality', key: g.color.key, cardinality: 'pick-one' });
         await until(() => exists('#pm-window .pm-conflict'), 8000, 'conflict badge');
-        await probe.eval(`document.querySelector('#pm-window li.pm-node[data-node-key="${g.pov.key}"]').scrollIntoView({ block: 'start' })`);
+        // scroll ONLY the outline (scrollIntoView would also scroll the window
+        // body and push the loadout bar out of the shot)
+        await probe.eval(`(() => { const o = document.querySelector('#pm-window .pm-outline'); const li = document.querySelector('#pm-window li.pm-node[data-node-key="${g.pov.key}"]');
+            o.scrollTop += li.getBoundingClientRect().top - o.getBoundingClientRect().top;
+            for (const el of document.querySelectorAll('#pm-window .pm-body, #pm-window .pm-pane, #pm-window .pm-preset-view')) el.scrollTop = 0; })()`);
+        await dismissPopups();
         await sleep(500);
         const dir = path.join(REPO, 'dev', 'shots');
         fs.mkdirSync(dir, { recursive: true });
