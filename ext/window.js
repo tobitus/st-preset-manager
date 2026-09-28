@@ -8,12 +8,14 @@ import { api, SLOT_NAME } from './st.js';
 import { createPresetsTab } from './tabs/presets.js';
 
 /**
- * @param {{ title: string, content: string }} opts
+ * @param {{ title: string, content: string, onClose?: () => void }} opts
  * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void }}
  */
-export function openWindow({ title, content }) {
-    document.getElementById('pm-window')?.remove();
-    const root = document.createElement('div');
+export function openWindow({ title, content, onClose }) {
+    const existing = /** @type {any} */ (document.getElementById('pm-window'));
+    existing?.__pmCleanup?.();
+    existing?.remove();
+    const root = /** @type {any} */ (document.createElement('div'));
     root.id = 'pm-window';
     root.innerHTML = `
         <div class="pm-titlebar">
@@ -29,19 +31,28 @@ export function openWindow({ title, content }) {
         jq(root).draggable({ handle: '.pm-titlebar' });
         jq(root).resizable?.({ minWidth: 360, minHeight: 220 });
     }
-    root.querySelector('.pm-close')?.addEventListener('click', () => root.remove());
-    return { root, body: /** @type {HTMLElement} */ (root.querySelector('.pm-body')), close: () => root.remove() };
+    const close = () => {
+        onClose?.();
+        root.__pmCleanup = null;
+        root.remove();
+    };
+    root.querySelector('.pm-close')?.addEventListener('click', close);
+    root.__pmCleanup = onClose;
+    return { root, body: /** @type {HTMLElement} */ (root.querySelector('.pm-body')), close };
 }
 
 /**
  * Open the main window: tab strip + Library and Presets panes, wired to the
  * bridge. Library "Open" switches to the Presets tab and opens the preset.
  * @param {import('./bridge.js').Bridge} bridge
- * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void, presets: { open(presetId: string): Promise<void> } }}
+ * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void, presets: { open(presetId: string): Promise<void>, destroy(): void } }}
  */
 export function openMainWindow(bridge) {
+    /** @type {any} */
+    let presets;
     const win = openWindow({
         title: 'Preset Manager',
+        onClose: () => presets?.destroy(),
         content: `
             <div class="pm-tabs">
                 <button type="button" class="pm-tab menu_button pm-active" data-tab="library">Library</button>
@@ -66,7 +77,7 @@ export function openMainWindow(bridge) {
         tab.addEventListener('click', () => showTab(/** @type {string} */ (tab.dataset.tab)));
     }
 
-    const presets = createPresetsTab(
+    presets = createPresetsTab(
         /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="presets"]')),
         bridge,
     );

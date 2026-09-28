@@ -7,7 +7,7 @@
  * `oai` settings, ST's own prompt-manager DOM) — never only the REST API.
  *
  *   node dev/check-phase2.mjs              all checks
- *   node dev/check-phase2.mjs 6 9          subset (live, 6, 9, editor, keys, 14)
+ *   node dev/check-phase2.mjs 6 9          subset (live, 6, 9, editor, editor-hold, keys, 14)
  *
  * Checks:
  *   setup   reset + fixtures, FF 5.4 loaded AND opened through the window
@@ -18,6 +18,8 @@
  *           the v2 window follows; compiled has no notes/groups/cardinality
  *           KEYS (the ST-format export is Phase 3 — not checked here)
  *   editor  content edit reaches ST; block notes stay library-only
+ *   editor-hold  typing into block/preset notes while their save is held
+ *           in the page survives the save's completion and the refresh
  *   keys    Alt+↓/Alt+↑ move, Tab/Shift+Tab promote/demote round-trip
  *   14      mouse drag of a single row (2 down) and of a group header with
  *           its options: ST's prompt_order shows the new order, identifier
@@ -273,18 +275,46 @@ async function main() {
         const hybrid = povIds[3];
         try {
             await until(converged, 10000, 'converged before 9');
-            const before = (await stDom()).filter((r) => povIds.includes(r.identifier) && r.enabled).map((r) => r.identifier);
-            await until(() => clickStToggle(target), 5000, 'ST toggle clickable');
+            /** POV on-lists in ST's live settings and in ST's own panel DOM. */
+            const povState = async () => {
+                const live = (await oai()).order.filter((e) => povIds.includes(e.identifier));
+                const dom = (await stDom()).filter((r) => povIds.includes(r.identifier));
+                return {
+                    live: live.filter((e) => e.enabled).map((e) => e.identifier),
+                    dom: dom.filter((r) => r.enabled).map((r) => r.identifier),
+                    complete: live.length === povIds.length && dom.length === povIds.length,
+                };
+            };
+            const only = (/** @type {string[]} */ l, /** @type {string} */ id) => l.length === 1 && l[0] === id;
+            // precondition in BOTH live state and DOM: Hybrid is the one on,
+            // the target is off (a stale DOM from an earlier loadout can't pass)
+            const pre = await until(async () => {
+                const s = await povState();
+                return s.complete && only(s.live, hybrid) && only(s.dom, hybrid) ? s : null;
+            }, 8000, 'precondition: Hybrid on, target off (live + DOM)');
             const t0 = Date.now();
-            let onList = [];
-            const ms = await timeUntil(async () => {
-                const pov = (await stDom()).filter((r) => povIds.includes(r.identifier));
-                onList = pov.filter((r) => r.enabled).map((r) => r.identifier);
-                // all four rows rendered (a mid-render list must not count)
-                return pov.length === povIds.length && onList.length === 1 && onList[0] === target;
-            }, 5000);
-            report('9 pick-one collapse in ST panel', ms !== null && ms <= 2000,
-                `${ms ?? `>${Date.now() - t0}`} ms, POV on before=${before.length} after=${J(onList.map((i) => povIds.indexOf(i)))} (target=option 0)`);
+            await until(() => clickStToggle(target), 5000, 'ST toggle clickable');
+            // the click must really land: the previously-off target is seen ON
+            // (ST's handleToggle flips the live bit synchronously — a transient
+            // two-on state before write-back normalises it)
+            let sawTargetOn = false;
+            let transient = '';
+            let last = pre;
+            let ms = null;
+            while (Date.now() - t0 < 5000) {
+                last = await povState();
+                if (!sawTargetOn && (last.live.includes(target) || last.dom.includes(target))) {
+                    sawTargetOn = true;
+                    transient = `live=${last.live.length} dom=${last.dom.length} on at +${Date.now() - t0} ms`;
+                }
+                if (sawTargetOn && last.complete && only(last.live, target) && only(last.dom, target)) {
+                    ms = Date.now() - t0;
+                    break;
+                }
+                await sleep(25);
+            }
+            report('9 pick-one collapse in ST panel', sawTargetOn && ms !== null && ms <= 2000,
+                `${ms ?? `>${Date.now() - t0}`} ms from click (target-only in live AND DOM); click landed=${sawTargetOn}${transient ? ` (${transient})` : ''}; final live=${J(last.live.map((i) => povIds.indexOf(i)))} dom=${J(last.dom.map((i) => povIds.indexOf(i)))} (target=option 0)`);
         } catch (err) {
             report('9 pick-one collapse in ST panel', false, /** @type {Error} */ (err).message);
         }
@@ -331,6 +361,89 @@ async function main() {
             const leaked = slotText.includes('chk2 private note');
             report(name, ms !== null && !leaked, `content in ST after ${ms ?? '>5000'} ms, notes in doc=true, notes in /slot=${leaked}`);
         } catch (err) {
+            report(name, false, /** @type {Error} */ (err).message);
+        }
+    }
+
+    // ------------------------------------------------------------- layout
+    // The Presets pane is bounded: real mouse-wheel scrolling (no
+    // scrollIntoView) reaches the last outline row and both notes editors,
+    // all inside the window's visible box (review finding 1).
+    if (wanted('layout')) {
+        const name = 'layout: wheel reaches last outline row and both notes editors';
+        try {
+            await dismissPopups();
+            await click(nameOf(mainId));
+            await until(() => exists('#pm-window textarea.pm-block-notes'), 5000, 'editor shows Main Prompt');
+            const box = (/** @type {string} */ sel) => probe.eval(`(() => { const r = document.querySelector(${J(sel)}).getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + Math.min(r.height / 2, 20), top: r.top, bottom: r.bottom }; })()`);
+            const win = await box('#pm-window');
+            const inWin = (/** @type {any} */ b) => b.top >= win.top - 1 && b.bottom <= win.bottom + 1;
+            /** wheel over `areaSel` until `targetSel` is fully inside the window (or 60 notches). */
+            const wheelTo = async (/** @type {string} */ areaSel, /** @type {string} */ targetSel) => {
+                const a = await box(areaSel);
+                for (let i = 0; i < 60; i++) {
+                    if (inWin(await box(targetSel))) return true;
+                    await probe.cdp('Input.dispatchMouseEvent', { type: 'mouseWheel', x: a.x, y: a.y, deltaX: 0, deltaY: 200 });
+                    await sleep(40);
+                }
+                return inWin(await box(targetSel));
+            };
+            const lastLeaf = await probe.eval(`(() => { const all = document.querySelectorAll('#pm-window .pm-outline .pm-row'); all[all.length - 1].id = 'pm-chk-last'; return all[all.length - 1].textContent.trim().slice(0, 30); })()`);
+            const outlineOk = await wheelTo('#pm-window .pm-outline', '#pm-chk-last');
+            const notesOk = await wheelTo('#pm-window .pm-side', '#pm-window .pm-block-notes-save');
+            const presetOk = await wheelTo('#pm-window .pm-side', '#pm-window .pm-preset-notes-save');
+            const heights = await probe.eval(`(() => { const h = (s) => Math.round(document.querySelector(s).getBoundingClientRect().height); return { win: h('#pm-window'), outline: h('#pm-window .pm-outline'), side: h('#pm-window .pm-side'), outlineScroll: document.querySelector('#pm-window .pm-outline').scrollHeight }; })()`);
+            report(name, outlineOk && notesOk && presetOk,
+                `last row (${J(lastLeaf)}) visible=${outlineOk}, block notes save visible=${notesOk}, preset notes save visible=${presetOk}; heights ${J(heights)}`);
+        } catch (err) {
+            report(name, false, /** @type {Error} */ (err).message);
+        }
+    }
+
+    // -------------------------------------------------------- editor-hold
+    // Typing while a save is still pending must survive that save's
+    // completion and the refresh that follows (review finding 3): the
+    // plugin write is HELD in the page (fetch hook), the user types more,
+    // then the hold is released.
+    if (wanted('editor-hold')) {
+        const name = 'editor-hold: typing during a pending save is not overwritten';
+        const HOLD = `(() => {
+            if (window.__pmRealFetch2) return true;
+            const real = window.fetch.bind(window);
+            window.__pmRealFetch2 = real;
+            window.__pmHold2 = new Promise((r) => { window.__pmRelease2 = r; });
+            window.fetch = (u, init) => {
+                const url = String(u);
+                const hold = (init?.method === 'POST' && /\\/presets\\/[^/]+\\/ops$/.test(url)) || (init?.method === 'PATCH' && /\\/meta$/.test(url));
+                return hold ? window.__pmHold2.then(() => real(u, init)) : real(u, init);
+            };
+            return true; })()`;
+        const UNHOLD = `(() => { window.__pmRelease2?.(); if (window.__pmRealFetch2) { window.fetch = window.__pmRealFetch2; window.__pmRealFetch2 = null; } return true; })()`;
+        try {
+            await until(converged, 10000, 'converged before editor-hold');
+            await click(nameOf(mainId));
+            await until(() => exists('#pm-window textarea.pm-block-notes'), 5000, 'editor shows Main Prompt');
+            await probe.eval(HOLD);
+            // block notes: save 'v1' (held), keep typing
+            await setValue('#pm-window textarea.pm-block-notes', 'hold v1');
+            await click('#pm-window .pm-block-notes-save');
+            await setValue('#pm-window .pm-preset-notes', 'preset hold v1');
+            await click('#pm-window .pm-preset-notes-save');
+            await sleep(300);
+            await setValue('#pm-window textarea.pm-block-notes', 'hold v2 typed while saving');
+            await setValue('#pm-window .pm-preset-notes', 'preset v2 typed while saving');
+            await probe.eval(UNHOLD);
+            await until(async () => {
+                const d = await getDoc();
+                return d.blocks[mainId].notes === 'hold v1' && d.notes === 'preset hold v1';
+            }, 8000, 'held saves stored');
+            // let the save completions, the reconcile and the SSE-driven refresh run
+            await sleep(2500);
+            const ui = await probe.eval(`({ block: document.querySelector('#pm-window textarea.pm-block-notes').value, preset: document.querySelector('#pm-window .pm-preset-notes').value })`);
+            const pass = ui.block === 'hold v2 typed while saving' && ui.preset === 'preset v2 typed while saving';
+            report(name, pass, `doc has v1 for both; textareas after completion+refresh: block=${J(ui.block)} preset=${J(ui.preset)}`);
+        } catch (err) {
+            await probe.eval(UNHOLD).catch(() => {});
             report(name, false, /** @type {Error} */ (err).message);
         }
     }
@@ -434,13 +547,21 @@ async function main() {
 
     // ------------------------------------------------------ screenshots
     try {
-        await click(nameOf(optIds(g.pov)[0]));
+        // a pick-one CONFLICT (Color: 2 on) with its ⚠ badge and radios,
+        // one of its options selected, the side scrolled to the notes editor
         await api('POST', `/presets/${ffId}/ops`, { op: 'setCardinality', key: g.color.key, cardinality: 'pick-one' });
         await until(() => exists('#pm-window .pm-conflict'), 8000, 'conflict badge');
-        // scroll ONLY the outline (scrollIntoView would also scroll the window
-        // body and push the loadout bar out of the shot)
-        await probe.eval(`(() => { const o = document.querySelector('#pm-window .pm-outline'); const li = document.querySelector('#pm-window li.pm-node[data-node-key="${g.pov.key}"]');
-            o.scrollTop += li.getBoundingClientRect().top - o.getBoundingClientRect().top;
+        await click(nameOf(optIds(g.color)[1]));
+        await until(() => exists('#pm-window textarea.pm-block-notes'), 5000, 'editor shows the Color option');
+        await setValue('#pm-window textarea.pm-block-notes', 'why this option: screenshot note');
+        await click('#pm-window .pm-block-notes-save');
+        await until(async () => (await getDoc()).blocks[optIds(g.color)[1]].notes === 'why this option: screenshot note', 5000, 'notes saved');
+        await sleep(800);
+        // scroll ONLY the inner panes (the loadout bar and tabs stay in frame)
+        await probe.eval(`(() => { const o = document.querySelector('#pm-window .pm-outline'); const li = document.querySelector('#pm-window li.pm-node[data-node-key="${g.color.key}"]');
+            o.scrollTop += li.getBoundingClientRect().top - o.getBoundingClientRect().top - 60;
+            const s = document.querySelector('#pm-window .pm-side'); const b = document.querySelector('#pm-window .pm-block-save');
+            s.scrollTop += b.getBoundingClientRect().top - s.getBoundingClientRect().top - 120;
             for (const el of document.querySelectorAll('#pm-window .pm-body, #pm-window .pm-pane, #pm-window .pm-preset-view')) el.scrollTop = 0; })()`);
         await dismissPopups();
         await sleep(500);
@@ -454,6 +575,28 @@ async function main() {
         console.log(`[check] screenshots: ${full} ${win}`);
     } catch (err) {
         console.log(`[check] screenshots failed: ${/** @type {Error} */ (err).message}`);
+    }
+
+    // --------------------------------------------------------------- leak
+    // (after the screenshots: it closes and reopens the window) Reopening
+    // or closing the window releases the old Presets tab's bridge listener
+    // (review finding 4).
+    if (wanted('leak')) {
+        const name = 'leak: close/reopen releases the Presets listener';
+        try {
+            const size = () => probe.eval('window.__pmStarted.bridge.listeners.size');
+            const n0 = await size();
+            for (let i = 0; i < 3; i++) await click('#pm-menu-item'); // replace ×3
+            const nReplace = await size();
+            await click('#pm-window .pm-close');
+            const nClosed = await size();
+            await click('#pm-menu-item');
+            const nReopen = await size();
+            report(name, nReplace === n0 && nClosed === n0 - 1 && nReopen === n0,
+                `listeners open=${n0} after 3 replacements=${nReplace} closed=${nClosed} reopened=${nReopen}`);
+        } catch (err) {
+            report(name, false, /** @type {Error} */ (err).message);
+        }
     }
 }
 

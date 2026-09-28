@@ -114,9 +114,14 @@ export class Bridge {
         return run;
     }
 
-    /** @param {(state: any) => void} fn */
+    /**
+     * Register a listener for bridge state updates.
+     * @param {(state: any) => void} fn
+     * @returns {() => void} unsubscribe
+     */
     onUpdate(fn) {
         this.listeners.add(fn);
+        return () => { this.listeners.delete(fn); };
     }
 
     /** @param {any} state */

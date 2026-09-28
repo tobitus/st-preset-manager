@@ -31,6 +31,9 @@ export function createEditor(container, handlers) {
     let mode = 'empty';
     let dirtyContent = false;
     let dirtyNotes = false;
+    let contentRev = 0;
+    let notesRev = 0;
+    let renderSeq = 0;
     /** @type {{ identifier: string, name: any, role: any, content: any, notes: any }|null} */
     let blockView = null;
 
@@ -50,13 +53,16 @@ export function createEditor(container, handlers) {
 
     function markContentDirty() {
         dirtyContent = true;
+        contentRev++;
     }
 
     function markNotesDirty() {
         dirtyNotes = true;
+        notesRev++;
     }
 
     function renderEmpty() {
+        renderSeq++;
         mode = 'empty';
         blockView = null;
         dirtyContent = false;
@@ -65,6 +71,7 @@ export function createEditor(container, handlers) {
     }
 
     function renderReadonly(text) {
+        renderSeq++;
         mode = 'readonly';
         blockView = null;
         dirtyContent = false;
@@ -82,6 +89,7 @@ export function createEditor(container, handlers) {
      * @param {any} block may be null when the doc has no record yet
      */
     function renderBlock(identifier, block) {
+        renderSeq++;
         const header = el('div', 'pm-block-identifier pm-muted', identifier);
 
         const name = el('input', 'pm-block-name text_pole');
@@ -119,9 +127,10 @@ export function createEditor(container, handlers) {
 
         saveBtn.addEventListener('click', () => {
             saveBtn.disabled = true;
+            const seq = renderSeq, rev = contentRev;
             void (async () => {
                 await handlers.onOps([{ op: 'editBlock', identifier, name: name.value, role: role.value, content: content.value }]);
-                dirtyContent = false;
+                if (renderSeq === seq && contentRev === rev) dirtyContent = false;
             })().catch(() => {
                 // rejected save keeps dirtyContent: a refresh must not eat the user's text
             }).finally(() => {
@@ -131,9 +140,10 @@ export function createEditor(container, handlers) {
 
         notesBtn.addEventListener('click', () => {
             notesBtn.disabled = true;
+            const seq = renderSeq, rev = notesRev;
             void (async () => {
                 await handlers.onOps([{ op: 'setBlockNotes', identifier, notes: notes.value }]);
-                dirtyNotes = false;
+                if (renderSeq === seq && notesRev === rev) dirtyNotes = false;
             })().catch(() => {
                 // rejected save keeps dirtyNotes
             }).finally(() => {

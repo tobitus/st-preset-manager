@@ -27,6 +27,7 @@ import { createEditor } from './editor.js';
  * @property {{ render(doc: any, selectedKey: string|null): void, destroy(): void }} outline
  * @property {{ show(doc: any, key: string|null): void }} editor
  * @property {boolean} notesDirty user typed into the notes textarea
+ * @property {number} notesRev bumped each time the user types into notes
  * @property {boolean} deleteArmed first delete click happened
  * @property {any} deleteTimer restore-'Delete' timer
  * @property {string|null} selectNextLid loadout to select after creation
@@ -35,7 +36,7 @@ import { createEditor } from './editor.js';
 /**
  * @param {HTMLElement} pane .pm-pane[data-pane="presets"]
  * @param {import('../bridge.js').Bridge} bridge
- * @returns {{ open(presetId: string): Promise<void> }}
+ * @returns {{ open(presetId: string): Promise<void>, destroy(): void }}
  */
 export function createPresetsTab(pane, bridge) {
     // Contract state `open`: preset ids in tab order.
@@ -214,6 +215,7 @@ export function createPresetsTab(pane, bridge) {
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
             }),
             notesDirty: false,
+            notesRev: 0,
             deleteArmed: false,
             deleteTimer: null,
             selectNextLid: null,
@@ -226,7 +228,7 @@ export function createPresetsTab(pane, bridge) {
         q('.pm-rank-demote').addEventListener('click', () => rankOp(id, 'demote'));
         q('.pm-move-up').addEventListener('click', () => rankOp(id, 'moveLeaf', -1));
         q('.pm-move-down').addEventListener('click', () => rankOp(id, 'moveLeaf', 1));
-        nextView.notes.addEventListener('input', () => { nextView.notesDirty = true; });
+        nextView.notes.addEventListener('input', () => { nextView.notesDirty = true; nextView.notesRev++; });
         q('.pm-preset-notes-save').addEventListener('click', () => void saveNotes(nextView));
         host.replaceChildren(root);
         view = nextView;
@@ -392,10 +394,11 @@ export function createPresetsTab(pane, bridge) {
     async function saveNotes(/** @type {PresetView} */ v) {
         const id = v.id;
         const notes = v.notes.value;
+        const rev = v.notesRev;
         try {
             const res = await bridge.edit(() => api('PATCH', `/presets/${id}/meta`, { notes }));
             setDoc(id, res.doc);
-            v.notesDirty = false;
+            if (view === v && v.notesRev === rev) v.notesDirty = false;
             setStatus('');
         } catch (err) {
             setStatus(errText(err), true);
@@ -408,7 +411,7 @@ export function createPresetsTab(pane, bridge) {
      * Live refresh: SSE preset events for open docs, slot events and
      * reconciles debounce into one re-GET pass over the open docs.
      */
-    bridge.onUpdate((/** @type {any} */ s) => {
+    const unsubscribe = /** @type {() => void} */ (bridge.onUpdate((/** @type {any} */ s) => {
         if (!pane.isConnected) return;
         const ev = s?.event;
         const hit = !!s?.slot
@@ -416,7 +419,7 @@ export function createPresetsTab(pane, bridge) {
         if (!hit) return;
         clearTimeout(refreshTimer);
         refreshTimer = setTimeout(() => { void refreshOpenDocs(); }, 150);
-    });
+    }));
 
     async function refreshOpenDocs() {
         if (!pane.isConnected) return;
@@ -435,5 +438,12 @@ export function createPresetsTab(pane, bridge) {
     }
 
     renderTabs();
-    return { open: openPreset };
+    return {
+        open: openPreset,
+        destroy() {
+            unsubscribe();
+            clearTimeout(refreshTimer);
+            destroyView();
+        },
+    };
 }

@@ -59,6 +59,15 @@
 .pm-pane {
     flex: 1;
     min-height: 0;
+    overflow: auto;
+}
+
+/* the Presets pane is a bounded column: host → view → split, so the outline
+ * and the side editor scroll inside it instead of being clipped by .pm-body */
+.pm-pane[data-pane="presets"] {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
 }
 
 .pm-pane[hidden] {
