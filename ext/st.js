@@ -10,6 +10,7 @@
  * The plugin mount (plugins/st-preset-manager) never loads browser code.
  */
 import { getPresetApplicationPromise, getChatCompletionPreset, promptManager } from '../../../../openai.js';
+import { CONNECTION_KEYS } from '../shared/st-keys.js';
 
 /** @returns {any} SillyTavern.getContext() */
 export function ctx() {
@@ -247,8 +248,10 @@ function showsCompiled(shown, compiled) {
 }
 
 /**
- * Snapshot the current ST panel state (minus connection keys — the plugin
- * strips again, but avoid shipping secrets).
+ * Snapshot the current ST panel state (minus every CONNECTION_KEYS field —
+ * compiled presets never carry them, so they are never a user edit; the
+ * plugin strips them again server-side, but this also stops a profile
+ * switch's connection-key mutations from producing a spurious panel post).
  * @returns {Promise<any>}
  */
 export async function snapshotPanel() {
@@ -262,9 +265,7 @@ export async function snapshotPanel() {
     // base->snapshot delta saw no structural change and toggle write-backs
     // routed nothing.
     const out = JSON.parse(JSON.stringify(full));
-    delete out.proxy_password;
-    delete out.reverse_proxy;
-    delete out.custom_url;
+    for (const key of CONNECTION_KEYS) delete out[key];
     return out;
 }
 
@@ -284,6 +285,17 @@ export function currentRaw() {
         model: String(ctx().getChatCompletionModel?.() ?? ''),
         profileId: ctx().extensionSettings?.connectionManager?.selectedProfile ?? null,
     };
+}
+
+/**
+ * `GET /slot` query string for a given raw connection id — every tab-side
+ * GET /slot call goes through this so the plugin always compiles/routes for
+ * the tab's OWN connection, not a stale global one.
+ * @param {{source: string, model: string, profileId: string|null}} [raw]
+ * @returns {string} e.g. `/slot?source=openai&model=gpt-4&profileId=`
+ */
+export function slotPath(raw = currentRaw()) {
+    return '/slot?' + new URLSearchParams({ source: raw.source ?? '', model: raw.model ?? '', profileId: raw.profileId ?? '' });
 }
 
 /**

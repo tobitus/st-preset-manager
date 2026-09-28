@@ -6,10 +6,12 @@
  * All profile mutation (unlink a preset, delete profiles) goes through
  * ext/connection.js, which edits ST's own live connectionManager profiles
  * array and lets ST save its own settings.json — this tab never asks the
- * plugin to write a profile. All registry (Models) writes go through
- * `bridge.edit(() => api('PUT', '/models', next))` so the slot re-syncs
- * (a Model rename/removal can change what the current connection resolves
- * to) and the SSE `models` event fans out to the toolbar picker.
+ * plugin to write a profile. Adding/removing a Model, editing its matches,
+ * profiles or tuning go through `bridge.edit(() => api('PUT', '/models',
+ * next))` so the slot re-syncs and the SSE `models` event fans out to the
+ * toolbar picker; renaming and merging Models are server-side transactions
+ * (`POST /models/rename`, `POST /models/merge`) that migrate every document
+ * reference, also run through `bridge.edit`.
  *
  * Re-render strategy: `render()` rebuilds the whole pane from `registry` +
  * `lastSlot` + the live ST connection state on every call — simplest given
@@ -21,9 +23,9 @@
  * (possibly just-rebuilt) DOM node, so a render triggered between a write
  * and its status text never clobbers the message.
  */
-import { api, currentRaw, connectionProfiles } from '../st.js';
+import { api, currentRaw, connectionProfiles, slotPath } from '../st.js';
 import { unlinkProfilePreset, deleteProfilesExcept, linksPreset } from '../connection.js';
-import { suggestMerges, mergeModels } from '../../shared/models.js';
+import { suggestMerges } from '../../shared/models.js';
 
 function escapeHtml(/** @type {string} */ s) {
     return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[/** @type {any} */ (c)]);
@@ -141,16 +143,20 @@ export function createSettingsTab(pane, bridge) {
                 return;
             }
             const newName = nameInput.value.trim();
-            /** @type {any} */
-            let merged;
-            try {
-                merged = mergeModels(registry, checked, newName);
-            } catch (err) {
-                setStatus(errText(err), true);
+            if (!newName) {
+                setStatus('Enter a name for the merged Model', true);
                 return;
             }
             mergeGroupState.delete(JSON.stringify(names));
-            void writeRegistry(merged, `Merged ${checked.length} Models into ${newName}`);
+            void (async () => {
+                try {
+                    const res = await bridge.edit(() => api('POST', '/models/merge', { names: checked, name: newName }));
+                    await refresh();
+                    setStatus(`Merged ${checked.length} Models into ${newName} (${res.migrated.length} preset(s) migrated)`, false);
+                } catch (err) {
+                    setStatus(errText(err), true);
+                }
+            })();
         });
     }
 
@@ -190,7 +196,7 @@ export function createSettingsTab(pane, bridge) {
         const armed = armedModelRemove.has(name);
         return `
             <div class="pm-model-row" data-model="${escapeHtml(name)}">
-                <input type="text" class="pm-model-name text_pole" value="${escapeHtml(name)}" title="Renaming changes this Model's display name only — documents that already reference it by the old name (tuning overrides, loadout overrides) keep the old key.">
+                <input type="text" class="pm-model-name text_pole" value="${escapeHtml(name)}" title="Renaming migrates every document reference to this Model (tuning overrides, loadout overrides) to the new name.">
                 <div class="pm-model-matches">
                     ${matchesHtml}
                     <input type="text" class="pm-model-match-source" placeholder="source" value="${escapeHtml((matchInputState.get(name) ?? { source: 'custom', model: '' }).source)}">
@@ -222,13 +228,16 @@ export function createSettingsTab(pane, bridge) {
                 nameInput.value = name;
                 return;
             }
-            const base = structuredClone(registry);
-            /** @type {any} */
-            const models = {};
-            for (const [k, v] of Object.entries(base.models)) {
-                models[k === name ? newName : k] = k === name ? { ...v, name: newName } : v;
-            }
-            void writeRegistry({ ...base, models }, `Renamed "${name}" to "${newName}"`);
+            void (async () => {
+                try {
+                    const res = await bridge.edit(() => api('POST', '/models/rename', { from: name, to: newName }));
+                    await refresh();
+                    setStatus(`Renamed "${name}" to "${newName}" (${res.migrated.length} preset(s) migrated)`, false);
+                } catch (err) {
+                    setStatus(errText(err), true);
+                    nameInput.value = name;
+                }
+            })();
         });
 
         for (const btn of Array.from(rowEl.querySelectorAll('.pm-model-match-remove'))) {
@@ -330,10 +339,8 @@ export function createSettingsTab(pane, bridge) {
             else keepIds.delete(profile.id);
         });
         rowEl.querySelector('.pm-profile-unlink')?.addEventListener('click', () => {
-            void (async () => {
-                await unlinkProfilePreset(profile);
-                render();
-            })();
+            unlinkProfilePreset(profile);
+            render();
         });
     }
 
@@ -475,10 +482,16 @@ export function createSettingsTab(pane, bridge) {
                 render();
                 return;
             }
-            if (tidyTimer) clearTimeout(tidyTimer);
+            clearTimeout(tidyTimer);
             tidyArmed = false;
             void (async () => {
-                const profiles = connectionProfiles();
+                const profiles = structuredClone(connectionProfiles());
+                const activeId = currentRaw().profileId;
+                if (activeId && !keepIds.has(activeId)) {
+                    const active = profiles.find((/** @type {any} */ p) => p.id === activeId);
+                    setStatus(`Keep the active profile “${active ? active.name : activeId}” or switch away first. Nothing deleted.`, true);
+                    return;
+                }
                 /** @type {any} */
                 let r;
                 try {
@@ -489,10 +502,15 @@ export function createSettingsTab(pane, bridge) {
                     return;
                 }
                 const kept = keepIds.size;
-                const deleted = await deleteProfilesExcept([...keepIds]);
-                keepIds.clear();
-                setStatus(`Backup: ${r.file}. Deleted ${deleted.length}, kept ${kept}.`, false);
-                await refresh();
+                try {
+                    const deleted = await deleteProfilesExcept([...keepIds], profiles);
+                    keepIds.clear();
+                    setStatus(`Backup: ${r.file}. Deleted ${deleted.length}, kept ${kept}.`, false);
+                    await refresh();
+                } catch (err) {
+                    setStatus(errText(err), true);
+                    await refresh();
+                }
             })();
         });
 
@@ -502,7 +520,7 @@ export function createSettingsTab(pane, bridge) {
 
     async function refresh() {
         try {
-            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', '/slot')]);
+            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', slotPath())]);
             registry = reg;
             lastSlot = slot;
             render();

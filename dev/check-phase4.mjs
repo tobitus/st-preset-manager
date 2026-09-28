@@ -9,6 +9,7 @@
  * and the files on disk.
  *
  *   node dev/check-phase4.mjs            all checks (resets dev data first)
+ *   CHK_SKIP=5b,6a node dev/check-phase4.mjs   skip checks by id (diagnosis only)
  *
  * Checks:
  *   1  seed from profiles + owner merge in the UI -> one "Kimi K3", 2 matches
@@ -46,8 +47,10 @@ const SHOTS = path.join(REPO, 'dev', 'shots');
 const { report, fatal, finish, onExit } = createReporter();
 const { api, primeSession } = createApi({ jar: path.join(REPO, 'dev', '.check-phase4.cookies.jar'), onFatal: fatal });
 const probe = new Probe(TAB, { onFatal: fatal });
-onExit(() => probe.kill());
-process.on('exit', () => cleanupTabs([TAB]));
+/** a second, independent tab (check 5b) */
+const probeB = new Probe(`${TAB}b`, { onFatal: fatal });
+onExit(() => { probe.kill(); probeB.kill(); });
+process.on('exit', () => cleanupTabs([TAB, `${TAB}b`]));
 
 const J = (/** @type {any} */ v) => JSON.stringify(v);
 const ids = { ff: '', sola: '', kimiBlock: '' };
@@ -68,8 +71,8 @@ const setChecked = (/** @type {string} */ sel, /** @type {boolean} */ value) => 
     el.checked = ${value ? 'true' : 'false'}; el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
 
 /** ST's live chat-completion state + connection panel. */
-function st() {
-    return probe.eval(`(() => {
+function st(pr = probe) {
+    return pr.eval(`(() => {
         const c = SillyTavern.getContext();
         const o = c.chatCompletionSettings;
         const sel = document.getElementById('connection_profiles');
@@ -82,6 +85,8 @@ function st() {
             profile: sel?.selectedOptions?.[0]?.textContent ?? null,
             selectedProfile: c.extensionSettings.connectionManager.selectedProfile ?? null,
             blocker: !!document.querySelector('.pm-apply-blocker'),
+            appliedSlotChangedRev: window.__pmStarted?.bridge?.appliedSlotChangedRev ?? -1,
+            raw: { source: String(o.chat_completion_source ?? ''), model: String(c.getChatCompletionModel?.() ?? ''), profileId: c.extensionSettings.connectionManager.selectedProfile ?? null },
         };
     })()`);
 }
@@ -91,11 +96,11 @@ const domOn = (/** @type {string} */ id) => probe.eval(`(() => {
     return r ? !!r.querySelector('.prompt-manager-toggle-action.fa-toggle-on') : null; })()`);
 const clickStToggle = (/** @type {string} */ id) => probe.eval(`(() => { if (document.querySelector('.pm-apply-blocker')) return false; const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${id}"] .prompt-manager-toggle-action'); if (!el) return false; el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); return true; })()`);
 /** ST's own sampler slider (dev/probe.mjs set-slider). */
-const setSlider = (/** @type {string} */ id, /** @type {number} */ v) => probe.eval(`(() => {
+const setSlider = (/** @type {string} */ id, /** @type {number} */ v, pr = probe) => pr.eval(`(() => {
     const el = document.getElementById(${J(id)}); if (!el) return false;
     el.value = ${J(v)}; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
 /** ST's OWN connection-profile dropdown (not /profile, not v2). */
-const pickStProfile = (/** @type {string} */ name) => probe.eval(`(() => {
+const pickStProfile = (/** @type {string} */ name, pr = probe) => pr.eval(`(() => {
     const c = SillyTavern.getContext();
     const p = c.extensionSettings.connectionManager.profiles.find((x) => x.name === ${J(name)});
     const sel = document.getElementById('connection_profiles');
@@ -103,12 +108,15 @@ const pickStProfile = (/** @type {string} */ name) => probe.eval(`(() => {
     sel.value = p.id; sel.dispatchEvent(new Event('change')); return true; })()`);
 const liveProfiles = () => probe.eval('JSON.parse(JSON.stringify(SillyTavern.getContext().extensionSettings.connectionManager.profiles))');
 
-const getSlot = async () => (await api('GET', '/slot')).json;
+/** GET /slot as the given tab sees it (its own connection; per-tab compile). */
+const getSlot = async (/** @type {any} */ raw = null) => (await api('GET', raw
+    ? `/slot?${new URLSearchParams({ source: raw.source ?? '', model: raw.model ?? '', profileId: raw.profileId ?? '' })}`
+    : '/slot')).json;
 const getModels = async () => (await api('GET', '/models')).json;
 const getDoc = async (/** @type {string} */ id) => (await api('GET', `/presets/${id}`)).json;
 
-async function dismissPopups() {
-    const closed = await probe.eval(`(() => {
+async function dismissPopups(pr = probe) {
+    const closed = await pr.eval(`(() => {
         const open = [...document.querySelectorAll('dialog[open]')];
         for (const d of open) (d.querySelector('.popup-button-cancel, .popup-button-close, .popup-button-ok') ?? d).click?.();
         for (const d of open) if (d.open) d.close();
@@ -118,9 +126,14 @@ async function dismissPopups() {
 }
 
 /** ST shows the slot and its order equals the compiled slot (no apply in flight). */
-async function converged() {
-    const [s, slot] = await Promise.all([st(), getSlot()]);
-    return !s.blocker && s.preset === SLOT_NAME && J(s.order) === J(slot.compiled?.prompt_order?.[0]?.order)
+async function converged(pr = probe) {
+    const s = await st(pr);
+    const slot = await getSlot(s.raw);
+    // the tab has also processed the latest desired-slot change (a same-hash
+    // reload looks converged before the tab saw it; an edit made then is
+    // dropped by the stale-base 409 by design)
+    return !s.blocker && s.preset === SLOT_NAME && s.appliedSlotChangedRev >= (slot.slotChangedRev ?? 0)
+        && J(s.order) === J(slot.compiled?.prompt_order?.[0]?.order)
         && s.temperature === slot.compiled?.temperature ? { s, slot } : null;
 }
 
@@ -168,6 +181,17 @@ async function toolbarPick(/** @type {string} */ name) {
     return setValue('#pm-window .pm-model-picker', name, 'change');
 }
 
+/** Precondition helper: ST on the given Model's connection (via the toolbar when it is not). */
+async function ensureModel(/** @type {string} */ name, /** @type {string} */ rawModel) {
+    const c = await converged();
+    if (c && c.s.model === rawModel && c.slot.desired.modelId === name) return c;
+    await toolbarPick(name);
+    return until(async () => {
+        const x = await converged();
+        return x && x.s.model === rawModel && x.slot.desired.modelId === name ? x : null;
+    }, 15000, `ST on ${name}`);
+}
+
 async function shot(/** @type {string} */ file, /** @type {string} */ scrollSel) {
     try {
         fs.mkdirSync(SHOTS, { recursive: true });
@@ -183,11 +207,17 @@ async function shot(/** @type {string} */ file, /** @type {string} */ scrollSel)
 }
 
 /** Run one check body; a throw is a FAIL with the message as evidence. */
+const SKIP = (process.env.CHK_SKIP ?? '').split(',').filter(Boolean);
 async function check(/** @type {string} */ name, /** @type {() => Promise<string>} */ body) {
+    if (SKIP.includes(name.split(' ')[0])) { console.log(`SKIP ${name}`); return; }
     try {
         report(name, true, await body());
     } catch (err) {
-        report(name, false, /** @type {Error} */ (err).message);
+        let diag = '';
+        try {
+            diag = J(await probe.eval(`(() => { const b = window.__pmStarted?.bridge; const c = SillyTavern.getContext(); return b ? { baseRaw: b.baseRaw, raw: { source: c.chatCompletionSettings.chat_completion_source, model: c.getChatCompletionModel(), profileId: c.extensionSettings.connectionManager.selectedProfile ?? null }, detached: b.detached, appliedRev: b.appliedRev, preset: c.chatCompletionSettings.preset_settings_openai } : null; })()`));
+        } catch { /* page gone */ }
+        report(name, false, `${/** @type {Error} */ (err).message}${diag ? ` [tab: ${diag}]` : ''}`);
     }
 }
 const must = (/** @type {any} */ cond, /** @type {string} */ msg) => { if (!cond) throw new Error(msg); };
@@ -372,10 +402,56 @@ async function main() {
             + `-> ${onMock.s.profile} ${onMock.s.temperature}; -> Kimi 0.9; Sola (no override) ${onSola.s.temperature}; desired preset/loadout + FF loadouts unchanged`;
     });
 
-    // ------------------------------------------------------------------ 3
-    await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
+    // ------------------------------------------------------------------ 2b
+    await check('2b model switch: an unsent ST edit lands on the old Model; ST\'s own transition mutation is never written back', async () => {
         const c0 = await loadViaLibrary(ids.ff);
         must(c0.slot.desired.modelId === KIMI && c0.s.temperature === 0.9, `precondition: FF on Kimi at 0.9 (got ${c0.slot.desired.modelId} ${c0.s.temperature})`);
+        const mockT = (await getModels()).models[mockName].tuning.temperature;
+        // Emulate ST mutating a sampler as part of the switch: openai.js clamps
+        // temp_openai for some models while it applies them (5719-5721,
+        // before CHATCOMPLETION_MODEL_CHANGED). The custom source used here
+        // emits no model-changed event, so a one-shot FIRST listener on
+        // CONNECTION_PROFILE_LOADED sets 1: it runs after the profile applied
+        // and before any v2 listener, i.e. before v2 can know the Model moved.
+        must(await probe.eval(`(() => {
+            const c = SillyTavern.getContext();
+            window.__chkClamp = 0;
+            const fn = () => {
+                c.eventSource.removeListener(c.eventTypes.CONNECTION_PROFILE_LOADED, fn);
+                c.chatCompletionSettings.temp_openai = 1;
+                const el = document.getElementById('temp_openai'); if (el) el.value = 1;
+                window.__chkClamp += 1;
+            };
+            c.eventSource.makeFirst(c.eventTypes.CONNECTION_PROFILE_LOADED, fn);
+            return true; })()`), 'could not install the transition emulation');
+        // a genuine edit in ST's panel, NOT yet written back, then an immediate switch
+        must(await setSlider('temp_openai', 0.95), 'no #temp_openai');
+        await toolbarPick(mockName);
+        const onMock = await until(async () => {
+            const c = await converged();
+            return c && c.s.model === 'mock' && c.s.temperature === mockT ? c : null;
+        }, 15000, `ST on mock at ${mockT}`);
+        must(await probe.eval('window.__chkClamp') === 1, 'precondition: the transition mutation ran during the switch');
+        await sleep(1500); // any debounced write-back has landed
+        const ff = await getDoc(ids.ff);
+        const reg = await getModels();
+        must(ff.tuningOverrides[KIMI]?.temperature === 0.95, `FF Kimi override ${ff.tuningOverrides[KIMI]?.temperature} (the genuine 0.95 must land on the OLD Model)`);
+        must(reg.models[mockName].tuning.temperature === mockT, `mock global ${reg.models[mockName].tuning.temperature} (the transition value leaked)`);
+        must(ff.tuningOverrides[mockName] === undefined, 'FF gained a mock override');
+        await toolbarPick(KIMI);
+        const back = await until(async () => {
+            const c = await converged();
+            return c && c.s.model === HAP && c.s.temperature === 0.95 ? c : null;
+        }, 15000, 'Kimi at 0.95 again');
+        return `genuine 0.95 -> FF Kimi override; transition value 1 ignored; mock shows ${onMock.s.temperature}; back on Kimi ${back.s.temperature}`;
+    });
+
+    // ------------------------------------------------------------------ 3
+    await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
+        await loadViaLibrary(ids.ff);
+        const c0 = await ensureModel(KIMI, HAP);
+        const ffT = (await getDoc(ids.ff)).tuningOverrides?.[KIMI]?.temperature;
+        must(c0.slot.desired.modelId === KIMI && c0.s.temperature === ffT, `precondition: FF on Kimi at its override ${ffT} (got ${c0.slot.desired.modelId} ${c0.s.temperature})`);
         must(await setSlider('temp_openai', 0.55), 'no #temp_openai');
         await until(async () => (await getDoc(ids.ff)).tuningOverrides?.[KIMI]?.temperature === 0.55, 8000, 'FF override 0.55');
         const g1 = (await getModels()).models[KIMI].tuning.temperature;
@@ -389,13 +465,35 @@ async function main() {
         const sola = await getDoc(ids.sola);
         must(sola.tuningOverrides?.[KIMI] === undefined, 'Sola gained a Kimi override');
         must(sola.settings?.temperature === solaSettingsTemp, 'Sola settings.temperature changed');
-        return 'FF (override) 0.9 -> 0.55 in tuningOverrides["Kimi K3"], global stayed 0.3; Sola (no override) -> GET /models Kimi global 0.55';
+        return `FF (override) ${ffT} -> 0.55 in tuningOverrides["Kimi K3"], global stayed 0.3; Sola (no override) -> GET /models Kimi global 0.55`;
+    });
+
+    // ------------------------------------------------------------------ 3b
+    await check('3b tuning panel edit right after an unsent ST slider edit: both reach the override', async () => {
+        await loadViaLibrary(ids.ff);
+        const c0 = await ensureModel(KIMI, HAP);
+        must(c0.slot.desired.modelId === KIMI, 'precondition: Kimi active');
+        await openInPresets(ids.ff);
+        const p = panelSel(ids.ff);
+        await panelModel(ids.ff, KIMI);
+        await until(() => probe.eval(`document.querySelector(${J(`${p} .pm-tuning-override`)})?.checked === true`), 5000, 'precondition: FF Kimi override on');
+        must(await setSlider('temp_openai', 0.66), 'no #temp_openai');
+        must(await setValue(`${p} .pm-tuning-input[data-key="top_p"]`, '0.77', 'change'), 'no top_p input');
+        await sleep(2500); // the edit op, the debounced ST save and any reconcile
+        const o = (await getDoc(ids.ff)).tuningOverrides[KIMI];
+        must(o.temperature === 0.66 && o.top_p === 0.77, `override ${J(o)}`);
+        const c1 = await until(async () => {
+            const c = await converged();
+            return c && c.s.temperature === 0.66 ? c : null;
+        }, 8000, 'ST shows 0.66');
+        return `override ${J(o)}; ST ${c1.s.temperature}`;
     });
 
     // ------------------------------------------------------------------ 4
     await check('4 acceptance 16: Kimi loadout override turns the "Kimi K3" block on only under Kimi', async () => {
         const K = ids.kimiBlock;
-        const c0 = await loadViaLibrary(ids.ff);
+        await loadViaLibrary(ids.ff);
+        const c0 = await ensureModel(KIMI, HAP);
         must(c0.slot.desired.modelId === KIMI, 'precondition: Kimi active');
         const d0 = await getDoc(ids.ff);
         const lid = d0.activeLoadoutId;
@@ -463,20 +561,81 @@ async function main() {
         const b2 = await until(() => converged(), 8000, 'settled');
         const bOn = await domOn(K);
         must(a.slot.desired.modelId === KIMI && b2.slot.desired.modelId === KIMI, `Models ${a.slot.desired.modelId} / ${b2.slot.desired.modelId}`);
-        must(a.s.temperature === b2.s.temperature && a.s.temperature === 0.55, `temperatures ${a.s.temperature} / ${b2.s.temperature}`);
+        const ffT = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+        must(a.s.temperature === b2.s.temperature && a.s.temperature === ffT, `temperatures ${a.s.temperature} / ${b2.s.temperature}`);
         must(aOn === true && bOn === true, `Kimi block ${aOn} / ${bOn}`);
         must(J(a.s.order) === J(b2.s.order) && a.slot.hash === b2.slot.hash, 'compiled slot differs between the two providers');
         void b;
         return `hapuppy: temp ${a.s.temperature}, kimi block ${aOn}; nanogpt (${b2.s.model}): temp ${b2.s.temperature}, kimi block ${bOn}; same slot hash`;
     });
 
+    // ------------------------------------------------------------------ 5b
+    await check('5b two tabs on different Models: each shows its own Model\'s tuning and routes its own edits', async () => {
+        try {
+            const T = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            await until(async () => {
+                const c = await converged();
+                return c && c.s.model === NANO && c.s.temperature === T ? c : null;
+            }, 8000, `precondition: tab A on Kimi (nanogpt) at ${T}`);
+            await probeB.start();
+            await until(async () => {
+                await dismissPopups(probeB);
+                return converged(probeB);
+            }, 30000, 'tab B on the slot');
+            must(await pickStProfile('Mock', probeB), 'tab B dropdown');
+            const mockT = (await getModels()).models[mockName].tuning.temperature;
+            await until(async () => {
+                await dismissPopups(probeB);
+                const c = await converged(probeB);
+                return c && c.s.model === 'mock' && c.s.temperature === mockT ? c : null;
+            }, 15000, `tab B on mock at ${mockT}`);
+            await sleep(2000);
+            const a1 = await st();
+            must(a1.model === NANO && a1.temperature === T && a1.preset === SLOT_NAME, `tab A changed to ${a1.model} ${a1.temperature} after tab B's switch`);
+
+            must(await setSlider('temp_openai', 0.58), 'tab A slider');
+            await until(async () => (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature === 0.58, 8000, 'tab A edit -> FF Kimi override');
+            must(await setSlider('temp_openai', 1.25, probeB), 'tab B slider');
+            await until(async () => (await getModels()).models[mockName].tuning.temperature === 1.25, 8000, 'tab B edit -> mock global');
+            await sleep(2000);
+            const d = await getDoc(ids.ff);
+            must(d.tuningOverrides[KIMI].temperature === 0.58, `FF Kimi override ${d.tuningOverrides[KIMI].temperature} after tab B's edit`);
+            must(d.tuningOverrides[mockName] === undefined, 'tab B\'s edit created a mock override on FF');
+            const a2 = await until(async () => { const c = await converged(); return c && c.s.temperature === 0.58 ? c : null; }, 8000, 'tab A shows 0.58');
+            const b2 = await until(async () => { const c = await converged(probeB); return c && c.s.temperature === 1.25 ? c : null; }, 8000, 'tab B shows 1.25');
+            return `A (${a2.s.model}) ${T} -> edit 0.58 -> FF Kimi override; B (${b2.s.model}) ${mockT} -> edit 1.25 -> mock global; A stayed ${a2.s.temperature}, B ${b2.s.temperature}`;
+        } finally {
+            probeB.kill();
+        }
+    });
+
+    // ------------------------------------------------------------------ 6a
+    await check('6a guard Close keeps ST detached after a cross-Model profile load; a library load re-attaches', async () => {
+        const c0 = await until(async () => { const c = await converged(); return c && c.s.model === NANO ? c : null; }, 10000, 'precondition: on the slot, Kimi (nanogpt)');
+        const linked = (await liveProfiles()).find((/** @type {any} */ x) => x.name === 'Mock links Default');
+        must(linked.preset === 'Default' && !(linked.exclude ?? []).includes('preset'), 'precondition: profile links Default');
+        must(await pickStProfile('Mock links Default'), 'dropdown pick failed');
+        await until(() => exists('#pm-guard-dialog'), 10000, 'guard dialog');
+        await until(async () => (await st()).preset === 'Default', 8000, 'ST on Default');
+        await dismissPopups();
+        await click('#pm-guard-dialog .pm-guard-close');
+        await sleep(3000);
+        const s1 = await st();
+        must(!(await exists('#pm-guard-dialog')), 'dialog still open');
+        must(s1.preset === 'Default' && s1.model === 'mock', `after Close ST is on "${s1.preset}" / ${s1.model} (the slot was re-applied over the user's choice)`);
+        const re = await loadViaLibrary(ids.ff);
+        must(re.s.model === 'mock', `re-attached on ${re.s.model}`);
+        return `Kimi slot (${c0.s.temperature}) -> "Mock links Default": ST on ${s1.preset} and stays there after Close; library load -> ${re.s.preset} at ${re.s.temperature}`;
+    });
+
     // ------------------------------------------------------------------ 6
     await check('6 acceptance 8: profile guard names "Mock links Default"; Unlink excludes preset and re-attaches', async () => {
         must(await pickStProfile('Mock'), 'dropdown pick failed');
+        const mockT = (await getModels()).models[mockName].tuning.temperature;
         await until(async () => {
             const c = await converged();
-            return c && c.s.model === 'mock' && c.s.temperature === 1.1 ? c : null;
-        }, 15000, 'on Mock at 1.1');
+            return c && c.s.model === 'mock' && c.s.temperature === mockT ? c : null;
+        }, 15000, `on Mock at ${mockT}`);
         must(!(await exists('#pm-guard-dialog')), 'a guard dialog is already open');
         const linked0 = (await liveProfiles()).find((/** @type {any} */ x) => x.name === 'Mock links Default');
         must(linked0.preset === 'Default' && !(linked0.exclude ?? []).includes('preset'), `precondition: profile links Default (${J(linked0)})`);
@@ -503,6 +662,89 @@ async function main() {
             return (x?.exclude ?? []).includes('preset') ? x : null;
         }, 8000, 'settings.json (tab save) has the exclude');
         return `off slot on "${off.preset}"; dialog named "${named}"; after Unlink exclude=${J(linked1.exclude)} (disk ${J(disk.exclude)}), ST on "${back.s.preset}"`;
+    });
+
+    // ------------------------------------------------------------------ 6b
+    await check('6b toolbar refuses a preset-linked profile, offers Unlink and switch; ST never leaves the slot', async () => {
+        const lid = prof['Mock links Default'];
+        // test data: re-link the fixture profile (check 6 unlinked it) and give a Model only that profile
+        await probe.eval(`(() => { const p = SillyTavern.getContext().extensionSettings.connectionManager.profiles.find((x) => x.id === ${J(lid)}); p.preset = 'Default'; p.exclude = []; return true; })()`);
+        must(await pickStProfile('Mock'), 'dropdown pick failed');
+        await until(async () => { const c = await converged(); return c && c.s.selectedProfile === prof.Mock ? c : null; }, 15000, 'on Mock');
+        const reg = await getModels();
+        reg.models['Linked Only'] = { id: 'm_linked_only', name: 'Linked Only', matches: [], profiles: [lid], preferredProfile: lid, tuning: {} };
+        must((await api('PUT', '/models', reg)).status === 200, 'PUT /models');
+        await toolbarPick('Linked Only');
+        await until(() => exists('#pm-window .pm-model-unlink-switch'), 10000, 'refusal with an Unlink offer');
+        const msg = await text('#pm-window .pm-model-status');
+        const s1 = await st();
+        must(s1.preset === SLOT_NAME && s1.selectedProfile === prof.Mock, `ST moved: preset "${s1.preset}", profile ${s1.selectedProfile}`);
+        must(!(await exists('#pm-guard-dialog')), 'the guard fired: the picker ran the linked profile');
+        const still = (await liveProfiles()).find((/** @type {any} */ x) => x.id === lid);
+        must(still.preset === 'Default', 'the profile was unlinked without consent');
+        await click('#pm-window .pm-model-unlink-switch');
+        const p2 = await until(async () => {
+            const x = (await liveProfiles()).find((/** @type {any} */ y) => y.id === lid);
+            return (x.exclude ?? []).includes('preset') && !x.preset ? x : null;
+        }, 8000, 'profile unlinked');
+        const s2 = await until(async () => { const c = await converged(); return c && c.s.selectedProfile === lid ? c : null; }, 15000, 'switched, on the slot');
+        must(!(await exists('#pm-guard-dialog')), 'guard dialog after Unlink and switch');
+        return `refused: "${(msg ?? '').replace(/\s+/g, ' ').slice(0, 110)}"; ST stayed on ${s1.preset}; Unlink and switch -> exclude=${J(p2.exclude)}, ST on ${s2.s.preset} via ${s2.s.profile}`;
+    });
+
+    // ------------------------------------------------------------------ 7a
+    await check('7a tidy refuses to delete the active profile, and profiles changed after the backup', async () => {
+        // precondition: a connection-only profile that will NOT be kept is active
+        must(await pickStProfile('Kimi via nanogpt'), 'dropdown pick failed');
+        await until(async () => { const c = await converged(); return c && c.s.selectedProfile === prof['Kimi via nanogpt'] ? c : null; }, 15000, 'on Kimi via nanogpt');
+        await showTab('settings');
+        const n0 = (await liveProfiles()).length;
+        const keep = [prof.Mock, prof['Kimi via hapuppy']];
+        const active = (await st()).selectedProfile;
+        must(active && !keep.includes(active), `precondition: the active profile (${active}) is not kept`);
+        await until(async () => (await probe.eval('document.querySelectorAll("#pm-window .pm-profile-row").length')) === n0, 8000, 'profile list rendered');
+        for (const id of keep) must(await setChecked(`#pm-window .pm-profile-row[data-profile-id="${id}"] .pm-profile-keep`, true), `no keep box for ${id}`);
+        await click('#pm-window .pm-profiles-tidy');
+        await sleep(200);
+        await click('#pm-window .pm-profiles-tidy');
+        const m1 = await until(async () => { const t = await text('#pm-window .pm-settings-status'); return /active profile/i.test(t ?? '') ? t : null; }, 8000, 'active-profile refusal');
+        await sleep(1500);
+        must((await liveProfiles()).length === n0, 'profiles were deleted with the active one unkept');
+
+        // (ii) a to-be-deleted profile changes while the backup request is in flight
+        must(await pickStProfile('Mock'), 'dropdown pick failed');
+        await until(async () => { const c = await converged(); return c && c.s.selectedProfile === prof.Mock ? c : null; }, 15000, 'on Mock');
+        await probe.eval(`(() => {
+            const profiles = SillyTavern.getContext().extensionSettings.connectionManager.profiles;
+            window.__chkFetch = window.fetch;
+            window.fetch = async (...args) => {
+                const res = await window.__chkFetch(...args);
+                if (String(args[0]?.url ?? args[0]).includes('/profiles/backup')) {
+                    const p = profiles.find((x) => x.name === 'Kimi via nanogpt');
+                    window.__chkOld = p['start-reply-with'];
+                    p['start-reply-with'] = 'edited during the backup';
+                }
+                return res;
+            };
+            return true; })()`);
+        try {
+            await showTab('settings');
+            for (const id of keep) await setChecked(`#pm-window .pm-profile-row[data-profile-id="${id}"] .pm-profile-keep`, true);
+            await click('#pm-window .pm-profiles-tidy');
+            await sleep(200);
+            await click('#pm-window .pm-profiles-tidy');
+            const m2 = await until(async () => { const t = await text('#pm-window .pm-settings-status'); return /changed after the backup/i.test(t ?? '') ? t : null; }, 8000, 'changed-after-backup refusal');
+            await sleep(1500);
+            must((await liveProfiles()).length === n0, 'profiles were deleted although one changed after the backup');
+            return `refused (active): "${m1.slice(0, 80)}"; refused (changed): "${m2.slice(0, 80)}"; ${n0} profiles kept`;
+        } finally {
+            await probe.eval(`(() => {
+                window.fetch = window.__chkFetch ?? window.fetch;
+                const p = SillyTavern.getContext().extensionSettings.connectionManager.profiles.find((x) => x.name === 'Kimi via nanogpt');
+                if (p && '__chkOld' in window) p['start-reply-with'] = window.__chkOld;
+                SillyTavern.getContext().saveSettingsDebounced();
+                return true; })()`);
+        }
     });
 
     // ------------------------------------------------------------------ 7
@@ -538,6 +780,30 @@ async function main() {
         const opts = await probe.eval(`[...document.getElementById('connection_profiles').options].map((o) => o.textContent)`);
         must(opts.length === 3, `ST dropdown shows ${J(opts)}`);
         return `backup ${file}: ${backup.length}/${disk0.length} originals verbatim; settings.json now ${J(after.map((/** @type {any} */ p) => p.name))}; ST dropdown ${J(opts)}`;
+    });
+
+    // ------------------------------------------------------------------ 7b
+    await check('7b renaming a Model in the Settings tab migrates the presets\' overrides; ST keeps the same state', async () => {
+        const d0 = await getDoc(ids.ff);
+        const lid = d0.activeLoadoutId;
+        const T = d0.tuningOverrides[KIMI]?.temperature;
+        must(T !== undefined && d0.loadouts[lid].overrides?.[KIMI], 'precondition: FF has Kimi tuning + loadout overrides');
+        must(await pickStProfile('Kimi via hapuppy'), 'dropdown pick failed');
+        await until(async () => { const c = await converged(); return c && c.s.model === HAP && c.s.temperature === T ? c : null; }, 15000, `on Kimi at ${T}`);
+        await showTab('settings');
+        await until(() => exists(`#pm-window .pm-model-row[data-model="${KIMI}"] .pm-model-name`), 8000, 'Kimi K3 row');
+        await setValue(`#pm-window .pm-model-row[data-model="${KIMI}"] .pm-model-name`, 'Kimi', 'change');
+        const d1 = await until(async () => {
+            const d = await getDoc(ids.ff);
+            return d.tuningOverrides?.Kimi && !d.tuningOverrides[KIMI] ? d : null;
+        }, 8000, 'FF tuning override re-keyed to "Kimi"');
+        must(d1.loadouts[lid].overrides?.Kimi && !d1.loadouts[lid].overrides[KIMI], 'loadout override not re-keyed');
+        const reg = await getModels();
+        must(reg.models.Kimi && !reg.models[KIMI], 'registry not renamed');
+        const c = await until(async () => { const x = await converged(); return x && x.slot.desired.modelId === 'Kimi' ? x : null; }, 10000, 'slot resolves "Kimi"');
+        must(c.s.temperature === T, `ST temperature ${c.s.temperature}, expected ${T}`);
+        must((await domOn(ids.kimiBlock)) === true, 'the Kimi block override stopped applying');
+        return `Kimi K3 -> Kimi: FF tuningOverrides ${J(Object.keys(d1.tuningOverrides))}, loadout overrides ${J(Object.keys(d1.loadouts[lid].overrides))}; ST ${c.s.temperature}, Kimi block on`;
     });
 
     // ------------------------------------------------------------------ 8

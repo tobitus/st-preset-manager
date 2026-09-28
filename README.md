@@ -113,13 +113,21 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 - **Tidy** (Settings tab): tick the profiles to keep, *Keep selected, delete
   the rest* writes `preset-manager/backups/profiles-<iso>.json` first, then
   deletes in the tab. *Backup profiles* writes the same file on its own.
-- REST added: `PUT /models`, `PUT /models/:modelId/tuning`, `POST
-  /models/seed {profiles?}`, `POST /profiles/backup {profiles?}`; `POST
-  /slot/model` now takes `{raw}` and `GET /slot`'s `desired.modelId` is the
-  resolved Model.
-- Known gaps: renaming or merging a Model does not re-key documents'
-  `tuningOverrides` / loadout overrides stored under the old name. The slot's
-  raw connection id is global, so two tabs on different connections
-  alternate it (last report wins). `POST /slot/model` needs `raw`; setting a
-  Model by name alone (for MCP) is not supported yet.
+- REST added: `PUT /models`, `PUT|PATCH /models/:modelId/tuning`, `POST
+  /models/rename {from,to}`, `POST /models/merge {names,name}`, `POST
+  /models/seed {profiles?}`, `POST /profiles/backup {profiles?}`, `PATCH
+  /presets/:id/tuning-overrides/:modelId` and `PATCH
+  /presets/:id/loadouts/:lid/overrides/:modelId` (`{set?, unset?}`).
+  `GET /slot?source&model&profileId` and `POST /slot/panel {…, raw}` compile and
+  route for that connection (each tab sends its own; two tabs can sit on
+  different Models); `POST /slot/model {raw}` only records the default used
+  when a client sends none.
+- Renaming or merging a Model re-keys every preset's tuning and loadout
+  overrides (a merge keeps the first-listed Model's values; the old values stay
+  in a labelled revision).
+- While ST is on a foreign preset (detached), connection and registry changes
+  never pull it back to the slot; a library load, Re-attach or Unlink does.
+- Known gaps: `POST /slot/model` needs `raw`; selecting a Model by name alone
+  (for MCP) is not supported yet. The seed maps profile `api` to source with a
+  two-alias table (`oai`, `google`) rather than ST's `CONNECT_API_MAP`.
 - Check: `node dev/check-phase4.mjs` (resets dev data; tidy is destructive).

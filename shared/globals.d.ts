@@ -36,10 +36,12 @@ interface PmHandle {
         findByName(name: string): { id: string } | null;
         /** state mutation body WITHOUT taking the queue (call only inside enqueue) */
         _mutateStateNow(fn: (st: Record<string, unknown>) => void): Promise<unknown>;
-        /** models mutation body WITHOUT taking the queue (call only inside enqueue) */
+        /** models mutation body WITHOUT taking the queue (publishes through _commit; call only inside enqueue) */
         _mutateModelsNow(fn: (reg: Record<string, unknown>) => unknown): Promise<unknown>;
         /** bump the global rev and persist it (call only inside enqueue) */
         _bumpRev(): Promise<void>;
+        /** publish a multi-file transaction atomically (call only inside enqueue) */
+        _commit(opts?: { registry?: Record<string, unknown>; docs?: Record<string, unknown>[]; revisionLabel?: string }): Promise<void>;
         shelfAdd(body: Record<string, unknown>): Promise<unknown>;
         shelfList(): unknown[];
         shelfRemove(id: string): Promise<void>;
@@ -47,12 +49,22 @@ interface PmHandle {
         enqueue<T>(fn: () => T): Promise<T>;
         /** mark the desired slot changed at rev+1 (call inside mutateState) */
         _markSlotChanged(): void;
-        /** resolve raw and set it as the slot's connection id (no-op on identical raw) */
+        /** resolve raw and set it as the slot's connection id (no-op on identical raw); never marks the slot changed (per-tab connection) */
         setSlotModel(raw: { source?: string | null; model?: string | null; profileId?: string | null }): Promise<{ changed: boolean; modelChanged: boolean; modelId: string | null }>;
-        /** whole-registry replace, validated */
+        /** whole-registry replace, validated; never marks the slot changed */
         replaceModels(reg: Record<string, unknown>): Promise<unknown>;
         /** replace one Model's global tuning wholesale */
         setModelTuning(name: string, tuning: Record<string, unknown>): Promise<unknown>;
+        /** rename a Model, migrating every document reference */
+        renameModel(from: string, to: string): Promise<{ models: Record<string, unknown>; migrated: string[] }>;
+        /** merge Models under one name, migrating every document reference */
+        mergeModelsTx(names: string[], name: string): Promise<{ models: Record<string, unknown>; migrated: string[] }>;
+        /** semantic patch of one Model's global tuning */
+        patchModelTuning(name: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
+        /** semantic patch of a preset's tuning override for a Model; 404 when no override exists */
+        patchTuningOverride(presetId: string, name: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
+        /** semantic patch of a loadout's per-Model override; 404 when the preset/loadout/override is missing or an id is not a leaf */
+        patchLoadoutOverride(presetId: string, lid: string, name: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
         /** seed the registry from ST connection profiles */
         seedModels(profiles: unknown[]): Promise<{ added: string[]; models: Record<string, unknown>; mergeSuggestions: string[][] }>;
         /** snapshot profiles verbatim into backups/profiles-<iso>.json */

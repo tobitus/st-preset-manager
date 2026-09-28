@@ -41,13 +41,23 @@ function slashArg(name) {
 export async function switchToModel(model) {
     const profiles = connectionProfiles();
     const candidateIds = [model.preferredProfile, ...(model.profiles ?? [])].filter((id) => id != null);
-    const profile = candidateIds.map((id) => profiles.find((p) => p.id === id)).find((p) => p);
-    if (!profile) throw new Error(`Model "${model.name}" has no connection profile in this SillyTavern`);
-    await ctx().executeSlashCommandsWithOptions('/profile ' + slashArg(profile.name));
-    if (ctx().extensionSettings?.connectionManager?.selectedProfile !== profile.id) {
-        throw new Error('SillyTavern did not switch to profile "' + profile.name + '"');
+    const candidates = candidateIds.map((id) => profiles.find((p) => p.id === id)).filter((p) => p);
+    const ok = candidates.find((p) => !linksPreset(p));
+    if (!ok) {
+        if (candidates.length > 0) {
+            const p = candidates[0];
+            throw Object.assign(
+                new Error(`Model "${model.name}" can only switch through profile "${p.name}", which also loads the preset "${p.preset}". Unlink that preset first.`),
+                { code: 'linked', profile: p },
+            );
+        }
+        throw new Error(`Model "${model.name}" has no connection profile in this SillyTavern`);
     }
-    return profile.name;
+    await ctx().executeSlashCommandsWithOptions('/profile ' + slashArg(ok.name));
+    if (ctx().extensionSettings?.connectionManager?.selectedProfile !== ok.id) {
+        throw new Error('SillyTavern did not switch to profile "' + ok.name + '"');
+    }
+    return ok.name;
 }
 
 /**
@@ -91,13 +101,33 @@ export function rerenderProfileSelect() {
  * Delete every connection profile NOT in `keepIds`, in place (preserving
  * order of the survivors), clear `selectedProfile` if it was deleted,
  * re-render the select and notify ST of each deletion.
+ *
+ * Verifies against `backedUp` (the exact profiles the caller already sent
+ * to the backup) before touching anything: refuses to delete the currently
+ * selected profile, and refuses when any live profile about to be deleted
+ * is missing from — or no longer matches — its backed-up copy (the backup
+ * would not actually cover what is being destroyed).
  * @param {string[]} keepIds
+ * @param {any[]} backedUp the profiles the caller backed up before calling
  * @returns {Promise<any[]>} the deleted profile objects
  */
-export async function deleteProfilesExcept(keepIds) {
+export async function deleteProfilesExcept(keepIds, backedUp) {
     const keep = new Set(keepIds);
     if (keep.size === 0) throw new Error('deleteProfilesExcept: keepIds must not be empty');
     const profiles = connectionProfiles();
+    const selectedProfile = ctx().extensionSettings?.connectionManager?.selectedProfile;
+    if (selectedProfile && !keep.has(selectedProfile)) {
+        const active = profiles.find((p) => p.id === selectedProfile);
+        throw new Error(`The active connection profile "${active?.name ?? selectedProfile}" is not in the keep list; keep it or switch away first. Nothing deleted.`);
+    }
+    const byId = new Map(backedUp.map((p) => [p.id, p]));
+    for (const p of profiles) {
+        if (keep.has(p.id)) continue;
+        const backup = byId.get(p.id);
+        if (!backup || JSON.stringify(backup) !== JSON.stringify(p)) {
+            throw new Error(`Profiles changed after the backup was taken ("${p.name}"); nothing deleted. Back up again.`);
+        }
+    }
     const deleted = profiles.filter((p) => !keep.has(p.id));
     const survivors = profiles.filter((p) => keep.has(p.id));
     profiles.length = 0;

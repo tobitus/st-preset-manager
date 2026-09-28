@@ -249,14 +249,27 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   queue, never inline. Other tabs get the broadcast.
 - **Detached mode.** `PRESET_CHANGED` (`events.js:92`) with a name ≠ SLOT means ST moved off
   the slot (user picked another preset, ST's chat-name auto-select, or a profile — §1.5).
-  The bridge stops write-back (never writes a foreign preset into the library) and shows a
-  "re-attach" button that re-applies `desired`.
-- **Model reporting.** On `CHATCOMPLETION_MODEL_CHANGED` and `CONNECTION_PROFILE_LOADED`
-  (`events.js:36,81`) the tab resolves `(oai_settings.chat_completion_source,
-  getChatCompletionModel())` + selected profile id → Model via `shared/models.js`, and
-  `POST /slot/model {modelId, raw:{source, model, profileId}}`. The plugin recompiles and
-  pushes; the tab applies. Unresolved ids are reported (`modelId: null`) so the Settings tab
-  can offer "add as new Model".
+  The bridge stops write-back (never writes a foreign preset into the library). While
+  detached, connection, registry and API changes never re-apply the slot; only a desired
+  preset/loadout change (a library load, `slotChangedRev` advanced), the guard's
+  Re-attach/Unlink or an explicit re-attach does (Phase 4 review, finding 7).
+- **Model reporting — per-tab connection (Phase 4 review, finding 5).** The Model is a
+  property of each TAB's connection, not of the shared slot: two tabs (desk + laptop) may
+  generate on different Models. Every tab sends its own raw id `{source, model, profileId}`
+  (`oai_settings.chat_completion_source`, `getChatCompletionModel()`, selected profile id)
+  with `GET /slot?source&model&profileId` and `POST /slot/panel {…, raw}`; the plugin
+  compiles and routes against that raw, while the preset and loadout stay shared.
+  `POST /slot/model {raw}` only records the last reported raw as the default for
+  clients that send none (API/MCP) and returns that tab's view; it never broadcasts and
+  never marks the slot changed (a connection or registry change does not make another
+  tab's panel base stale). On `CHATCOMPLETION_MODEL_CHANGED`/`CONNECTION_PROFILE_LOADED`
+  (`events.js:36,81`) the tab reports and re-reconciles; a changed raw always re-applies.
+  Panel write-back carries the raw its baseline was compiled for (`baseRaw`), so edits
+  route to the Model they were made under; while the live connection differs from
+  `baseRaw` (a switch in progress), sampler keys in the snapshot are ST's own transition
+  changes (e.g. the OpenRouter Claude clamp, `openai.js:5719`) and are not written back.
+  The v2 picker flushes genuine unsent edits before it runs `/profile` (finding 2).
+  Unresolved ids resolve to `modelId: null` so the Settings tab can offer "add as new Model".
 - No generation interceptor is used, so the `type === 'quiet'` re-entry rule does not apply.
 
 ### 1.5 Profile guard and `/profile` model switching (items 19–20)
@@ -267,6 +280,10 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   `connection-manager/index.js:893-947`); ST applies `api`, `api-url`, `model`, `proxy`… in
   order (`:39-52`, `:396-424`). Then the model-reporting path above applies the tuning and
   the loadout override. The selected preset and loadout are never touched (acceptance 7).
+  The switch runs as one bridge edit op (unsent panel edits are flushed first) and only
+  through a connection-only profile: when the Model's only profiles link a preset, the
+  picker refuses and offers *Unlink preset and switch* (explicit consent), because ST runs
+  a profile's `preset` command before its `model` command.
 - **Guard.** On `CONNECTION_PROFILE_LOADED(name)`: find the profile in
   `extension_settings.connectionManager.profiles`; if `profile.preset` is set and `'preset'`
   ∉ `profile.exclude`, ST has just run `/preset <that>` and left the slot. v2 shows a dialog
@@ -274,11 +291,18 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   profile.preset` — the shape `index.js:856-865` writes — then `saveSettingsDebounced()`) and
   re-applies `desired`. `bind_preset_to_connection` is forced `false` once with a toast
   explaining the rule (`openai.js:7301-7304` is the checkbox; `oai_settings.bind_preset_to_connection`).
-- **Profile tidy** (Settings tab): lists profiles (read via the tab's `extension_settings`,
-  also readable by the plugin from `settings.json` for the seed), marks the ones naming a
-  preset, offers *unlink all* and *keep selected / delete rest*, after `GET /profiles/backup`
-  (plugin writes `preset-manager/backups/profiles-<iso>.json` from `settings.json` — read
-  only) — all edits go through the tab (F-052).
+- **Profile tidy** (Settings tab): lists profiles (read via the tab's `extension_settings`),
+  marks the ones naming a preset, offers *unlink all* and *keep selected / delete rest*,
+  after `POST /profiles/backup {profiles}` (plugin writes
+  `preset-manager/backups/profiles-<iso>.json`; without a body it reads `settings.json`,
+  read only). The delete runs in the tab (F-052) and only when every profile it removes is
+  byte-identical to its backed-up copy (else nothing is deleted) and the active profile is
+  kept.
+- **Model rename / merge** (Settings tab) are plugin transactions (`POST /models/rename`,
+  `POST /models/merge`) that re-key every document's `tuningOverrides[Model]` and
+  `loadouts[*].overrides[Model]` with the registry, published as one step; a merge keeps
+  the first-listed Model's value per key (tuning) / identifier (override, pick-one
+  completed), and each touched document gets a labelled revision holding the old values.
 
 ### 1.6 REST API (`/api/plugins/st-preset-manager/…`; JSON; all non-GET need cookie + `x-csrf-token`)
 

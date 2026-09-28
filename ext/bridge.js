@@ -37,13 +37,35 @@
  * resolve the Model and desired loadout for that connection. Flushes
  * unsent panel edits first when attached (a Model switch can move ST onto
  * a different desired slot state), POSTs /slot/model, records the plugin's
- * resolved modelId and enqueues a reconcile so the new desired state lands.
- * No-ops when the raw id is unchanged since the last report. `reattach()`
- * forces the next reconcile to re-apply even when the hash did not
- * change — used after a connection profile moved ST off the working slot
- * and the caller re-attaches without a genuinely new desired state.
+ * resolved modelId and — unless the tab is detached — enqueues a reconcile
+ * so the new desired state lands. No-ops when the raw id is unchanged since
+ * the last report. `reattach()` forces the next reconcile to re-apply even
+ * when the hash did not change — used after a connection profile moved ST
+ * off the working slot and the caller re-attaches without a genuinely new
+ * desired state.
+ *
+ * PER-TAB CONNECTION: every GET /slot call carries the tab's OWN raw
+ * connection id (st.js's `slotPath`) instead of a global one; `baseRaw`
+ * remembers the raw a reconcile's applied baseline was fetched for. When
+ * the tab's current raw drifts from `baseRaw` a reconcile re-applies even
+ * at an unchanged hash (ST may have mutated samplers during the switch).
+ *
+ * DETACHED: `detached` tracks "ST is showing a foreign (non-v2) preset",
+ * set by the PRESET_CHANGED watcher. While detached, a reconcile NOT
+ * forced by a genuine library load (slotChangedRev advancing) or by
+ * `reattach()`/an explicit unlink never re-applies the working slot over
+ * the foreign preset — a mere connection or registry change must not steal
+ * the tab back.
+ *
+ * TRANSITION-SAFE FLUSH: flushPanel restores TUNING_KEYS in the snapshot
+ * it is about to send from the write-back baseline whenever the tab's
+ * current raw differs from `baseRaw` — a connection switch can mutate
+ * samplers in ST as a side effect, and that mutation is not a genuine user
+ * tuning edit. A controlled switch (bridge.edit) flushes real edits BEFORE
+ * the switch, so this never drops one.
  */
-import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, currentRaw, SLOT_NAME, PLUGIN_BASE } from './st.js';
+import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, currentRaw, slotPath, SLOT_NAME, PLUGIN_BASE } from './st.js';
+import { TUNING_KEYS } from '../shared/st-keys.js';
 
 /**
  * Surfaces the user edits a chat-completion preset from, covered by the
@@ -80,7 +102,15 @@ export class Bridge {
         /** Panel projection of the last applied state: the write-back
          * baseline. panel ops POST only when the snapshot differs from it. */
         this.baseSnapshot = null;
+        /** Raw connection id (source/model/profileId) the applied
+         * compile/baseline was fetched for — used to detect a connection
+         * change under an unchanged compiled hash. */
+        this.baseRaw = null;
         this.attached = false;
+        /** ST is currently showing a foreign (non-v2) preset. While true, a
+         * reconcile not forced by a genuine library load or reattach()
+         * never re-applies the working slot over it. */
+        this.detached = false;
         this.es = null;
         /** @type {Set<(state: any) => void>} */
         this.listeners = new Set();
@@ -182,7 +212,8 @@ export class Bridge {
      * when the raw id is unchanged since the last report. Flushes unsent
      * panel edits first when attached (a Model switch can move the desired
      * slot state), then POSTs /slot/model, records the resolved modelId,
-     * emits it and enqueues a reconcile so the new desired state lands.
+     * emits it and — unless the tab is detached — enqueues a reconcile so
+     * the new desired state lands.
      * @returns {Promise<any|null>} the slot view, or null when unchanged
      */
     async modelReportOp() {
@@ -193,7 +224,7 @@ export class Bridge {
         this._reportedRaw = raw;
         this.modelId = view?.desired?.modelId ?? null;
         this.emit({ model: { raw, modelId: this.modelId } });
-        this.enqueueReconcile();
+        if (!this.detached) this.enqueueReconcile();
         return view;
     }
 
@@ -208,7 +239,7 @@ export class Bridge {
     reattach() {
         return this._enqueue(() => {
             this.appliedHash = null;
-            return this.reconcileOp();
+            return this.reconcileOp(true);
         });
     }
 
@@ -241,12 +272,17 @@ export class Bridge {
      * reconcile op: flush any unsent panel edits FIRST (so a user edit made
      * while an update was in flight reaches the server before incoming
      * state is applied over it — server receipt order = most recent wins),
-     * then GET /slot. Apply desired state when the tab does not already
-     * show that exact compiled state; advance the applied base without
-     * applying when it does. Idempotent — always fetches fresh, so any
-     * number of queued runs converge on the latest server state.
+     * then GET /slot for the tab's OWN raw connection id. While `detached`
+     * and not `force`d, a reconcile that is not itself a library load
+     * (slotChangedRev unchanged) never re-applies over the foreign preset.
+     * Otherwise apply desired state when the tab does not already show
+     * that exact compiled state for that raw; advance the applied base
+     * without applying when it does. Idempotent — always fetches fresh, so
+     * any number of queued runs converge on the latest server state.
+     * @param {boolean} [force] re-apply even at an unchanged compiled hash
+     *   (e.g. after reattach())
      */
-    async reconcileOp() {
+    async reconcileOp(force = false) {
         // The input blocker covers the WHOLE op, not just apply(): an edit
         // made after the flush below but before apply (e.g. during GET /slot)
         // would be neither flushed nor blocked, and the apply would overwrite
@@ -254,13 +290,13 @@ export class Bridge {
         // the flush and no later edit can land until the op finishes.
         this._setApplyOverlay(true);
         try {
-            return await this._reconcileInner();
+            return await this._reconcileInner(force);
         } finally {
             this._setApplyOverlay(false);
         }
     }
 
-    async _reconcileInner() {
+    async _reconcileInner(force) {
         if (currentPresetName() === SLOT_NAME && this.baseSnapshot) {
             // A failed flush means unsent user edits would be overwritten by
             // the apply below — abort this op entirely (Finding: "Abort
@@ -274,15 +310,31 @@ export class Bridge {
             // re-reads /slot).
             await this.flushPanel();
         }
-        const slot = /** @type {{rev: number, slotChangedRev?: number, desired: any, compiled: any, hash: string}} */ (await api('GET', '/slot'));
+        const raw = currentRaw();
+        const slot = /** @type {{rev: number, slotChangedRev?: number, desired: any, compiled: any, hash: string}} */ (await api('GET', slotPath(raw)));
         const slotChangedRev = slot.slotChangedRev ?? 0;
+        const rawChanged = this.baseRaw !== null && this.hashOf(raw) !== this.hashOf(this.baseRaw);
+        if (this.detached && !force && !(slotChangedRev > this.appliedSlotChangedRev)) {
+            // Detached: ST is showing a foreign preset. A connection or
+            // registry change alone (this reconcile) must not steal it back
+            // — only a genuine library load (slotChangedRev advances),
+            // reattach() (force) or an unlink re-applies.
+            this.emit({ slot, attached: false });
+            return slot;
+        }
         if (slot.desired?.presetId && slot.compiled) {
-            if (slot.hash !== this.appliedHash) {
+            if (slot.hash !== this.appliedHash || rawChanged || force) {
+                // A changed connection always re-applies even at an
+                // unchanged compiled hash: ST may have mutated samplers
+                // itself while switching.
                 await this.apply(slot);
                 this.appliedSlotChangedRev = slotChangedRev;
+                this.baseRaw = raw;
+                this.detached = false;
             } else {
-                // Same compiled hash. Three sub-cases (Finding: "Advance the
-                // panel base after a same-hash slot change"):
+                // Same compiled hash, same connection. Three sub-cases
+                // (Finding: "Advance the panel base after a same-hash slot
+                // change"):
                 // - a slot change (load / model swap) that compiles to the
                 //   same hash: no apply is needed, but appliedRev must
                 //   advance, or every later panel post uses an old baseRev
@@ -305,6 +357,7 @@ export class Bridge {
                     this.appliedRev = Math.max(this.appliedRev, slot.rev);
                     this.appliedSlotChangedRev = slotChangedRev;
                 }
+                this.baseRaw = raw;
             }
         } else {
             this.attached = currentPresetName() === SLOT_NAME;
@@ -440,9 +493,14 @@ export class Bridge {
      * and reconcile ops — a user edit made while an update was in flight
      * must reach the server before that update is applied over it). It is
      * safe to call from within a queued op because it enqueues nothing.
-     * Snapshot ST (or use `given`) ; if it differs from the baseline, POST
-     * the delta (base + snapshot) and let the plugin route only what the
-     * user changed.
+     * Snapshot ST (or use `given`); if the tab's current raw connection id
+     * differs from `baseRaw`, ST may have mutated samplers as a side effect
+     * of the switch — restore TUNING_KEYS in the snapshot from the baseline
+     * before treating it as a user edit (a genuine tuning edit made during
+     * a controlled switch is protected because bridge.edit flushes it
+     * FIRST, before the switch runs). Then, if the (possibly restored)
+     * snapshot differs from the baseline, POST the delta (base + snapshot)
+     * and let the plugin route only what the user changed.
      * @param {any} [given] a snapshot taken earlier; skips the fresh
      *   snapshot when provided
      * @returns {Promise<any>} the snapshot sent, or null if nothing was sent
@@ -457,8 +515,19 @@ export class Bridge {
      */
     async flushPanel(given = undefined) {
         if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
-        const snapshot = given ?? await snapshotPanel();
+        let snapshot = given ?? await snapshotPanel();
         if (!snapshot) return null;
+        if (this.baseRaw && this.hashOf(currentRaw()) !== this.hashOf(this.baseRaw)) {
+            const restored = { ...snapshot };
+            for (const key of TUNING_KEYS) {
+                if (this.baseSnapshot && Object.prototype.hasOwnProperty.call(this.baseSnapshot, key)) {
+                    restored[key] = this.baseSnapshot[key];
+                } else {
+                    delete restored[key];
+                }
+            }
+            snapshot = restored;
+        }
         const sameBase = this.baseSnapshot && this.hashOf(snapshot) === this.hashOf(this.baseSnapshot);
         if (sameBase) return null;
         let res;
@@ -468,6 +537,7 @@ export class Bridge {
                 baseRev: this.appliedRev,
                 base: this.baseSnapshot,
                 snapshot,
+                raw: this.baseRaw ?? currentRaw(),
             });
         } catch (err) {
             if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
@@ -529,9 +599,11 @@ export class Bridge {
             const name = typeof data === 'object' && data !== null ? data.name : data;
             if (name && name !== SLOT_NAME) {
                 this.attached = false;
+                this.detached = true;
                 this.emit({ attached: false });
             } else if (name === SLOT_NAME) {
                 this.attached = true;
+                this.detached = false;
                 this.emit({ attached: true });
             }
         });

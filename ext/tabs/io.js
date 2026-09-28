@@ -4,7 +4,7 @@
  * a library preset as ST JSON (compiled, lossless of nothing but the
  * library-only fields) or as a native library document.
  */
-import { api, listStPresets } from '../st.js';
+import { api, listStPresets, slotPath } from '../st.js';
 import { importBodyFromFile, exportFileName } from '../../shared/io.js';
 
 /** Count `kind==='group'` rows anywhere in a doc's sequences, recursing into sections. */
@@ -196,7 +196,7 @@ export function createIoTab(pane, bridge, { onOpen, onLibraryChanged }) {
         const current = exportPreset.value;
         const [items, slot] = await Promise.all([
             api('GET', '/library'),
-            api('GET', '/slot'),
+            api('GET', slotPath()),
         ]);
         exportPreset.replaceChildren(...items.map((/** @type {any} */ item) => {
             const opt = document.createElement('option');

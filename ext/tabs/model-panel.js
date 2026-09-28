@@ -17,7 +17,7 @@
  * clobbered by a refresh. Every write goes through `bridge.edit`; reads may
  * call `api` directly.
  */
-import { api } from '../st.js';
+import { api, slotPath } from '../st.js';
 import { iterLeaves } from '../../shared/groups.js';
 
 /** Tuning keys shown in this panel (a curated subset of shared/st-keys.js TUNING_KEYS). */
@@ -154,7 +154,7 @@ export function createModelPanel(el, opts) {
     /** GET /models + GET /slot into `registry`/`slotModelId`. */
     async function fetchState() {
         try {
-            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', '/slot')]);
+            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', slotPath())]);
             registry = reg;
             slotModelId = slot?.desired?.modelId ?? null;
         } catch (err) {
@@ -302,16 +302,12 @@ export function createModelPanel(el, opts) {
         }
         const doc = getDoc();
         const ov = doc?.tuningOverrides?.[M];
+        const body = v === undefined ? { unset: [k] } : { set: { [k]: v } };
         try {
             if (ov) {
-                const body = { ...ov };
-                if (v === undefined) delete body[k]; else body[k] = v;
-                await bridge.edit(() => api('PUT', `/presets/${presetId}/tuning-overrides/${encodeURIComponent(M)}`, body));
+                await bridge.edit(() => api('PATCH', `/presets/${presetId}/tuning-overrides/${encodeURIComponent(M)}`, body));
             } else {
-                const g = registry.models[M]?.tuning ?? {};
-                const body = { ...g };
-                if (v === undefined) delete body[k]; else body[k] = v;
-                await bridge.edit(() => api('PUT', `/models/${encodeURIComponent(M)}/tuning`, body));
+                await bridge.edit(() => api('PATCH', `/models/${encodeURIComponent(M)}/tuning`, body));
             }
             await afterWrite();
             setStatus('');
@@ -371,14 +367,14 @@ export function createModelPanel(el, opts) {
         const M = chosen;
         const lid = getLoadoutId();
         if (!M || !lid) return;
-        const doc = getDoc();
-        const lo = doc?.loadouts?.[lid];
-        const cur = lo?.overrides?.[M]?.enabled ?? {};
-        const next = { ...cur };
-        if (value === 'inherit') delete next[id];
-        else next[id] = value === 'on';
+        const body = value === 'inherit' ? { unset: [id] } : { set: { [id]: value === 'on' } };
+        const url = `/presets/${presetId}/loadouts/${lid}/overrides/${encodeURIComponent(M)}`;
+        // no override for this loadout x Model yet: the first choice creates
+        // it (PUT); an existing one takes a per-identifier PATCH
+        const exists = getDoc()?.loadouts?.[lid]?.overrides?.[M] !== undefined;
         try {
-            await bridge.edit(() => api('PUT', `/presets/${presetId}/loadouts/${lid}/overrides/${encodeURIComponent(M)}`, { enabled: next }));
+            if (exists) await bridge.edit(() => api('PATCH', url, body));
+            else if (value !== 'inherit') await bridge.edit(() => api('PUT', url, { enabled: { [id]: value === 'on' } }));
             await afterWrite();
             setStatus('');
         } catch (err) {

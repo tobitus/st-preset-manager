@@ -9,8 +9,8 @@
  * available globally in ST and used for the window. The window also swallows
  * file drag/drop events anywhere inside it so ST's body-level importer never sees them (see below).
  */
-import { api, SLOT_NAME, currentRaw, connectionProfiles } from './st.js';
-import { switchToModel } from './connection.js';
+import { api, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
+import { switchToModel, unlinkProfilePreset } from './connection.js';
 import { createPresetsTab } from './tabs/presets.js';
 import { createIoTab } from './tabs/io.js';
 import { createSettingsTab } from './tabs/settings.js';
@@ -191,7 +191,7 @@ function wireModelPicker(root, bridge) {
 
     async function refreshToolbar() {
         try {
-            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', '/slot')]);
+            const [reg, slot] = await Promise.all([api('GET', '/models'), api('GET', slotPath())]);
             registry = reg;
             modelId = slot?.desired?.modelId ?? null;
             if (document.activeElement === select && switching) return;
@@ -199,29 +199,46 @@ function wireModelPicker(root, bridge) {
         } catch { /* leave stale state on a transient failure */ }
     }
 
+    /**
+     * @param {string} name Model name to switch to
+     * @param {(() => void)} [beforeSwitch] run inside the same bridge.edit op before switchToModel, e.g. to unlink a preset
+     */
+    async function trySwitch(name, beforeSwitch) {
+        switching = true;
+        status.classList.remove('pm-error');
+        status.textContent = 'switching…';
+        try {
+            const model = registry.models[name];
+            await bridge.edit(async () => {
+                if (beforeSwitch) beforeSwitch();
+                return switchToModel(model);
+            });
+            modelId = name;
+            const raw = currentRaw();
+            const profile = raw.profileId ? connectionProfiles().find((/** @type {any} */ p) => p.id === raw.profileId) : null;
+            status.textContent = `on ${profile ? profile.name : (raw.profileId ?? 'connection')}`;
+            renderOptions();
+        } catch (err) {
+            status.classList.add('pm-error');
+            const e = /** @type {any} */ (err);
+            if (e?.code === 'linked') {
+                status.innerHTML = `${escapeHtml(e.message)} <button type="button" class="pm-model-unlink-switch menu_button">Unlink preset from “${escapeHtml(e.profile.name)}” and switch</button>`;
+                status.querySelector('.pm-model-unlink-switch')?.addEventListener('click', () => {
+                    void trySwitch(name, () => unlinkProfilePreset(e.profile));
+                });
+            } else {
+                status.textContent = err instanceof Error ? err.message : String(err);
+            }
+            renderOptions();
+        } finally {
+            switching = false;
+        }
+    }
+
     select.addEventListener('change', () => {
         const name = select.value;
         if (!name) return;
-        void (async () => {
-            switching = true;
-            status.classList.remove('pm-error');
-            status.textContent = 'switching…';
-            try {
-                const model = registry.models[name];
-                await switchToModel(model);
-                modelId = name;
-                const raw = currentRaw();
-                const profile = raw.profileId ? connectionProfiles().find((/** @type {any} */ p) => p.id === raw.profileId) : null;
-                status.textContent = `on ${profile ? profile.name : (raw.profileId ?? 'connection')}`;
-                renderOptions();
-            } catch (err) {
-                status.classList.add('pm-error');
-                status.textContent = err instanceof Error ? err.message : String(err);
-                renderOptions();
-            } finally {
-                switching = false;
-            }
-        })();
+        void trySwitch(name);
     });
 
     const unsubscribe = bridge.onUpdate((/** @type {any} */ s) => {
@@ -315,7 +332,7 @@ async function refresh(root, bridge, state = {}) {
     try {
         const [items, slot] = await Promise.all([
             api('GET', '/library'),
-            api('GET', '/slot'),
+            api('GET', slotPath()),
         ]);
         renderLibrary(root, bridge, { onOpen: state.onOpen, items, desired: slot.desired });
     } catch (err) {

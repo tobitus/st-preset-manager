@@ -7,17 +7,21 @@
  *
  * All writes are tmp+rename atomic; every mutation runs through one promise
  * queue (single writer). `rev` on state.json is the global monotonic counter
- * bumped by every mutation of any file.
+ * bumped by every mutation of any file. Multi-file transactions (a doc plus
+ * models.json, or several docs together) go through `_commit`: it writes
+ * every file first and only then, with no `await` in between, swaps
+ * `index`/`models`/`state` in memory in one synchronous instant — a failed
+ * write restores whatever it already wrote and leaves memory untouched.
  */
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { validateDoc, validateRegistry, nativeShapeErrors } from '../shared/schema.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
-import { ensureAllLeaves } from '../shared/groups.js';
+import { ensureAllLeaves, completeOverride, iterLeaves } from '../shared/groups.js';
 import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
 import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
-import { resolveModel, seedFromProfiles } from '../shared/models.js';
+import { resolveModel, seedFromProfiles, mergeModels } from '../shared/models.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
 
 export class StoreError extends Error {
@@ -57,6 +61,13 @@ async function atomicWrite(/** @type {string} */ file, /** @type {string} */ dat
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(tmp, data);
     await fsp.rename(tmp, file);
+}
+
+/** @param {any} value */
+function isPlainObject(value) {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
 }
 
 export class Store {
@@ -162,6 +173,85 @@ export class Store {
     _markSlotChanged() {
         this.slotChangedRev = this.rev + 1;
         this.state.slotChangedRev = this.slotChangedRev;
+    }
+
+    /**
+     * Publish a multi-file transaction atomically: validates everything
+     * first (a bad registry or doc throws before any write), snapshots a
+     * revision of each touched doc, writes every file, and only then, with
+     * no `await` in between, swaps `index`/`models`/`state` into memory in
+     * one synchronous instant. A write failure restores every file this
+     * call already wrote (best effort) and rethrows — memory stays
+     * untouched. Call only from inside the store queue (single writer);
+     * never call directly from a route. Docs must already be indexed and
+     * keep their name/folder (this is a content transaction, not a
+     * rename/move — `_savePresetNow` handles those).
+     * @param {{ registry?: any, docs?: any[], revisionLabel?: string }} [opts]
+     */
+    async _commit({ registry = undefined, docs = [], revisionLabel = undefined } = {}) {
+        if (registry !== undefined) {
+            const errs = validateRegistry(registry);
+            if (errs.length) throw new StoreError(`invalid registry: ${errs.join(', ')}`, 400);
+        }
+        for (const doc of docs) {
+            const errs = validateDoc(doc);
+            if (errs.length) throw new StoreError(`invalid document: ${errs.join(', ')}`, 400);
+        }
+        /** @type {{ entry: any, doc: any }[]} */
+        const targets = [];
+        for (const doc of docs) {
+            const entry = this.index.get(doc.id);
+            if (!entry) throw new StoreError(`preset ${doc.id} not found`, 404);
+            if (sanitizeName(doc.name) !== sanitizeName(entry.name) || String(doc.folder ?? '') !== String(entry.folder ?? '')) {
+                throw new StoreError(`_commit cannot rename or move ${doc.id}`, 400);
+            }
+            targets.push({ entry, doc });
+        }
+
+        for (const { entry, doc } of targets) {
+            await this._writeRevision(entry.doc, revisionLabel);
+            doc.rev = (entry.doc.rev ?? 0) + 1;
+            doc.updatedAt = new Date().toISOString();
+        }
+
+        const nextState = structuredClone(this.state);
+        nextState.rev = this.rev + 1;
+        nextState.updatedAt = new Date().toISOString();
+
+        /** @type {{ file: string, prev: string|null }[]} */
+        const written = [];
+        try {
+            for (const { entry, doc } of targets) {
+                const prev = fs.existsSync(entry.path) ? await fsp.readFile(entry.path, 'utf8') : null;
+                await atomicWrite(entry.path, JSON.stringify(doc, null, 2) + '\n');
+                written.push({ file: entry.path, prev });
+            }
+            if (registry !== undefined) {
+                const prev = fs.existsSync(this.modelsFile) ? await fsp.readFile(this.modelsFile, 'utf8') : null;
+                await atomicWrite(this.modelsFile, JSON.stringify(registry, null, 2));
+                written.push({ file: this.modelsFile, prev });
+            }
+            {
+                const prev = fs.existsSync(this.stateFile) ? await fsp.readFile(this.stateFile, 'utf8') : null;
+                await atomicWrite(this.stateFile, JSON.stringify(nextState, null, 2));
+                written.push({ file: this.stateFile, prev });
+            }
+        } catch (err) {
+            for (const { file, prev } of written) {
+                try {
+                    if (prev === null) await fsp.rm(file, { force: true });
+                    else await atomicWrite(file, prev);
+                } catch { /* best effort restore */ }
+            }
+            throw err;
+        }
+
+        for (const { entry, doc } of targets) {
+            this.index.set(doc.id, { ...entry, updatedAt: doc.updatedAt, tags: doc.tags ?? [], doc: structuredClone(doc) });
+        }
+        if (registry !== undefined) this.models = registry;
+        this.state = nextState;
+        this.rev = nextState.rev;
     }
 
     // ------------------------------------------------------------------ scan
@@ -438,6 +528,83 @@ export class Store {
         });
     }
 
+    // --------------------------------------------------------- doc patches
+
+    /**
+     * Patch a preset's tuning override for a Model: semantic
+     * `{set?: {key: value}, unset?: [key]}`, applied inside the store
+     * queue (never a whole cached object). 404 when no override exists for
+     * that Model.
+     * @param {string} presetId
+     * @param {string} name
+     * @param {{ set?: Record<string, any>, unset?: string[] }} patch
+     */
+    async patchTuningOverride(presetId, name, patch) {
+        return this.enqueue(async () => {
+            const doc = this.getDocNow(presetId);
+            if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
+            if (doc.tuningOverrides?.[name] === undefined) {
+                throw new StoreError(`no tuning override for ${name}`, 404);
+            }
+            Store._validatePatch(patch, TUNING_KEYS, (k) => `"${k}" is not a tuning key`);
+            const next = { ...doc.tuningOverrides[name] };
+            for (const k of patch.unset ?? []) delete next[k];
+            Object.assign(next, patch.set ?? {});
+            doc.tuningOverrides[name] = next;
+            return this._savePresetNow(doc);
+        });
+    }
+
+    /**
+     * Patch a loadout's per-Model override: semantic
+     * `{set?: {identifier: bool}, unset?: [identifier]}`, applied inside
+     * the store queue. 404 when the preset, loadout or override is
+     * missing, or an identifier names an unknown leaf (same rule as the
+     * PUT route).
+     * @param {string} presetId
+     * @param {string} lid
+     * @param {string} name
+     * @param {{ set?: Record<string, any>, unset?: string[] }} patch
+     */
+    async patchLoadoutOverride(presetId, lid, name, patch) {
+        return this.enqueue(async () => {
+            const doc = this.getDocNow(presetId);
+            if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
+            const loadout = doc.loadouts?.[lid];
+            if (!loadout) throw new StoreError(`no loadout ${lid}`, 404);
+            const cur = loadout.overrides?.[name];
+            if (cur === undefined) throw new StoreError(`no override for ${name}`, 404);
+            if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+                throw new StoreError('patch must be an object', 400);
+            }
+            for (const k of Object.keys(patch)) {
+                if (k !== 'set' && k !== 'unset') throw new StoreError(`unknown patch field "${k}"`, 400);
+            }
+            const { set, unset } = patch;
+            if (set !== undefined && !isPlainObject(set)) {
+                throw new StoreError('patch.set must be a plain object', 400);
+            }
+            if (unset !== undefined && !Array.isArray(unset)) {
+                throw new StoreError('patch.unset must be an array', 400);
+            }
+            for (const [id, v] of Object.entries(set ?? {})) {
+                if (typeof v !== 'boolean') throw new StoreError(`override.${id} must be a boolean`, 400);
+            }
+            const leaves = new Set(iterLeaves(doc).map((/** @type {any} */ l) => l.ref ?? l.identifier));
+            for (const id of [...Object.keys(set ?? {}), ...(unset ?? [])]) {
+                if (!leaves.has(id)) throw new StoreError(`unknown leaf ${id}`, 404);
+            }
+            const next = { ...cur.enabled };
+            for (const id of unset ?? []) delete next[id];
+            for (const [id, v] of Object.entries(set ?? {})) {
+                delete next[id];
+                next[id] = v;
+            }
+            loadout.overrides[name] = { enabled: completeOverride(doc, next) };
+            return this._savePresetNow(doc);
+        });
+    }
+
     /**
      * @param {any} doc @param {string} dir
      * @param {((indexedDoc: any) => void)|undefined} [onPublish] invoked
@@ -532,30 +699,16 @@ export class Store {
 
     /**
      * Body of mutateModels WITHOUT taking the queue: compose inside ONE
-     * store-queue transaction (see _savePresetNow). Never call outside the
-     * queue.
+     * store-queue transaction (see _savePresetNow). Publishes through
+     * `_commit`, so validation runs and every write lands before `models`
+     * changes in memory. Never call outside the queue.
      * @param {(reg: any) => any} fn
      */
     async _mutateModelsNow(fn) {
-        {
-            const reg = structuredClone(this.models);
-            const result = await fn(reg);
-            const errs = validateRegistry(reg);
-            if (errs.length) throw new StoreError(`invalid registry: ${errs.join(', ')}`);
-            this.models = reg;
-            await atomicWrite(this.modelsFile, JSON.stringify(reg, null, 2));
-            await this._bumpRev();
-            return result;
-        }
-    }
-
-    /**
-     * Current resolved Model name for the slot's raw connection id, or
-     * null. `this.state.raw` is absent on a fresh store.
-     */
-    _resolvedModelName() {
-        const raw = this.state.raw ?? { source: null, model: null, profileId: null };
-        return resolveModel(this.models, raw)?.name ?? null;
+        const reg = structuredClone(this.models);
+        const result = await fn(reg);
+        await this._commit({ registry: reg });
+        return result;
     }
 
     /**
@@ -577,27 +730,18 @@ export class Store {
     }
 
     /**
-     * Replace the whole registry (validated). If this changes which Model
-     * the slot's raw connection id resolves to, marks the slot changed and
-     * persists the new resolution onto state.modelId — same transaction
-     * shape as /slot/load: the marker lands BEFORE the state write.
+     * Replace the whole registry (validated). Registry writes never mark
+     * the slot changed or touch state — a panel base is never invalidated
+     * by a Model/registry change; each panel post carries the raw its base
+     * was compiled for and routes by that.
      * @param {any} reg
      */
     async replaceModels(reg) {
-        return this.enqueue(async () => {
-            const before = this._resolvedModelName();
-            const saved = await this._mutateModelsNow((r) => {
-                r.version = reg.version;
-                r.models = structuredClone(reg.models);
-                return structuredClone(r);
-            });
-            const after = this._resolvedModelName();
-            if (before !== after) {
-                this._markSlotChanged();
-                await this._mutateStateNow((st) => { st.modelId = after; });
-            }
-            return saved;
-        });
+        return this.enqueue(() => this._mutateModelsNow((r) => {
+            r.version = reg.version;
+            r.models = structuredClone(reg.models);
+            return structuredClone(r);
+        }));
     }
 
     /**
@@ -615,6 +759,169 @@ export class Store {
                 if (!TUNING_KEYS.includes(k)) throw new StoreError(`"${k}" is not a tuning key`, 400);
             }
             await this._mutateModelsNow((reg) => { reg.models[name].tuning = { ...tuning }; });
+            return structuredClone(this.models.models[name]);
+        });
+    }
+
+    /**
+     * Rename a Model, migrating every document reference: any
+     * `tuningOverrides[from]` or `loadouts[*].overrides[from]` moves to
+     * `to` (replacing an existing `to` key). One `_commit` transaction: a
+     * labelled revision of each touched doc is snapshotted first.
+     * @param {string} from
+     * @param {string} to
+     * @returns {Promise<{ models: Record<string, any>, migrated: string[] }>}
+     */
+    async renameModel(from, to) {
+        return this.enqueue(async () => {
+            if (!this.models.models[from]) throw new StoreError(`Model ${from} not found`, 404);
+            const trimmed = String(to ?? '').trim();
+            if (!trimmed) throw new StoreError('renameModel needs a non-empty name', 400);
+            if (from === trimmed) return { models: this.models.models, migrated: [] };
+            if (this.models.models[trimmed]) throw new StoreError(`name "${trimmed}" is already used by another Model`, 400);
+
+            const reg = structuredClone(this.models);
+            /** @type {Record<string, any>} */
+            const models = {};
+            for (const key of Object.keys(reg.models)) {
+                if (key === from) {
+                    const entry = reg.models[key];
+                    entry.name = trimmed;
+                    models[trimmed] = entry;
+                } else {
+                    models[key] = reg.models[key];
+                }
+            }
+            reg.models = models;
+
+            /** @type {any[]} */
+            const docs = [];
+            for (const entry of this.index.values()) {
+                const doc = structuredClone(entry.doc);
+                let touched = false;
+                if (doc.tuningOverrides && Object.prototype.hasOwnProperty.call(doc.tuningOverrides, from)) {
+                    doc.tuningOverrides[trimmed] = doc.tuningOverrides[from];
+                    delete doc.tuningOverrides[from];
+                    touched = true;
+                }
+                for (const loadout of Object.values(doc.loadouts ?? {})) {
+                    if (loadout.overrides && Object.prototype.hasOwnProperty.call(loadout.overrides, from)) {
+                        loadout.overrides[trimmed] = loadout.overrides[from];
+                        delete loadout.overrides[from];
+                        touched = true;
+                    }
+                }
+                if (touched) docs.push(doc);
+            }
+
+            await this._commit({ registry: reg, docs, revisionLabel: `Model rename: ${from} -> ${trimmed}` });
+            return { models: this.models.models, migrated: docs.map((d) => d.id) };
+        });
+    }
+
+    /**
+     * Merge Models under one name, migrating every document reference: the
+     * union of `tuningOverrides`/loadout `overrides` keyed by any merged
+     * name (first-listed wins on conflict), moved to `name`. One `_commit`
+     * transaction: a labelled revision of each touched doc is snapshotted
+     * first.
+     * @param {string[]} names Model names to merge, in precedence order
+     * @param {string} name the merged Model's name
+     * @returns {Promise<{ models: Record<string, any>, migrated: string[] }>}
+     */
+    async mergeModelsTx(names, name) {
+        return this.enqueue(async () => {
+            let reg;
+            try {
+                reg = mergeModels(this.models, names, name);
+            } catch (err) {
+                throw new StoreError(/** @type {Error} */ (err).message, 400);
+            }
+            const target = String(name).trim();
+
+            /** @type {any[]} */
+            const docs = [];
+            for (const entry of this.index.values()) {
+                const doc = structuredClone(entry.doc);
+                let touched = false;
+
+                if (doc.tuningOverrides && names.some((n) => Object.prototype.hasOwnProperty.call(doc.tuningOverrides, n))) {
+                    /** @type {Record<string, any>} */
+                    const merged = {};
+                    for (let i = names.length - 1; i >= 0; i -= 1) {
+                        Object.assign(merged, doc.tuningOverrides[names[i]] ?? {});
+                    }
+                    for (const n of names) delete doc.tuningOverrides[n];
+                    doc.tuningOverrides[target] = merged;
+                    touched = true;
+                }
+
+                for (const loadout of Object.values(doc.loadouts ?? {})) {
+                    if (!loadout.overrides || !names.some((n) => Object.prototype.hasOwnProperty.call(loadout.overrides, n))) continue;
+                    /** @type {Record<string, boolean>} */
+                    const merged = {};
+                    for (let i = names.length - 1; i >= 0; i -= 1) {
+                        Object.assign(merged, loadout.overrides[names[i]]?.enabled ?? {});
+                    }
+                    for (const n of names) delete loadout.overrides[n];
+                    loadout.overrides[target] = { enabled: completeOverride(doc, merged) };
+                    touched = true;
+                }
+
+                if (touched) docs.push(doc);
+            }
+
+            await this._commit({ registry: reg, docs, revisionLabel: `Model merge: ${names.join(' + ')} -> ${target}` });
+            return { models: this.models.models, migrated: docs.map((d) => d.id) };
+        });
+    }
+
+    /**
+     * Validate a semantic patch `{set?, unset?}` against a fixed key
+     * domain: `set` keys and `unset` entries must all be in `keys`.
+     * @param {any} patch
+     * @param {readonly string[]} keys
+     * @param {(key: string) => string} badKey error message for a key outside `keys`
+     */
+    static _validatePatch(patch, keys, badKey) {
+        if (typeof patch !== 'object' || patch === null || Array.isArray(patch)) {
+            throw new StoreError('patch must be an object', 400);
+        }
+        for (const k of Object.keys(patch)) {
+            if (k !== 'set' && k !== 'unset') throw new StoreError(`unknown patch field "${k}"`, 400);
+        }
+        const { set, unset } = patch;
+        if (set !== undefined) {
+            if (!isPlainObject(set)) {
+                throw new StoreError('patch.set must be a plain object', 400);
+            }
+            for (const k of Object.keys(set)) {
+                if (!keys.includes(k)) throw new StoreError(badKey(k), 400);
+            }
+        }
+        if (unset !== undefined) {
+            if (!Array.isArray(unset)) throw new StoreError('patch.unset must be an array', 400);
+            for (const k of unset) {
+                if (!keys.includes(k)) throw new StoreError(badKey(k), 400);
+            }
+        }
+    }
+
+    /**
+     * Patch one Model's global tuning: `{set?: {key: value}, unset?: [key]}`.
+     * @param {string} name
+     * @param {{ set?: Record<string, any>, unset?: string[] }} patch
+     */
+    async patchModelTuning(name, patch) {
+        return this.enqueue(async () => {
+            if (!this.models.models[name]) throw new StoreError(`Model ${name} not found`, 404);
+            Store._validatePatch(patch, TUNING_KEYS, (k) => `"${k}" is not a tuning key`);
+            await this._mutateModelsNow((reg) => {
+                const tuning = { ...reg.models[name].tuning };
+                for (const k of patch.unset ?? []) delete tuning[k];
+                Object.assign(tuning, patch.set ?? {});
+                reg.models[name].tuning = tuning;
+            });
             return structuredClone(this.models.models[name]);
         });
     }
@@ -645,9 +952,10 @@ export class Store {
 
     /**
      * Resolve `raw` and set it as the slot's connection id. A canonically
-     * identical raw is a no-op (no write, no rev bump). Marks the slot
-     * changed only when the resolved Model actually differs — the marker
-     * lands BEFORE the state write, same transaction shape as /slot/load.
+     * identical raw is a no-op (no write, no rev bump). Per-tab connection:
+     * this never marks the slot changed — a panel base is never
+     * invalidated by a connection report, only by a library load
+     * (/slot/load), Re-attach or Unlink.
      * @param {{ source?: string|null, model?: string|null, profileId?: string|null }} raw
      */
     async setSlotModel(raw) {
@@ -662,7 +970,6 @@ export class Store {
             }
             const prev = resolveModel(this.models, current)?.name ?? null;
             const next = resolveModel(this.models, normalized)?.name ?? null;
-            if (prev !== next) this._markSlotChanged();
             await this._mutateStateNow((st) => {
                 st.raw = normalized;
                 st.modelId = next;

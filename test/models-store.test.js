@@ -82,7 +82,7 @@ test('setModelTuning: replaces one Model\'s global tuning; unknown Model 404, no
 
 // --------------------------------------------------------------- slot model
 
-test('setSlotModel: resolves the raw id; identical raw is a no-op; same Model via another provider keeps slotChangedRev; another Model bumps it', async () => {
+test('setSlotModel: records the last reported raw id (API default); identical raw is a no-op; never invalidates panel bases (per-tab connection)', async () => {
     const store = await tmpStore();
     await store.replaceModels(kimiRegistry());
 
@@ -105,31 +105,15 @@ test('setSlotModel: resolves the raw id; identical raw is a no-op; same Model vi
     assert.equal(nano.modelId, 'Kimi K3');
     assert.equal(nano.changed, true);
     assert.equal(nano.modelChanged, false);
-    assert.equal(store.slotChangedRev, scr1, 'same Model -> the panel base stays valid');
 
     const mock = await store.setSlotModel({ source: 'custom', model: 'mock', profileId: 'p-mock' });
     assert.equal(mock.modelId, 'Mock');
     assert.equal(mock.modelChanged, true);
-    assert.ok(store.slotChangedRev > scr1, 'another Model -> slot changed');
+    assert.equal(store.slotChangedRev, scr1, 'a connection report from one tab never 409s another tab\'s panel base');
 
     const none = await store.setSlotModel({ source: 'custom', model: 'unknown', profileId: 'p-x' });
     assert.equal(none.modelId, null);
     assert.equal(store.state.modelId, null);
-});
-
-test('replaceModels: a registry change that re-resolves the slot\'s raw id marks the slot changed', async () => {
-    const store = await tmpStore();
-    await store.replaceModels(kimiRegistry());
-    await store.setSlotModel({ source: 'custom', model: 'mock', profileId: 'p-mock' });
-    const scr = store.slotChangedRev;
-    await store.replaceModels(kimiRegistry()); // same resolution
-    assert.equal(store.slotChangedRev, scr);
-    const renamed = kimiRegistry();
-    renamed.models.Mocky = { ...renamed.models.Mock, name: 'Mocky' };
-    delete renamed.models.Mock;
-    await store.replaceModels(renamed);
-    assert.ok(store.slotChangedRev > scr);
-    assert.equal(store.state.modelId, 'Mocky');
 });
 
 // ----------------------------------------------------------- profile backup

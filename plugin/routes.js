@@ -1,10 +1,13 @@
 /**
  * REST routes (PLAN §1.6). Mounted at /api/plugins/st-preset-manager.
  * Phase 1 subset: /health, /library, /presets (import + get/put/delete +
- * /ops toggle|setSettings), /presets/:id/export, /slot/* (load, model,
- * panel), /events, /rescan, /revisions, /models (GET/PUT + :modelId/tuning
- * + seed), /profiles GET, /profiles/backup, /shelf. The rest of the table
- * lands with its phase.
+ * /ops toggle|setSettings), /presets/:id/export, /slot/* (load, model —
+ * per-tab GET/POST raw, review-1 W2 —, panel), /events, /rescan,
+ * /revisions, /models (GET/PUT + :modelId/tuning PUT/PATCH + seed +
+ * rename/merge), /presets/:id/tuning-overrides/:modelId and
+ * /presets/:id/loadouts/:lid/overrides/:modelId (PUT/DELETE/PATCH),
+ * /profiles GET, /profiles/backup, /shelf. The rest of the table lands
+ * with its phase.
  */
 import { Router } from 'express';
 import fs from 'node:fs';
@@ -41,6 +44,30 @@ function rawOf(store) {
 }
 
 /**
+ * Raw connection id from GET /slot's query string (per-tab connection,
+ * review-1 W2): present iff at least one of source/model/profileId is on
+ * the query, so an absent raw falls back to state.raw (rawOf) rather than
+ * resolving against {'', '', null}.
+ * @param {any} req
+ * @returns {{source: string, model: string, profileId: string|null}|null}
+ */
+function rawFromQuery(req) {
+    const q = /** @type {any} */ (req.query ?? {});
+    if (q.source === undefined && q.model === undefined && q.profileId === undefined) return null;
+    return { source: String(q.source ?? ''), model: String(q.model ?? ''), profileId: q.profileId ? String(q.profileId) : null };
+}
+
+/**
+ * Normalise a request-body raw connection id (POST /slot/panel, /slot/model)
+ * to a plain {source, model, profileId} or null when absent/malformed.
+ * @param {any} x
+ * @returns {{source: any, model: any, profileId: any}|null}
+ */
+function normRaw(x) {
+    return x && typeof x === 'object' ? { source: x.source ?? null, model: x.model ?? null, profileId: x.profileId ?? null } : null;
+}
+
+/**
  * ST connection profiles from the user's settings.json, unfiltered and
  * verbatim (seed/backup need every profile, not just `mode: 'cc'`).
  * @param {any} req
@@ -63,12 +90,17 @@ function readSettingsProfiles(req) {
  * (bridge side). Call OUTSIDE the store queue: GET /slot is a read of the
  * last committed state (the panel route builds its view after its
  * transaction commits).
+ *
+ * `raw` is the requesting tab's own connection id (per-tab connection,
+ * review-1 W2): when omitted, the view falls back to the plugin's last
+ * reported raw (state.raw, for API/MCP clients).
  * @param {any} req
+ * @param {{source?: any, model?: any, profileId?: any}|null} [raw]
  */
-function slotView(req) {
+function slotView(req, raw = null) {
     const { store } = req.pm;
     const doc = store.state.presetId ? store.getDocNow(store.state.presetId) : null;
-    const model = resolveModel(store.models, rawOf(store));
+    const model = resolveModel(store.models, raw ?? rawOf(store));
     if (!doc) {
         return {
             rev: store.rev,
@@ -530,6 +562,19 @@ export function makeRouter() {
         } catch (err) { next(err); }
     });
 
+    // PATCH /presets/:id/loadouts/:lid/overrides/:modelId {set?:{id:bool},
+    // unset?:[id]} -> {doc, rev}; 404 when no override exists. Semantic
+    // patch (review-1 W2) applied inside the store queue.
+    router.patch('/presets/:id/loadouts/:lid/overrides/:modelId', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.patchLoadoutOverride(req.params.id, req.params.lid, req.params.modelId, req.body ?? {});
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
     router.delete('/presets/:id/loadouts/:lid/overrides/:modelId', async (req, res, next) => {
         try {
             const store = req.pm.store;
@@ -574,6 +619,18 @@ export function makeRouter() {
         } catch (err) { next(err); }
     });
 
+    // PATCH /presets/:id/tuning-overrides/:modelId {set?, unset?} ->
+    // {doc, rev}; 404 when no override exists.
+    router.patch('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const saved = await store.patchTuningOverride(req.params.id, req.params.modelId, req.body ?? {});
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
+            res.json({ doc: saved, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
     router.delete('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
         try {
             const store = req.pm.store;
@@ -595,7 +652,7 @@ export function makeRouter() {
     // ---------------------------------------------------------------- slot
 
     router.get('/slot', (req, res) => {
-        res.json(slotView(req));
+        res.json(slotView(req, rawFromQuery(req)));
     });
 
     router.post('/slot/load', async (req, res, next) => {
@@ -632,16 +689,15 @@ export function makeRouter() {
                 return res.status(400).json({ error: 'raw required' });
             }
             const store = req.pm.store;
-            const r = await store.setSlotModel(raw);
-            const view = slotView(req);
-            if (r.modelChanged) broadcast(req, 'slot', null);
-            res.json(view);
+            await store.setSlotModel(raw);
+            res.json(slotView(req, normRaw(raw)));
         } catch (err) { next(err); }
     });
 
     router.post('/slot/panel', async (req, res, next) => {
         try {
             const { clientId, baseRev, base, snapshot } = req.body ?? {};
+            const raw = normRaw(req.body?.raw);
             const store = req.pm.store;
             if (typeof baseRev !== 'number' || !base || typeof base !== 'object') {
                 return res.status(409).json({ error: 'missing baseRev or base panel projection' });
@@ -670,7 +726,7 @@ export function makeRouter() {
                 }
                 const clean = stripConnectionKeys(snapshot ?? {});
                 const cleanBase = stripConnectionKeys(base);
-                const model = resolveModel(store.models, rawOf(store));
+                const model = resolveModel(store.models, raw ?? rawOf(store));
                 // route against the loadout the tab is actually showing (the
                 // desired one), not the document's active default
                 const desiredLoadout = /** @type {string} */ (store.state.loadoutId ?? doc.activeLoadoutId);
@@ -699,7 +755,7 @@ export function makeRouter() {
                 }
                 return { routed, warnings };
             });
-            const slot = slotView(req);
+            const slot = slotView(req, raw);
             for (const w of view.warnings) {
                 req.pm.hub.broadcast({ rev: store.rev, kind: 'warning', message: w });
             }
@@ -724,6 +780,37 @@ export function makeRouter() {
         res.json(req.pm.store.models);
     });
 
+    // POST /models/rename {from, to} -> {models, migrated: [presetId]}.
+    // Server-side transaction (review-1 W2): renames the registry entry and
+    // migrates every doc.tuningOverrides[from]/loadout override reference to
+    // `to` in one queued pass, revision-labelled before each touched doc.
+    router.post('/models/rename', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { from, to } = req.body ?? {};
+            const result = await store.renameModel(from, to);
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            for (const id of result.migrated) broadcast(req, 'preset', id);
+            res.json(result);
+        } catch (err) { next(err); }
+    });
+
+    // POST /models/merge {names, name} -> {models, migrated}. Folds every
+    // Model in `names` into `name`, migrating every doc reference the same
+    // way as rename.
+    router.post('/models/merge', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { names, name } = req.body ?? {};
+            const result = await store.mergeModelsTx(names, name);
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            for (const id of result.migrated) broadcast(req, 'preset', id);
+            res.json(result);
+        } catch (err) { next(err); }
+    });
+
     router.put('/models', async (req, res, next) => {
         try {
             const store = req.pm.store;
@@ -738,6 +825,19 @@ export function makeRouter() {
         try {
             const store = req.pm.store;
             const entry = await store.setModelTuning(req.params.modelId, req.body ?? {});
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            res.json(entry);
+        } catch (err) { next(err); }
+    });
+
+    // PATCH /models/:modelId/tuning {set?, unset?} -> Model entry. Semantic
+    // patch (review-1 W2) applied inside the store queue, never a whole
+    // cached object.
+    router.patch('/models/:modelId/tuning', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const entry = await store.patchModelTuning(req.params.modelId, req.body ?? {});
             broadcast(req, 'models', null);
             if (store.state.presetId) broadcast(req, 'slot', null);
             res.json(entry);
