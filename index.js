@@ -106,9 +106,12 @@ if (typeof window === 'undefined' || typeof document === 'undefined') {
 // preset select is filled and settings saves from the panel will flow.
 // (Found by Phase 1 check 5: an init that ran early left panel write-back dead
 // because saveServiceSettings/SETTINGS_UPDATED only exist post-boot.)
+// ST exposes `eventTypes` on the CONTEXT, not on eventSource (the eventSource
+// is a bare EventEmitter; testing the wrong spot always took the immediate
+// branch and reintroduced the pre-boot init).
 if (typeof window !== 'undefined' && typeof document !== 'undefined') {
     const c0 = ctx();
-    if (c0.eventSource?.eventTypes?.SETTINGS_LOADED) {
+    if (c0.eventTypes?.SETTINGS_LOADED) {
         void c0.eventSource.once(c0.eventTypes.SETTINGS_LOADED, () => { void init(); });
     } else {
         void init();

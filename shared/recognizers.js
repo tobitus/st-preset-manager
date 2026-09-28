@@ -7,7 +7,7 @@
  * v2's native document shape (blocks/markers/sequences) instead of v1's
  * components dict.
  */
-import { isStMarkerIdentifier } from './st-keys.js';
+import { isStMarkerIdentifier, CONNECTION_KEYS } from './st-keys.js';
 import { newKey } from './util.js';
 
 export const PICK_HEADER = /^🔻PICK:\s*(.+?)\s*🔻$/;
@@ -534,7 +534,9 @@ export function importStPreset(data, name, ids = {}) {
         tags: [],
         notes: '',
         source: { importedFrom: 'upload:api', importedAt: ids.now ? ids.now() : null, importDigest: null, recognizer: { kind: presetKind, notes } },
-        settings: Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'prompts' && k !== 'prompt_order')),
+        settings: Object.fromEntries(Object.entries(data).filter(
+            ([k]) => k !== 'prompts' && k !== 'prompt_order' && !CONNECTION_KEYS.includes(k),
+        )),
         markers,
         blocks,
         sequences,

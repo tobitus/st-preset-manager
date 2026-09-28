@@ -58,16 +58,22 @@ export function groupOfLeaf(doc) {
 
 /**
  * Enforce pick-one over an enabled map: for every pick-one group, if more
- * than one member is enabled, keep the LAST enabled one in outline order and
- * turn the others off. Markers/ghosts are toggled like anything else (the
- * loadout's enabled map covers every leaf); group structure never changes.
+ * than one member is enabled, keep ONE and turn the others off. Markers/
+ * ghosts are toggled like anything else (the loadout's enabled map covers
+ * every leaf); group structure never changes.
+ *
+ * `preferred` (optional) is the identifier the user just switched ON: it
+ * wins over its siblings regardless of outline order (the panel route and
+ * /ops toggle pass it; ambiguous imported/compiled state falls back to the
+ * last enabled member in outline order).
  *
  * @param {any} doc document (sequences read-only here)
  * @param {Record<string, boolean>} enabled flat identifier -> bool map (every leaf)
  * @param {string[]} [changedOut] if given, identifiers flipped by this call are appended
+ * @param {string|null} [preferred] the option just enabled (wins the collapse)
  * @returns {Record<string, boolean>} the same map (mutated in place for convenience)
  */
-export function normalize(doc, enabled, changedOut = undefined) {
+export function normalize(doc, enabled, changedOut = undefined, preferred = null) {
     const owner = groupOfLeaf(doc);
     const seen = new Set();
     for (const grp of collectGroups(doc)) {
@@ -81,7 +87,9 @@ export function normalize(doc, enabled, changedOut = undefined) {
         for (const id of idents) seen.add(id);
         const on = idents.filter((id) => !!enabled[id]);
         if (on.length > 1) {
-            const keep = on[on.length - 1]; // last one switched on wins
+            // the option just switched on wins; outline-order last is the
+            // fallback for ambiguous bulk state
+            const keep = preferred != null && on.includes(preferred) ? preferred : on[on.length - 1];
             for (const id of on) {
                 if (id !== keep) {
                     enabled[id] = false;

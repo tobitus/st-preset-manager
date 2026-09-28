@@ -125,6 +125,12 @@ test('recognizer: settings passthrough excludes prompts/prompt_order; markers ve
     assert.equal(typeof doc.settings.wi_format, 'string');
     assert.ok(doc.markers.some((m) => m.identifier === 'chatHistory'));
     assert.ok(doc.markers.every((m) => m.prompt.identifier === m.identifier));
+    // connection keys must never reach the document (Must-NOT item 3): a
+    // regression here persisted chat_completion_source/openai_model/
+    // custom_url/proxy_password to disk on import
+    for (const key of ['chat_completion_source', 'openai_model', 'claude_model', 'custom_url', 'proxy_password']) {
+        assert.equal(key in doc.settings, false, `${key} must be stripped at import`);
+    }
 });
 
 test('recognizer: pickRecognizer order matches v1 (dem > sola > ff5 > casus > flat)', () => {

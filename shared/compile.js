@@ -22,9 +22,11 @@ import { canonicalHash } from './util.js';
  * @param {any} doc native library document
  * @param {{ name: string, tuning?: Record<string, any> }|null} model Model registry entry or null
  * @param {any} base ST Default.json content (or {} in tests)
+ * @param {string|null} [loadoutId] compile THIS loadout (defaults to the
+ *   document's activeLoadoutId); lets /slot/load serve a non-active loadout
  * @returns {{ compiled: any, hash: string, enabled: Record<string, boolean> }}
  */
-export function compile(doc, model, base = {}) {
+export function compile(doc, model, base = {}, loadoutId = undefined) {
     const out = {};
 
     // 1. Base: ST's Default.json, non-connection preset keys only.
@@ -48,9 +50,9 @@ export function compile(doc, model, base = {}) {
     }
 
     // 3. Enabled: loadout ⊕ per-model loadout override, then pick-one ≤ 1.
-    const loadoutId = doc.activeLoadoutId;
-    const loadout = loadoutId ? doc.loadouts?.[loadoutId] : null;
-    if (!loadout) throw new CompileError(`document has no active loadout ${loadoutId ?? '(none)'}`);
+    const lid = loadoutId ?? doc.activeLoadoutId;
+    const loadout = lid ? doc.loadouts?.[lid] : null;
+    if (!loadout) throw new CompileError(`document has no loadout ${lid ?? '(none)'}`);
     /** @type {Record<string, boolean>} */
     const enabled = { ...loadout.enabled };
     const modelOverride = model ? loadout.overrides?.[model.name] : undefined;

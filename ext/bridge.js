@@ -26,6 +26,11 @@ export class Bridge {
         /** @type {Set<(state: any) => void>} */
         this.listeners = new Set();
         this.reconciling = false;
+        this.pendingReconcile = false;
+        /** @type {Promise<any>|null} in-flight reconcile (awaited by coalesced callers) */
+        this.reconcilePromise = null;
+        /** @type {boolean} true while our own /slot/panel POST is in flight */
+        this.panelInFlight = false;
         this.lastPanelPost = Promise.resolve();
     }
 
@@ -50,18 +55,45 @@ export class Bridge {
 
     /** GET /slot and apply desired if one is set (acceptance 4). */
     async reconcile() {
-        const slot = await api('GET', '/slot');
-        if (slot.desired?.presetId && slot.compiled) {
-            await this.apply(slot);
-        } else {
-            this.attached = currentPresetName() === SLOT_NAME;
+        // Serialize applies: dropping a reconcile while another apply is in
+        // flight lost that revision forever (its event was already consumed,
+        // nothing retried it) and left the tab stale. Queue instead — the
+        // queued run re-fetches /slot, so it applies the LATEST state, not
+        // the stale one that triggered it.
+        if (this.reconciling) {
+            this.pendingReconcile = true;
+            return this.reconcilePromise ?? Promise.resolve();
         }
-        this.emit({ slot, attached: this.attached });
-        return slot;
+        this.reconciling = true;
+        this.pendingReconcile = false;
+        this.reconcilePromise = (async () => {
+            let slot;
+            try {
+                do {
+                    this.pendingReconcile = false;
+                    slot = await api('GET', '/slot');
+                    if (slot.desired?.presetId && slot.compiled) {
+                        await this.apply(slot);
+                    } else {
+                        this.attached = currentPresetName() === SLOT_NAME;
+                    }
+                    this.emit({ slot, attached: this.attached });
+                } while (this.pendingReconcile);
+            } finally {
+                this.reconciling = false;
+                this.reconcilePromise = null;
+            }
+            return slot;
+        })();
+        return this.reconcilePromise;
     }
 
     /**
      * Apply a slot view into ST. Returns true when the page state changed.
+     * Serialization: reconcile() holds `this.reconciling` across its whole
+     * run and apply() no longer drops when it is set — a dropped apply was
+     * the stale-tab bug (the triggering event was already consumed).
+     * External callers (window actions) go through the reconcile chain.
      * @param {{ compiled: any, hash: string, rev: number }} slot
      * @param {{ repost?: boolean }} [opts] repost=false when called FROM
      *   postPanel: the panel state is already persisted server-side by that
@@ -70,28 +102,22 @@ export class Bridge {
      *   wedged the bridge for good (reconciling stuck true).
      */
     async apply(slot, { repost = true } = {}) {
-        if (this.reconciling) return false;
-        this.reconciling = true;
-        try {
-            const before = await snapshotPanel();
-            await applyCompiledToSlot(slot.compiled);
-            this.appliedHash = slot.hash;
-            this.appliedRev = slot.rev;
-            this.attached = true;
-            const after = await snapshotPanel();
-            // the projection ST actually shows — the honest baseline for the
-            // panel-unchanged gate in postPanel
-            this.appliedPanelHash = this.hashOf(after);
-            // If ST normalised something (it does for a few keys), report the
-            // normalisation to the plugin once via the panel path, but do not
-            // loop: the plugin stores what ST reports.
-            if (repost && JSON.stringify(before) !== JSON.stringify(after)) {
-                await this.postPanel(true);
-            }
-            return true;
-        } finally {
-            this.reconciling = false;
+        const before = await snapshotPanel();
+        await applyCompiledToSlot(slot.compiled);
+        this.appliedHash = slot.hash;
+        this.appliedRev = slot.rev;
+        this.attached = true;
+        const after = await snapshotPanel();
+        // the projection ST actually shows — the honest baseline for the
+        // panel-unchanged gate in postPanel
+        this.appliedPanelHash = this.hashOf(after);
+        // If ST normalised something (it does for a few keys), report the
+        // normalisation to the plugin once via the panel path, but do not
+        // loop: the plugin stores what ST reports.
+        if (repost && JSON.stringify(before) !== JSON.stringify(after)) {
+            await this.postPanel(true);
         }
+        return true;
     }
 
     openStream() {
@@ -109,8 +135,11 @@ export class Bridge {
                 }
                 return;
             }
-            // echo suppression (PLAN §1.4)
-            if (msg.origin === clientId() && msg.rev <= this.appliedRev) return;
+            // echo suppression (PLAN §1.4). The panel POST response (which
+            // advances appliedRev) and the SSE echo race each other — the
+            // server broadcasts before it answers — so also suppress while
+            // our own panel post is in flight.
+            if (msg.origin === clientId() && (this.panelInFlight || msg.rev <= this.appliedRev)) return;
             if (msg.kind === 'slot' || msg.kind === 'preset') {
                 void this.reconcile();
             } else {
@@ -140,6 +169,7 @@ export class Bridge {
         // serialize concurrent panel events; only the last one matters
         const run = this.lastPanelPost.then(async () => {
             try {
+                this.panelInFlight = true;
                 const res = await api('POST', '/slot/panel', { clientId: clientId(), snapshot });
                 this.appliedHash = res.hash;
                 this.appliedRev = res.rev;
@@ -150,6 +180,8 @@ export class Bridge {
                 this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
             } catch (err) {
                 console.error('[preset-manager] panel write-back failed', err);
+            } finally {
+                this.panelInFlight = false;
             }
         });
         this.lastPanelPost = run;

@@ -38,8 +38,10 @@ function rawOf(store) {
 }
 
 /**
- * Current slot view: {rev, desired, compiled, hash}.
- * @param {any} req
+ * Current slot view: {rev, desired, compiled, hash}. The compile input is
+ * the DESIRED loadout (state.loadoutId), not the document's
+ * activeLoadoutId: /slot/load stores the requested loadout in state.json,
+ * and loading a non-active loadout must return/push that loadout.
  */
 function slotView(req) {
     const { store } = req.pm;
@@ -53,7 +55,8 @@ function slotView(req) {
             hash: null,
         };
     }
-    const { compiled, hash } = compile(doc, model, readBase(req));
+    const desiredLoadout = store.state.loadoutId ?? doc.activeLoadoutId;
+    const { compiled, hash } = compile(doc, model, readBase(req), desiredLoadout);
     return {
         rev: store.rev,
         desired: { presetId: store.state.presetId, loadoutId: store.state.loadoutId, modelId: store.state.modelId },
@@ -154,7 +157,7 @@ export function makeRouter() {
                 if (typeof identifier !== 'string') throw new StoreError('toggle needs identifier', 400);
                 if (!(identifier in enabled)) throw new StoreError(`unknown leaf ${identifier}`, 404);
                 enabled[identifier] = value !== undefined ? !!value : !enabled[identifier];
-                normalize(doc, enabled);
+                normalize(doc, enabled, undefined, enabled[identifier] ? identifier : null);
             } else if (op === 'setSettings') {
                 rejectConnectionKeys(req.body?.settings ?? {});
                 Object.assign(doc.settings ?? (doc.settings = {}), req.body?.settings ?? {});
@@ -209,12 +212,17 @@ export function makeRouter() {
         try {
             const { clientId, snapshot } = req.body ?? {};
             const store = req.pm.store;
-            const doc = store.state.presetId ? /** @type {Record<string, unknown>} */ (store.getPreset(/** @type {string} */ (store.state.presetId))) : null;
+            const doc = store.state.presetId
+                ? /** @type {any} */ (store.getPreset(/** @type {string} */ (store.state.presetId)))
+                : null;
             if (!doc) return res.status(409).json({ error: 'no preset in the slot' });
             const clean = stripConnectionKeys(snapshot ?? {});
             const model = resolveModel(store.models, rawOf(store));
-            const { compiled } = compile(doc, model, readBase(req));
-            const { routed, globalTuning, warnings } = routePanelDiff(doc, compiled, clean, model);
+            // route against the loadout the tab is actually showing (the
+            // desired one), not the document's active default
+            const desiredLoadout = /** @type {string|null} */ (store.state.loadoutId) ?? doc.activeLoadoutId;
+            const { compiled } = compile(doc, model, readBase(req), desiredLoadout);
+            const { routed, globalTuning, warnings } = routePanelDiff(doc, compiled, clean, model, desiredLoadout);
             // A panel observation that routes nothing is not a revision:
             // saving unconditionally here turned every echo of our own apply
             // into doc.rev+1 and fed the apply<->panel loop.
@@ -235,7 +243,7 @@ export function makeRouter() {
             for (const w of warnings) {
                 req.pm.hub.broadcast({ rev: store.rev, kind: 'warning', message: w });
             }
-            broadcast(req, 'slot', clientId);
+            broadcast(req, 'slot', null, clientId);
             res.json({ rev: view.rev, compiled: view.compiled, hash: view.hash, routed });
         } catch (err) { next(err); }
     });
@@ -302,13 +310,14 @@ export function makeRouter() {
  * @param {any} req
  * @param {string} kind
  * @param {string|null} [presetId]
+ * @param {string|null} [origin] clientId to suppress (echo suppression)
  */
-function broadcast(req, kind, presetId = null) {
+function broadcast(req, kind, presetId = null, origin = null) {
     req.pm.hub.broadcast({
         rev: req.pm.store.rev,
         kind,
         ...(presetId ? { presetId } : {}),
-    });
+    }, origin);
 }
 
 export { TUNING_KEYS, canonicalHash };

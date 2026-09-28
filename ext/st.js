@@ -1,7 +1,14 @@
 /**
  * ST access layer. The only module that touches SillyTavern internals;
  * everything else in the extension goes through this (PLAN §1.1).
+ *
+ * `../openai.js` is ST's own public/scripts/openai.js: this file lives at
+ * public/scripts/extensions/third-party/st-preset-manager/ext/st.js (the
+ * plugin mount / plugins/st-preset-manager never imports it — extension
+ * files are browser-only), so the relative path resolves to the same module
+ * in both install layouts (third-party mount and regular user extension).
  */
+import { getPresetApplicationPromise, getChatCompletionPreset } from '../openai.js';
 
 /** @returns {any} SillyTavern.getContext() */
 export function ctx() {
@@ -79,11 +86,9 @@ export async function applyCompiledToSlot(compiled) {
     await pm.savePreset(SLOT_NAME, compiled);
     // savePreset POSTs /api/presets/save and updateList() selects it;
     // onSettingsPresetChange runs via the select's change event. Await the
-    // application promise so callers can measure settled state.
-    // ST exports getPresetApplicationPromise from openai.js (openai.js:5015);
-    // a plain dynamic import of an absolute runtime URL — invisible to tsc.
-    const openai = await (0, eval)(`import('/scripts/openai.js')`);
-    await openai.getPresetApplicationPromise();
+    // application promise so callers can measure settled state (ST exports
+    // getPresetApplicationPromise from openai.js:5015).
+    await getPresetApplicationPromise();
     // ST sanitizes the name for the filesystem; use what it reports back.
     return ctx().chatCompletionSettings.preset_settings_openai ?? SLOT_NAME;
 }
@@ -96,8 +101,7 @@ export async function applyCompiledToSlot(compiled) {
 export async function snapshotPanel() {
     // openai.js's getChatCompletionPreset(settingsToUpdate view) is NOT on
     // getContext() in ST 1.19.0 — import it from the module instead.
-    const openai = await (0, eval)(`import('/scripts/openai.js')`);
-    const full = openai.getChatCompletionPreset?.(ctx().chatCompletionSettings) ?? null;
+    const full = getChatCompletionPreset?.(ctx().chatCompletionSettings) ?? null;
     if (!full) return null;
     const out = { ...full };
     delete out.proxy_password;

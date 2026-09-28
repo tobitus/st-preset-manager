@@ -15,7 +15,7 @@
  *     Model's global tuning; with no Model resolved -> D.settings + warning.
  *   - anything else -> D.settings.
  */
-import { TUNING_KEYS, CONNECTION_KEYS, PRESET_SETTING_KEYS } from '../shared/st-keys.js';
+import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
 import { diffKeys, stripConnectionKeys, compile } from '../shared/compile.js';
 import { normalize } from '../shared/groups.js';
 
@@ -27,16 +27,18 @@ import { normalize } from '../shared/groups.js';
  * @param {any} compiled the plugin's last compiled output for this slot
  * @param {any} snapshot ST panel snapshot (connection keys already stripped)
  * @param {{ name: string }|null} model resolved Model (or null)
+ * @param {string|null} [loadoutId] the loadout the panel is showing
+ *   (defaults to doc.activeLoadoutId); enabled bits route there
  * @returns {{ routed: {key: string, layer: string}[], globalTuning: Record<string,any>|null, warnings: string[] }}
  */
-export function routePanelDiff(doc, compiled, snapshot, model) {
+export function routePanelDiff(doc, compiled, snapshot, model, loadoutId = undefined) {
     /** @type {{key: string, layer: string}[]} */
     const routed = [];
     /** @type {string[]} */
     const warnings = [];
     let /** @type {Record<string, any>|null} */ globalTuning = null;
 
-    const loadout = doc.loadouts?.[doc.activeLoadoutId];
+    const loadout = doc.loadouts?.[loadoutId ?? doc.activeLoadoutId];
     if (!loadout) return { routed, globalTuning, warnings: ['document has no active loadout'] };
     const overrideModel = model ? loadout.overrides?.[model.name] : undefined;
 
@@ -72,7 +74,7 @@ export function routePanelDiff(doc, compiled, snapshot, model) {
             }
             // pick-one: the option just switched on turns its siblings off
             const changed = [];
-            normalize(doc, loadout.enabled, changed);
+            normalize(doc, loadout.enabled, changed, !!after.enabled ? id : null);
             const norm = changed.filter((x) => x !== id);
             if (norm.length > 0 && !overrideModel) {
                 routed.push({ key: norm.join(','), layer: 'group:pick-one' });
@@ -122,7 +124,13 @@ export function routePanelDiff(doc, compiled, snapshot, model) {
                 routed.push({ key, layer: 'settings' });
                 warnings.push(`sampler key "${key}" changed with no Model resolved — routed to the document's settings`);
             }
-        } else if (PRESET_SETTING_KEYS.has(key) || !(key in (compiled ?? {}))) {
+        } else {
+            // Ordinary preset setting (names_behavior, send_if_empty,
+            // wi_format, assistant_prefill, …): after prompts/prompt_order
+            // and connection keys are excluded, everything the panel reports
+            // is library state — dropping keys that merely exist in the
+            // compiled output made /slot/panel return the old compile and
+            // the tab re-apply the old value.
             doc.settings[key] = snapshot[key];
             routed.push({ key, layer: 'settings' });
         }

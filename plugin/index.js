@@ -31,9 +31,12 @@ export async function init(router) {
             const store = new Store(root);
             const hub = new EventHub();
             req.app.locals.pmStores[root] = { store, hub, ready: null };
-            store.onMutate = () => {
-                hub.broadcast({ rev: store.rev, kind: 'preset' });
-            };
+            // No onMutate broadcast here: every queued operation publishes
+            // exactly ONE typed event after its full mutation completes
+            // (routes.js). A generic `preset` event per rev bump duplicated
+            // every typed event and defeated origin suppression — consumers
+            // route `preset` to reconciliation, so half-finished mutations
+            // triggered applies of intermediate state.
         }
         req.pm = req.app.locals.pmStores[root];
         next();

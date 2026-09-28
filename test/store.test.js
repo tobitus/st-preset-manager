@@ -63,9 +63,30 @@ test('store: import rejects non-CC JSON with 400', async () => {
     await store.init();
     await assert.rejects(
         () => store.importPreset({ st: { foo: 'bar' }, name: 'x' }),
-        (err) => /** @type {{status?: number, message?: string}} */ (err).status === 400
+        (err) => /** @type {{status?: number}} */ (err).status === 400
             && /not a Chat Completion preset/.test(/** @type {{message?: string}} */ (err).message ?? ''),
     );
+});
+
+test('store: folders are confined to the preset root (no .. / absolute escape)', async () => {
+    const { store } = await storeWithDoc();
+    // savePreset (PUT move) with an escaping folder must be rejected...
+    for (const folder of ['../../OpenAI Settings', '..', '/etc/passwd', 'a/../../b']) {
+        const doc = store.getPreset(store.listLibrary()[0].id);
+        doc.folder = folder;
+        await assert.rejects(() => store.savePreset(doc), /escapes the preset library|absolute paths/);
+    }
+    // ...and the same guard holds on the import path
+    await assert.rejects(
+        () => store.importPreset({ st: sampleSt(), name: 'Escape Import', folder: '../../OpenAI Settings' }),
+        (err) => /** @type {{status?: number}} */ (err).status === 400,
+    );
+    // a legal subfolder still lands inside the library and scans back
+    const doc = await store.importPreset({ st: sampleSt(), name: 'Nested', folder: 'sub/dir' });
+    assert.ok(fs.existsSync(path.join(store.root, 'presets', 'sub', 'dir', 'Nested.json')));
+    await store.rescan();
+    const entry = store.listLibrary().find((i) => i.id === doc.id);
+    assert.equal(entry.folder, 'sub/dir');
 });
 
 test('store: savePreset bumps doc rev, writes a revision, rename moves the file', async () => {
@@ -93,6 +114,28 @@ test('store: revisions coalesce within 5 minutes, labelled always writes', async
     await store.savePreset(doc, { label: 'checkpoint' });
     assert.deepEqual(store.listRevisions(doc.id).map((r) => r.rev), [1, 2]);
     assert.equal(store.getRevision(doc.id, 2).label, 'checkpoint');
+});
+
+test('store: revisions order numerically and never reuse a pruned number', async () => {
+    const { store, doc } = await storeWithDoc();
+    const dir = path.join(store.root, 'revisions', doc.id);
+    fs.mkdirSync(dir, { recursive: true });
+    // after pruning, 200 snapshots numbered 2..201 remain; revision 1 was
+    // pruned and 10.json sorts before 9.json lexicographically
+    for (let r = 2; r <= 201; r++) {
+        fs.writeFileSync(path.join(dir, `${r}.json`), JSON.stringify({ rev: r, at: new Date(0).toISOString(), label: null, doc }));
+    }
+    doc.notes = 'after-prune';
+    await store.savePreset(doc); // newest is 201 -> next must be 202, not 2
+    const revs = store.listRevisions(doc.id).map((r) => r.rev);
+    assert.equal(revs.length, 200); // 201 seeded + 1 new, pruned to newest 200
+    assert.equal(Math.max(...revs), 202);
+    assert.equal(store.getRevision(doc.id, 202).rev, 202);
+    // a second save 6+ hours later cannot coalesce (at is epoch 0), so the
+    // next snapshot is 203 even though 9.json > 10.json lexicographically
+    doc.notes = 'second-later';
+    await store.savePreset(doc, { label: 'labelled' });
+    assert.deepEqual(store.listRevisions(doc.id).map((r) => r.rev).filter((r) => r >= 202), [202, 203]);
 });
 
 test('store: state + models mutation bump the global rev monotonically', async () => {

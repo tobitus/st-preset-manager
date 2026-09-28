@@ -29,7 +29,6 @@ interface PmHandle {
         shelfRemove(id: string): Promise<void>;
         rescan(): Promise<void>;
         enqueue(fn: () => unknown): Promise<unknown>;
-        onMutate: (() => void) | null;
     };
     hub: {
         clientCount: number;

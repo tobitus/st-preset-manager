@@ -69,8 +69,6 @@ export class Store {
         this._queue = Promise.resolve();
         /** @type {number} */
         this.rev = 0;
-        /** @type {(() => void)|null} called after any mutation */
-        this.onMutate = null;
     }
 
     /** Serialize a mutation. @param {() => any} fn */
@@ -79,6 +77,26 @@ export class Store {
         // keep the queue alive after rejections
         this._queue = run.then(() => undefined, () => undefined);
         return run;
+    }
+
+    /**
+     * Resolve a document's `folder` to a directory under presetsDir.
+     * Rejects absolute paths and any path that escapes the preset root
+     * (`..` segments); presets are user data — the plugin must never write
+     * outside its own root (roadmap Must-NOT).
+     * @param {string|undefined} folder
+     * @returns {string} absolute directory for the preset file
+     */
+    _safeDir(folder) {
+        const raw = String(folder ?? '');
+        if (raw.includes('\\')) throw new StoreError(`invalid folder "${folder}": path separators must be "/"`);
+        if (path.isAbsolute(raw)) throw new StoreError(`invalid folder "${folder}": absolute paths are not allowed`);
+        const rel = raw.trim().replace(/^\/+|\/+$/g, '');
+        const dir = path.resolve(this.presetsDir, rel);
+        if (dir !== this.presetsDir && !dir.startsWith(this.presetsDir + path.sep)) {
+            throw new StoreError(`invalid folder "${folder}": escapes the preset library`);
+        }
+        return dir;
     }
 
     // ------------------------------------------------------------- bootstrap
@@ -111,7 +129,6 @@ export class Store {
         this.state.rev = this.rev;
         this.state.updatedAt = new Date().toISOString();
         await atomicWrite(this.stateFile, JSON.stringify(this.state, null, 2));
-        this.onMutate?.();
     }
 
     // ------------------------------------------------------------------ scan
@@ -127,12 +144,14 @@ export class Store {
                 return;
             }
             for (const ent of entries) {
-                if (!ent.name.endsWith('.json')) continue;
                 const full = path.join(dir, ent.name);
+                // directories first: a folder named e.g. "notes.json" must
+                // still be traversed (folders are library folders)
                 if (ent.isDirectory()) {
                     walk(full, rel ? `${rel}/${ent.name}` : ent.name);
                     continue;
                 }
+                if (!ent.name.endsWith('.json')) continue;
                 let doc;
                 try {
                     doc = JSON.parse(fs.readFileSync(full, 'utf8'));
@@ -198,6 +217,12 @@ export class Store {
     async importPreset(body) {
         return this.enqueue(async () => {
             let doc;
+            if (body.folder !== undefined) {
+                // validate BEFORE building the doc: rejects absolute paths
+                // and `..` escapes with a 400 (folders are the library's
+                // layout, never a write target outside presetsDir)
+                this._safeDir(body.folder);
+            }
             if (body.native) {
                 doc = structuredClone(body.native);
                 doc.id = doc.id || `p_${ulid()}`;
@@ -225,13 +250,28 @@ export class Store {
             } else {
                 throw new StoreError('body must carry {st, name} or {native}');
             }
+            doc.folder = String(body.folder ?? doc.folder ?? '');
             const existing = this.findByName(doc.name);
             if (existing && existing.id !== doc.id && !body.replace) {
                 throw Object.assign(new StoreError(`name "${doc.name}" is already taken`, 409), { conflict: existing.id });
             }
+            if (existing && existing.id !== doc.id && body.replace) {
+                // the new doc overwrites the same file: drop the stale index
+                // entry (until now /library listed both and the old id served
+                // a document whose file no longer exists) and retire the old
+                // preset's revisions with its id
+                this.index.delete(existing.id);
+                await fsp.rm(path.join(this.revisionsDir, existing.id), { recursive: true, force: true });
+            }
             // normalize structure so outline ops are byte-exact from the start (v1 derive_structure)
             for (const seq of doc.sequences) seq.rows = rebuildSeq(flattenSeq(seq.rows));
-            await this._writeDoc(doc, path.join(this.presetsDir, doc.folder ?? ''));
+            if (!body.native) {
+                // native docs were validated above; validate the ST-derived
+                // one too (connection keys etc. must never reach disk)
+                const errs = validateDoc(doc);
+                if (errs.length) throw new StoreError(`invalid imported document: ${errs.join(', ')}`);
+            }
+            await this._writeDoc(doc, this._safeDir(doc.folder));
             await this._bumpRev();
             return structuredClone(doc);
         });
@@ -255,7 +295,7 @@ export class Store {
             doc.rev = (entry.doc.rev ?? 0) + 1;
             await this._writeRevision(entry.doc, opts.label);
             // rename = move (name or folder change)
-            const newPath = path.join(this.presetsDir, doc.folder ?? '', `${sanitizeName(doc.name)}.json`);
+            const newPath = path.join(this._safeDir(doc.folder), `${sanitizeName(doc.name)}.json`);
             if (path.resolve(newPath) !== path.resolve(oldNamePath)) {
                 if (fs.existsSync(newPath)) throw new StoreError(`target file already exists: ${newPath}`, 409);
                 await fsp.mkdir(path.dirname(newPath), { recursive: true });
@@ -305,15 +345,21 @@ export class Store {
     async _writeRevision(doc, label) {
         const dir = path.join(this.revisionsDir, doc.id);
         await fsp.mkdir(dir, { recursive: true });
-        const snaps = fs.readdirSync(dir).filter((f) => f.endsWith('.json')).sort();
-        const newest = snaps.at(-1);
+        // numeric order: filenames sort lexicographically (9.json > 10.json),
+        // and the count is wrong once pruning removes old files
+        const revNumbers = fs.readdirSync(dir)
+            .filter((f) => f.endsWith('.json'))
+            .map((f) => Number(f.slice(0, -5)))
+            .filter((n) => Number.isInteger(n) && n > 0)
+            .sort((a, b) => a - b);
+        const newest = revNumbers.at(-1);
         let coalesce = false;
-        if (newest && !label) {
-            const snap = JSON.parse(await fsp.readFile(path.join(dir, newest), 'utf8'));
+        if (newest !== undefined && !label) {
+            const snap = JSON.parse(await fsp.readFile(path.join(dir, `${newest}.json`), 'utf8'));
             const age = Date.now() - new Date(snap.at).getTime();
             if (age < 5 * 60 * 1000) coalesce = true;
         }
-        const revNo = snaps.length + (coalesce ? 0 : 1);
+        const revNo = coalesce ? newest : (newest ?? 0) + 1;
         const body = {
             rev: revNo,
             at: new Date().toISOString(),

@@ -132,6 +132,38 @@ test('groups.normalize: mutating map in place, reports flips', () => {
     assert.deepEqual(changed, ['bbb']);
 });
 
+test('groups.normalize: the option just switched on wins over outline order', () => {
+    const doc = fixtureDoc();
+    doc.sequences[0].rows.push({
+        kind: 'group', key: 'grp:test', name: 'choice', cardinality: 'pick-one', guessed: false,
+        header: null,
+        options: [
+            { kind: 'block', ref: 'bbb', enabled: true, key: 'x2' },
+            { kind: 'block', ref: 'ccc', enabled: false, key: 'x3' },
+        ],
+    });
+    // panel turns the EARLIER option (bbb) on while the LATER one (ccc) is
+    // selected: bbb must win; without the preferred hint the old code kept
+    // ccc (last in outline order) and instantly reverted the user's click
+    const enabled = { aaa: true, bbb: true, ccc: true, chatHistory: true };
+    const changed = [];
+    normalize(doc, enabled, changed, 'bbb');
+    assert.equal(enabled.bbb, true);
+    assert.equal(enabled.ccc, false);
+    assert.deepEqual(changed, ['ccc']);
+    // an ambiguous bulk state (no preferred) still collapses to outline order
+    const enabled2 = { aaa: true, bbb: true, ccc: true, chatHistory: true };
+    const changed2 = [];
+    normalize(doc, enabled2, changed2, null);
+    assert.equal(enabled2.bbb, false);
+    assert.equal(enabled2.ccc, true);
+    // a preferred that is not in the group is ignored
+    const enabled3 = { aaa: true, bbb: true, ccc: true, chatHistory: true };
+    normalize(doc, enabled3, [], 'chatHistory');
+    assert.equal(enabled3.bbb, false);
+    assert.equal(enabled3.ccc, true);
+});
+
 test('compile: base fills keys the document lacks (Default.json base, PLAN §1.3)', () => {
     const doc = fixtureDoc();
     const base = { temperature: 5, openai_max_tokens: 300, names_behavior: 0, proxy_password: 'nope' };
