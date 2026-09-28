@@ -756,15 +756,32 @@ async function main() {
                 }
             }
             if (!parked) throw new Error('race-blocked: no reconcile mounted the blocker under the hold in 4 attempts');
-            // parked mid-op: user-like edits must be REFUSED while held…
-            const click = await evalInPage(clickToggle(heldLeaf));
+            // parked mid-op: user-like edits must be REFUSED while held. The
+            // refused click is dispatched in the SAME page turn that re-reads
+            // the blocker: JS is single-threaded, so overlay-seen + click is
+            // atomic — a transient (non-parking) op cannot make a real toggle
+            // slip through a gap between two separate page turns (a false
+            // PASS in an earlier run: overlay gone by click time, the real
+            // toggle flipped, restore logic then "restored" the same value
+            // and nothing failed). Retry until a turn genuinely sees it.
+            let click = null;
+            let seenInTurn = false;
+            for (let attempt = 1; attempt <= 4 && !seenInTurn; attempt++) {
+                click = await evalInPage(`(() => {
+                    if (!document.querySelector('.pm-apply-blocker')) return { seen: false, click: null };
+                    return { seen: true, click: ${clickToggle(heldLeaf)} };
+                })()`);
+                seenInTurn = click?.seen === true;
+                if (!seenInTurn) await sleep(250);
+            }
+            if (!seenInTurn) throw new Error('race-blocked: overlay was gone by click time in 4 attempts (reconcile not parked)');
             const slider = await evalInPage(`(() => { const el = document.getElementById('temp_openai'); el.value = 0.42; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`);
             const stillHeld = await evalInPage(`!!window.__pmHold`);
             if (!stillHeld) throw new Error('hold released early');
             const opsStatus = (await ops).status;
-            const pass = click === false && slider === true && stillHeld && opsStatus === 200;
+            const pass = click.click === false && slider === true && stillHeld && opsStatus === 200;
             report('race-blocked: edits refused while reconcile holds', !!pass,
-                `click refused=${click === false} (overlay present=${parked}) slider raced=${slider === true} ops=${opsStatus}`);
+                `click refused=${click.click === false} (overlay present=${seenInTurn}) slider raced=${slider === true} ops=${opsStatus}`);
             // release: the parked GET completes, the apply lands the API state
             await evalInPage(HOLD_RELEASE);
             const slot = await until(async () => {
@@ -873,15 +890,24 @@ async function main() {
 
     // ---------------------------------------------------------- race-409
     {
-        // finding 7, stale-base direction: a panel POST computed against the
-        // tab's OLD base must 409 after a slot/load (slotChangedRev guard)
-        // and leave preset X's document untouched — no cross-preset delta
-        // pour into preset Y. While the reconcile's GET is held, load
-        // preset Y via the API and replay the panel POST from the page with
-        // the tab's current (stale) base + a flipped toggle. No idle
-        // pre-gate: arming the hold first guarantees the reconcile the load
-        // triggers parks on its GET, so the replayed POST finds the exact
-        // state it was computed against.
+        // finding 7, stale-base direction, THROUGH THE BRIDGE (Review 3):
+        // the bridge's own flushPanel() computed against the tab's OLD base
+        // must receive the 409 after a slot/load (slotChangedRev guard) and
+        // CONSUME it — drop the stale baseline (baseSnapshot=null), force a
+        // re-apply (appliedHash=null), set _flushStale — without throwing,
+        // leaving preset X's document untouched (no cross-preset delta pour
+        // into preset Y) and converging the tab onto Y after release.
+        // Deterministic shape: arm the hold, load Y (rev+slotChangedRev bump
+        // is committed when the POST returns), then flip a toggle with ST's
+        // OWN handler — clickToggle refuses under the overlay, so per the
+        // fix spec the live panel is mutated and bridge.flushPanel() is
+        // called directly: it enqueues nothing, so it runs NOW, snapshots
+        // the mutated panel and POSTs the delta with the PRE-LOAD baseRev —
+        // the 409 lands inside the flushPanel call we await. No sleeps as
+        // correctness conditions: the hold is the clock; the short settle
+        // below only lets ST's synchronous toggle handler reach the live
+        // settings before the snapshot (a missed flip fails the check
+        // loudly instead of passing silently).
         await evalInPage(HOLD_INSTALL);
         // tab is attached to DEM (X); capture its live base + rev BEFORE the
         // try so the finally cannot touch a half-captured leaf
@@ -894,28 +920,33 @@ async function main() {
             // Y's load bumps rev; slotChangedRev = rev parks ABOVE the tab's baseRev
             const loadY = await api('POST', '/slot/load', { presetId: solaId });
             if (loadY.status !== 200) fatal('race-409', `slot/load Sola failed: ${loadY.text.slice(0, 100)}`);
-            const replay = await evalInPage(`(async () => {
+            const outcome = await evalInPage(`(async () => {
                 const b = globalThis.__pmStarted.bridge;
-                const csrf = (await (await fetch('/csrf-token', { credentials: 'include' })).json()).token;
-                const snapshot = JSON.parse(JSON.stringify(b.baseSnapshot));
-                const order = snapshot.prompt_order[snapshot.prompt_order.length - 1].order;
-                const row = order.find((o) => o.identifier === '${soloLeaf}');
-                row.enabled = !row.enabled;
-                const res = await fetch('/api/plugins/st-preset-manager/slot/panel', {
-                    method: 'POST', credentials: 'include',
-                    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
-                    body: JSON.stringify({ clientId: 'race-409-replay', baseRev: b.appliedRev, base: b.baseSnapshot, snapshot }),
-                });
-                return { status: res.status, body: await res.json().catch(() => null) };
+                const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${soloLeaf}"] .prompt-manager-toggle-action');
+                if (!el) return { error: 'toggle control not found for ${soloLeaf}' };
+                // ST's own toggle handler (same dispatch check 5 uses):
+                // flips the live panel bit, then saveSettingsDebounced
+                el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+                await new Promise((r) => setTimeout(r, 120));
+                let flushErr = null;
+                try { await b.flushPanel(); } catch (e) { flushErr = String((e && e.message) || e); }
+                return {
+                    flushErr,
+                    flushStale: b._flushStale === true,
+                    baseDropped: b.baseSnapshot === null,
+                    hashDropped: b.appliedHash === null,
+                    held: !!window.__pmHold,
+                };
             })()`);
+            if (outcome?.error) fatal('race-409', outcome.error);
             const xAfter = (await api('GET', `/presets/${demId}`)).json;
             const untouched = xAfter.loadouts[xAfter.activeLoadoutId].enabled[soloLeaf] === soloBefore;
-            const pass = replay?.status === 409 && untouched;
-            report('race-409: stale-base panel replay rejected, X unchanged', !!pass,
-                `panel replay status=${replay?.status} (${replay?.body?.error ? String(replay.body.error).slice(0, 60) : 'no body'}), DEM ${soloLeaf.slice(0, 10)}… still ${soloBefore}`);
+            const pass = !outcome.flushErr && outcome.flushStale && outcome.baseDropped && outcome.hashDropped && untouched && outcome.held;
+            report('race-409: bridge flush 409 consumed (stale base dropped, re-apply forced)', !!pass,
+                `flushStale=${outcome.flushStale} baseSnapshot=null=${outcome.baseDropped} appliedHash=null=${outcome.hashDropped} throw=${outcome.flushErr ?? 'no'} held=${outcome.held}, DEM ${soloLeaf.slice(0, 10)}… still ${soloBefore} (no cross-preset pour)`);
             await evalInPage(HOLD_RELEASE);
-            // the queued reconcile (SSE 'slot' event from the load) now gets
-            // through: the tab converges onto Y
+            // the parked reconcile now completes: the new desired state (Y)
+            // applies over the dropped stale edit and the tab converges onto Y
             const yView = await until(async () => {
                 const s = (await api('GET', '/slot')).json;
                 const t = await probeAll();

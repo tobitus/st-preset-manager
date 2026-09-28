@@ -196,12 +196,17 @@ export function makeRouter() {
             const lid = loadoutId ?? doc.activeLoadoutId;
             if (!lid || !doc.loadouts?.[lid]) return res.status(400).json({ error: `no loadout ${lid}` });
             // one transaction: the marker, the state write and the rev bump
-            // cannot interleave with a queued /slot/panel
+            // cannot interleave with a queued /slot/panel. _mutateStateNow
+            // (the store's non-queued state-write body) persists the mutated
+            // state HERE, before the response — a plugin restart must not
+            // resurrect the previous preset (Review 3: the transaction used
+            // to exist only in memory).
             await store.enqueue(() => {
                 store._markSlotChanged();
-                store.state.presetId = presetId;
-                store.state.loadoutId = lid;
-                return store._bumpRev({ skipWrite: true });
+                return store._mutateStateNow((/** @type {any} */ st) => {
+                    st.presetId = presetId;
+                    st.loadoutId = lid;
+                });
             });
             const view = slotView(req);
             broadcast(req, 'slot', null);
@@ -213,11 +218,14 @@ export function makeRouter() {
         try {
             const { modelId, raw } = req.body ?? {};
             const store = req.pm.store;
+            // same transaction shape as /slot/load: the state write lands on
+            // disk inside the queue turn (see the load comment above)
             await store.enqueue(() => {
                 store._markSlotChanged();
-                store.state.modelId = modelId ?? null;
-                if (raw) store.state.raw = raw;
-                return store._bumpRev({ skipWrite: true });
+                return store._mutateStateNow((/** @type {any} */ st) => {
+                    st.modelId = modelId ?? null;
+                    if (raw) st.raw = raw;
+                });
             });
             const view = slotView(req);
             broadcast(req, 'slot', null);

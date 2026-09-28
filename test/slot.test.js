@@ -247,12 +247,15 @@ test('finding: panel post queued behind a /slot/load of another preset gets 409 
     const base = currentProjection(doc1);
     const baseRev = store.rev;
 
-    // the /slot/load transaction QUEUES FIRST, then the panel post
+    // the /slot/load transaction QUEUES FIRST, then the panel post — its
+    // body IS the route's body: the mutated state is persisted inside the
+    // same queue turn (_mutateStateNow), not just mutated in memory
     const loadPromise = store.enqueue(() => {
         store._markSlotChanged();
-        store.state.presetId = doc2.id;
-        store.state.loadoutId = doc2.activeLoadoutId;
-        return store._bumpRev({ skipWrite: true });
+        return store._mutateStateNow((/** @type {any} */ st) => {
+            st.presetId = doc2.id;
+            st.loadoutId = doc2.activeLoadoutId;
+        });
     });
     // the panel handler's transaction enqueues behind the load: its guard
     // must see the NEW slotChangedRev inside the same queue
@@ -267,6 +270,45 @@ test('finding: panel post queued behind a /slot/load of another preset gets 409 
     // doc1 was NOT mutated by the stale panel post
     const one = store.getPreset(doc1.id);
     assert.equal(one.rev, 1);
+});
+
+test('finding: slot transactions persist — a fresh Store over the same dir reads the new desired state and slotChangedRev', async () => {
+    // Review 3 (blocking): /slot/load's transaction mutated store.state in
+    // memory only (_bumpRev({skipWrite:true}) skipped the state.json write),
+    // so a plugin restart resurrected the previous preset. The route now
+    // persists inside the SAME queue turn via _mutateStateNow; this test
+    // runs that exact transaction body and re-reads it from disk.
+    const store = await tmpStore();
+    const docX = await store.importPreset({ st: sampleSt(), name: 'Slot X' });
+    const docY = await store.importPreset({ st: sampleSt(), name: 'Slot Y' });
+    // park X in the slot first (mutateState = the store's own queue body)
+    await store.mutateState((/** @type {any} */ st) => {
+        store._markSlotChanged();
+        st.presetId = docX.id;
+        st.loadoutId = docX.activeLoadoutId;
+    });
+    const revBefore = store.rev;
+
+    // THE /slot/load transaction, verbatim from the route
+    await store.enqueue(() => {
+        store._markSlotChanged();
+        return store._mutateStateNow((/** @type {any} */ st) => {
+            st.presetId = docY.id;
+            st.loadoutId = docY.activeLoadoutId;
+        });
+    });
+
+    assert.equal(store.state.presetId, docY.id);
+    assert.equal(store.rev, revBefore + 1, 'the load bumped the rev once');
+    assert.equal(store.slotChangedRev, store.rev, 'slotChangedRev names the rev the load bumped to');
+    // the acceptance: a FRESH Store over the same directory — a plugin
+    // restart — reads the new desired state, not the one from before
+    const fresh = new Store(store.root);
+    await fresh.init();
+    assert.equal(fresh.state.presetId, docY.id, 'state.json carries the loaded preset');
+    assert.equal(fresh.state.loadoutId, docY.activeLoadoutId, 'state.json carries the loaded loadout');
+    assert.equal(fresh.slotChangedRev, store.slotChangedRev, 'slotChangedRev persisted');
+    assert.equal(fresh.state.rev, store.rev, 'global rev persisted');
 });
 
 test('finding: same-rev no-op panel post is not a revision, routed edit is', async () => {

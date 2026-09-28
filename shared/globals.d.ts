@@ -34,8 +34,8 @@ interface PmHandle {
         _mutateStateNow(fn: (st: Record<string, unknown>) => void): Promise<unknown>;
         /** models mutation body WITHOUT taking the queue (call only inside enqueue) */
         _mutateModelsNow(fn: (reg: Record<string, unknown>) => unknown): Promise<unknown>;
-        /** bump the global rev (call only inside enqueue); skipWrite leaves the state.json write to the caller */
-        _bumpRev(opts?: { skipWrite?: boolean }): Promise<void>;
+        /** bump the global rev and persist it (call only inside enqueue) */
+        _bumpRev(): Promise<void>;
         shelfAdd(body: Record<string, unknown>): Promise<unknown>;
         shelfList(): unknown[];
         shelfRemove(id: string): Promise<void>;

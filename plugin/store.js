@@ -138,17 +138,16 @@ export class Store {
     }
 
     /**
-     * Bump the global rev. Inside a store-queue transaction pass
-     * `{ skipWrite: true }` when the transaction writes state.json itself
-     * afterwards, so `rev` and `slotChangedRev` land on disk exactly once;
-     * standalone callers let this write.
-     * @param {{ skipWrite?: boolean }} [opts]
+     * Bump the global rev and persist it. Queue-transaction callers use the
+     * `_mutateStateNow`/`_savePresetNow` bodies, which write the primary
+     * file and then call this, so `rev` and `slotChangedRev` land on disk
+     * with the state they describe.
      */
-    async _bumpRev(opts = {}) {
+    async _bumpRev() {
         this.rev += 1;
         this.state.rev = this.rev;
         this.state.updatedAt = new Date().toISOString();
-        if (!opts.skipWrite) await atomicWrite(this.stateFile, JSON.stringify(this.state, null, 2));
+        await atomicWrite(this.stateFile, JSON.stringify(this.state, null, 2));
     }
 
     /**

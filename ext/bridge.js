@@ -21,7 +21,10 @@
  * incoming state is applied over it — server receipt order stays
  * most-recent-wins and the live edit is never lost. A failed flush aborts
  * the reconcile (it re-throws); the op fails, the queue survives, and the
- * next SETTINGS_UPDATED or SSE event retries.
+ * next SETTINGS_UPDATED or SSE event retries. A flush rejected with 409
+ * (stale base) throws nothing: flushPanel drops the baseline, forces a
+ * re-apply and lets the op continue to GET /slot — the tab converges on
+ * the new desired state, discarding the stale edit.
  *
  * While an apply runs the bridge blocks panel input (transparent overlay on
  * the prompt manager + sampler panel), so user edits cannot interleave with
@@ -168,9 +171,13 @@ export class Bridge {
             // A failed flush means unsent user edits would be overwritten by
             // the apply below — abort this op entirely (Finding: "Abort
             // reconciliation when flushing fails"). flushPanel re-throws
-            // non-409 failures; a 409 (stale) also throws, and this op's
-            // rejection is the retry signal (next SETTINGS_UPDATED or SSE
-            // event enqueues a fresh reconcile that re-reads /slot).
+            // non-409 failures; a 409 (stale base) does NOT throw: it clears
+            // baseSnapshot, so the apply below lands the NEW desired state
+            // over the stale edit (dropped by design) and rebuilds the
+            // baseline from what the panel then shows. This op's rejection
+            // on a non-409 failure is the retry signal (next
+            // SETTINGS_UPDATED or SSE event enqueues a fresh reconcile that
+            // re-reads /slot).
             await this.flushPanel();
         }
         const slot = /** @type {{rev: number, slotChangedRev?: number, desired: any, compiled: any, hash: string}} */ (await api('GET', '/slot'));
@@ -343,7 +350,10 @@ export class Bridge {
      *   the unsent snapshot is NOT dropped — baseSnapshot still names it as
      *   the next delta — and callers must abort rather than proceed over
      *   the still-unsent edit (Finding: "Abort reconciliation when flushing
-     *   a panel edit fails").
+     *   a panel edit fails"). A 409 does NOT throw: the baseline was stale
+     *   (desired state changed under it), the edit is dropped by design and
+     *   the caller proceeds to re-read /slot and re-apply (see the catch
+     *   above).
      */
     async flushPanel(given = undefined) {
         if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
@@ -351,12 +361,35 @@ export class Bridge {
         if (!snapshot) return null;
         const sameBase = this.baseSnapshot && this.hashOf(snapshot) === this.hashOf(this.baseSnapshot);
         if (sameBase) return null;
-        const res = await api('POST', '/slot/panel', {
-            clientId: clientId(),
-            baseRev: this.appliedRev,
-            base: this.baseSnapshot,
-            snapshot,
-        });
+        let res;
+        try {
+            res = await api('POST', '/slot/panel', {
+                clientId: clientId(),
+                baseRev: this.appliedRev,
+                base: this.baseSnapshot,
+                snapshot,
+            });
+        } catch (err) {
+            if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
+            // 409 — stale base: the desired preset/loadout changed after this
+            // baseline was taken (the server's slotChangedRev guard). The
+            // user's stale edit is dropped BY DESIGN: replaying the old
+            // preset's delta onto the new document would pour its state into
+            // a preset the tab is no longer showing. Drop the stale baseline
+            // and force a re-apply, then RETURN (never rethrow):
+            // - baseSnapshot = null → a reconcile op's flush precondition
+            //   (`... && this.baseSnapshot`) is false, so it proceeds to
+            //   GET /slot and applies the new desired state (apply() rebuilds
+            //   the baseline from the applied projection);
+            // - appliedHash = null → even a same-hash view re-applies and
+            //   re-baselines instead of advancing a dead base in place;
+            // - _flushStale = true → panelOp's finally enqueues the reconcile
+            //   that converges the tab.
+            this.baseSnapshot = null;
+            this.appliedHash = null;
+            this._flushStale = true;
+            return null;
+        }
         this.appliedHash = res.hash;
         this.appliedRev = Math.max(this.appliedRev, res.rev);
         this.baseSnapshot = snapshot;
