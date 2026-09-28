@@ -1,13 +1,14 @@
 /**
  * REST routes (PLAN §1.6). Mounted at /api/plugins/st-preset-manager.
  * Phase 1 subset: /health, /library, /presets (import + get/put/delete +
- * /ops toggle|setSettings), /slot/*, /events, /rescan, /revisions, /models
- * GET, /profiles GET, /shelf. The rest of the table lands with its phase.
+ * /ops toggle|setSettings), /presets/:id/export, /slot/*, /events, /rescan,
+ * /revisions, /models GET, /profiles GET, /shelf. The rest of the table
+ * lands with its phase.
  */
 import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
-import { compile, stripConnectionKeys } from '../shared/compile.js';
+import { compile, stripConnectionKeys, exportSt } from '../shared/compile.js';
 import { routePanelDiff, panelDelta } from './slot.js';
 import { StoreError } from './store.js';
 import { applyDocOp } from '../shared/docops.js';
@@ -107,6 +108,15 @@ export function makeRouter() {
 
     router.get('/presets/:id', (req, res) => {
         res.json(req.pm.store.getPreset(req.params.id));
+    });
+
+    router.get('/presets/:id/export', (req, res, next) => {
+        try {
+            const format = req.query.format ?? 'st';
+            if (format === 'native') return res.json(req.pm.store.getPreset(req.params.id));
+            if (format === 'st') return res.json(exportSt(req.pm.store.getPreset(req.params.id)));
+            res.status(400).json({ error: 'format must be st or native' });
+        } catch (err) { next(err); }
     });
 
     router.put('/presets/:id', async (req, res, next) => {

@@ -40,7 +40,8 @@ else
     # load, so install it as a REGULAR user extension (dev data, gitignored).
     # ST 1.19 does not serve third-party extensions without the mount.
     mkdir -p "$REPO/dev/data/default-user/extensions/st-preset-manager"
-    cp -r "$REPO/index.js" "$REPO/style.css" "$REPO/manifest.json" "$REPO/ext" \
+    # shared/ too: the extension imports browser-safe shared modules (shared/io.js)
+    cp -r "$REPO/index.js" "$REPO/style.css" "$REPO/manifest.json" "$REPO/ext" "$REPO/shared" \
         "$REPO/dev/data/default-user/extensions/st-preset-manager/"
     MOUNTS+=(-v "$REPO/manifest.json:/mnt/pm-manifest.json:ro")
 fi

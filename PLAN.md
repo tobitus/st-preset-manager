@@ -287,7 +287,7 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 | GET | `/health` | `{version, rev, libraryRoot}` |
 | GET | `/library` | `[{id,name,folder,tags,updatedAt,activeLoadoutId,loadouts:[{id,name}],hasOverrides:[ModelId]}]`, `?tag=` filter |
 | GET/PUT/DELETE | `/presets/:id` | native doc (PUT validates via `shared/schema.js`, rejects 400 with the path of the bad field) |
-| POST | `/presets` | `{st: <ST preset JSON>, name, folder?, tags?}` (runs recognizers) or `{native: doc}`; 409 `{conflict}` on taken name unless `replace: true` |
+| POST | `/presets` | `{st: <ST preset JSON>, name, folder?, tags?}` (runs recognizers) or `{native: doc, name?, folder?}` (lossless: keeps id/rev/timestamps, a fresh id only when the id is taken; `name` imports a copy under that name); 409 `{conflict}` on taken name unless `replace: true`; a non-preset JSON is a 400 `not a Chat Completion preset` |
 | POST | `/presets/:id/fork` | `{name, folder?}` → new doc (new id, block identifiers re-minted) |
 | POST | `/presets/:id/move` | `{folder?, name?}` |
 | PATCH | `/presets/:id/meta` | `{tags?, notes?, blockNotes?: {id: text}}` |
@@ -310,7 +310,7 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 | POST | `/presets/:id/revisions` | `{label}` |
 | POST | `/presets/:id/restore` | `{rev}` (writes a revision first) |
 | GET/POST/DELETE | `/shelf[/:id]` | list / `{fromPresetId, identifier}` or `{block}` / remove |
-| GET | `/presets/:id/export?format=st|native` | ST JSON (compiled with the active loadout and **no** tuning/override, groups+notes stripped) or the native doc |
+| GET | `/presets/:id/export?format=st|native` | ST JSON (`exportSt`: compiled with the active loadout, **no** Model tuning/override, base `{}` = the document's own settings only, groups+notes stripped) or the native doc |
 | POST | `/rescan` | rebuild index |
 
 Errors: 4xx/5xx with `{error: message}`; the plugin never swallows — route handlers `await`

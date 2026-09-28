@@ -79,11 +79,14 @@ export async function api(method, path, body = undefined, opts = undefined) {
     }
     const res = await fetch(`${PLUGIN_BASE}${path}`, init);
     if (!res.ok) {
+        let body;
         let detail = '';
-        try { detail = JSON.stringify(await res.json()); } catch { detail = res.statusText; }
-        const err = /** @type {Error & {status?: number}} */ (new Error(`${method} ${path} -> ${res.status}: ${detail}`));
+        try { body = await res.json(); detail = JSON.stringify(body); } catch { detail = res.statusText; }
+        const err = /** @type {Error & {status?: number, body?: any}} */ (new Error(`${method} ${path} -> ${res.status}: ${detail}`));
         // structured status: the bridge branches on 409 (stale panel base)
         err.status = res.status;
+        // structured body: callers show `err.body?.error ?? err.message`
+        err.body = body;
         throw err;
     }
     return res.json();
@@ -97,6 +100,24 @@ export async function pluginHealth() {
     } catch {
         return false;
     }
+}
+
+/**
+ * ST's own Chat Completion presets, as the tab currently holds them.
+ * @returns {{ name: string, preset: any }[]} sorted by name
+ */
+export function listStPresets() {
+    const { presets, preset_names } = ctx().getPresetManager('openai').getPresetList();
+    /** @type {{ name: string, preset: any }[]} */
+    const out = [];
+    for (const [name, index] of Object.entries(preset_names)) {
+        if (name === SLOT_NAME) continue;
+        const preset = presets[/** @type {any} */ (index)];
+        if (preset === undefined) continue;
+        out.push({ name, preset });
+    }
+    out.sort((a, b) => a.name.localeCompare(b.name));
+    return out;
 }
 
 /**

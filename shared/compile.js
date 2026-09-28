@@ -133,6 +133,19 @@ export function compile(doc, model, base = {}, loadoutId = undefined) {
 }
 
 /**
+ * ST-format export (PLAN §1.6): the document's own settings and its active
+ * loadout, with no Model tuning and no per-Model override — Model is null so
+ * step 2/3 of `compile` never apply a tuning or an override, and base is `{}`
+ * so the export carries exactly the document's own settings, not ST's
+ * running Default.json.
+ * @param {any} doc native library document
+ * @returns {any} plain ST preset object
+ */
+export function exportSt(doc) {
+    return compile(doc, null, {}, doc.activeLoadoutId).compiled;
+}
+
+/**
  * Drop connection keys from a snapshot taken via getChatCompletionPreset.
  * @param {any} snapshot
  */

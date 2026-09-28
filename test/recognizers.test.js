@@ -113,7 +113,7 @@ test('recognizer: flat preset imports as independent toggles; non-preset rejecte
     const rows = summarize(doc);
     assert.equal(rows.filter((x) => x.kind === 'group').length, 0);
     assert.throws(() => importStPreset({ foo: 1 }, 'bad'), /not a Chat Completion preset/);
-    assert.throws(() => importStPreset('nope', 'bad'), /not valid JSON|not an object/);
+    assert.throws(() => importStPreset('nope', 'bad'), /not a Chat Completion preset/);
 });
 
 test('recognizer: settings passthrough excludes prompts/prompt_order; markers verbatim', () => {

@@ -489,6 +489,27 @@ const RECOGNIZERS = {
 };
 
 /**
+ * Assert `data` is shaped like an ST Chat Completion preset (has array
+ * prompts/prompt_order). Shared by `importStPreset` and the store's `{st}`
+ * import path so both give the exact same 400 message (v1 parity:
+ * tools/preset-manager/pmcore/importer.py raises this same message for a
+ * non-dict).
+ * @param {any} data
+ * @param {string} name display name
+ */
+export function assertStPreset(data, name) {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+        throw new ImportError(`${name}: not a Chat Completion preset (no prompts/prompt_order)`);
+    }
+    if (!('prompts' in data) || !('prompt_order' in data)) {
+        throw new ImportError(`${name}: not a Chat Completion preset (no prompts/prompt_order)`);
+    }
+    if (!Array.isArray(data.prompts) || !Array.isArray(data.prompt_order)) {
+        throw new ImportError(`${name}: prompts/prompt_order must be arrays`);
+    }
+}
+
+/**
  * Import an ST Chat Completion preset object into a v2 native document body
  * (everything except id/createdAt/updatedAt/rev, which the store mints).
  * Throws when the input is not a CC preset.
@@ -497,15 +518,7 @@ const RECOGNIZERS = {
  * @param {{ ulid?: () => string, now?: () => string }} [ids] injectable id/time for tests
  */
 export function importStPreset(data, name, ids = {}) {
-    if (!data || typeof data !== 'object' || Array.isArray(data)) {
-        throw new ImportError(`${name}: not valid JSON (not an object)`);
-    }
-    if (!('prompts' in data) || !('prompt_order' in data)) {
-        throw new ImportError(`${name}: not a Chat Completion preset (no prompts/prompt_order)`);
-    }
-    if (!Array.isArray(data.prompts) || !Array.isArray(data.prompt_order)) {
-        throw new ImportError(`${name}: prompts/prompt_order must be arrays`);
-    }
+    assertStPreset(data, name);
 
     const byid = new Map();
     for (const p of data.prompts ?? []) byid.set(p?.identifier, p);

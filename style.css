@@ -385,3 +385,100 @@ ul.pm-list ul.pm-list {
 .pm-editor .menu_button {
     align-self: flex-start;
 }
+
+/* Import/Export pane (Phase 3) */
+.pm-io {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.pm-io-import,
+.pm-io-export {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pm-io-import h4,
+.pm-io-export h4 {
+    margin: 0;
+}
+
+.pm-io-drop {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    border: 1px dashed rgba(255, 255, 255, 0.35);
+    border-radius: 6px;
+    padding: 18px 10px;
+    text-align: center;
+    opacity: 0.75;
+    cursor: pointer;
+}
+
+.pm-io-drop.pm-drag-over {
+    border-color: rgba(80, 160, 255, 0.9);
+    opacity: 1;
+}
+
+#pm-window .pm-io-replace-label {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 6px;
+}
+
+.pm-io-st-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.pm-io-st-row select {
+    flex: 1;
+}
+
+.pm-io-log {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 14em;
+    overflow: auto;
+}
+
+.pm-io-result {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 6px;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.pm-io-result span {
+    flex: 1;
+}
+
+.pm-io-result .pm-io-open {
+    flex: none;
+}
+
+.pm-io-export {
+    flex-direction: column;
+}
+
+.pm-io-export-row {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.pm-io-export-row .pm-io-export-preset {
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pm-io-export-row .pm-io-format {
+    flex: 0 0 auto;
+}

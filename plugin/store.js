@@ -12,10 +12,10 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { validateDoc, validateRegistry } from '../shared/schema.js';
+import { validateDoc, validateRegistry, nativeShapeErrors } from '../shared/schema.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
 import { ensureAllLeaves } from '../shared/groups.js';
-import { ImportError, importStPreset } from '../shared/recognizers.js';
+import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
 import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
 
 export class StoreError extends Error {
@@ -293,11 +293,15 @@ export class Store {
                 this._safeDir(body.folder);
             }
             if (body.native) {
+                const errs0 = nativeShapeErrors(body.native);
+                if (errs0.length) throw new StoreError(`invalid native document: ${errs0.join(', ')}`);
                 doc = structuredClone(body.native);
-                doc.id = doc.id || `p_${ulid()}`;
-                doc.rev = 1;
-                doc.createdAt = doc.createdAt || new Date().toISOString();
-                doc.updatedAt = new Date().toISOString();
+                doc.id = (typeof doc.id === 'string' && doc.id && !this.index.has(doc.id)) ? doc.id : `p_${ulid()}`;
+                doc.rev = (Number.isInteger(doc.rev) && doc.rev > 0) ? doc.rev : 1;
+                doc.createdAt = typeof doc.createdAt === 'string' ? doc.createdAt : new Date().toISOString();
+                doc.updatedAt = typeof doc.updatedAt === 'string' ? doc.updatedAt : new Date().toISOString();
+                // an explicit name imports the document as a copy under that name
+                if (body.name !== undefined) doc.name = sanitizeName(body.name);
                 if (!doc.loadouts || Object.keys(doc.loadouts).length === 0) {
                     ensureDefaultLoadout(doc);
                 }
@@ -305,6 +309,7 @@ export class Store {
                 const errs = validateDoc(doc);
                 if (errs.length) throw new StoreError(`invalid native document: ${errs.join(', ')}`);
             } else if (body.st) {
+                assertStPreset(body.st, body.name ?? 'preset');
                 const name = sanitizeName(body.name ?? body.st.name);
                 doc = importStPreset(body.st, name);
                 doc.id = `p_${ulid()}`;

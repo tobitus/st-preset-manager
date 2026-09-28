@@ -5,6 +5,37 @@
 import { TUNING_KEYS, CONNECTION_KEYS } from './st-keys.js';
 
 /**
+ * Pre-mutation shape guard for a native upload (POST /presets {native}):
+ * cheap enough to run before anything walks the document, so a malformed
+ * upload never reaches `structuredClone`/`ensureDefaultLoadout`/etc as a
+ * TypeError. Full validation stays in `validateDoc`.
+ * @param {any} x
+ * @returns {string[]} problem messages (empty = OK)
+ */
+export function nativeShapeErrors(x) {
+    if (!x || typeof x !== 'object' || Array.isArray(x)) return ['(root): native document must be a JSON object'];
+    /** @type {string[]} */
+    const errs = [];
+    if (x.format !== 'st-preset-manager/library') errs.push(`format: must be "st-preset-manager/library"`);
+    if (x.version !== 1) errs.push('version: must be 1');
+    if (!Array.isArray(x.sequences)) {
+        errs.push('sequences: must be an array');
+    } else {
+        x.sequences.forEach((s, i) => {
+            if (!s || typeof s !== 'object' || Array.isArray(s) || !Array.isArray(s.rows)) {
+                errs.push(`sequences[${i}]: must be an object with a rows array`);
+            } else {
+                validateRows(s.rows, `sequences[${i}].rows`, errs);
+            }
+        });
+    }
+    if (x.loadouts !== undefined && (typeof x.loadouts !== 'object' || x.loadouts === null || Array.isArray(x.loadouts))) {
+        errs.push('loadouts: must be an object');
+    }
+    return errs;
+}
+
+/**
  * @param {any} doc
  * @returns {string[]} paths of bad fields (empty = valid)
  */

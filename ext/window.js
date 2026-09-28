@@ -1,11 +1,13 @@
 /**
- * Floating window shell (2b): one window, two tabs. Library = preset list
+ * Floating window shell (2b): one window, three tabs. Library = preset list
  * (load into slot, open in the Presets tab); Presets = per-preset editor
- * tabs (ext/tabs/*). Uses plain DOM + CSS from style.css; jQuery UI
- * draggable/resizable are available globally in ST and used for the window.
+ * tabs (ext/tabs/*); Import/Export = file import/export (ext/tabs/io.js).
+ * Uses plain DOM + CSS from style.css; jQuery UI draggable/resizable are
+ * available globally in ST and used for the window.
  */
 import { api, SLOT_NAME } from './st.js';
 import { createPresetsTab } from './tabs/presets.js';
+import { createIoTab } from './tabs/io.js';
 
 /**
  * @param {{ title: string, content: string, onClose?: () => void }} opts
@@ -50,18 +52,22 @@ export function openWindow({ title, content, onClose }) {
 export function openMainWindow(bridge) {
     /** @type {any} */
     let presets;
+    /** @type {any} */
+    let io;
     const win = openWindow({
         title: 'Preset Manager',
-        onClose: () => presets?.destroy(),
+        onClose: () => { presets?.destroy(); io?.destroy(); },
         content: `
             <div class="pm-tabs">
                 <button type="button" class="pm-tab menu_button pm-active" data-tab="library">Library</button>
                 <button type="button" class="pm-tab menu_button" data-tab="presets">Presets</button>
+                <button type="button" class="pm-tab menu_button" data-tab="io">Import/Export</button>
             </div>
             <div class="pm-pane" data-pane="library">
                 <div class="pm-root"></div>
             </div>
-            <div class="pm-pane" data-pane="presets" hidden></div>`,
+            <div class="pm-pane" data-pane="presets" hidden></div>
+            <div class="pm-pane" data-pane="io" hidden></div>`,
     });
     const root = win.root;
 
@@ -72,6 +78,7 @@ export function openMainWindow(bridge) {
         for (const pane of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-pane')))) {
             pane.hidden = pane.dataset.pane !== name;
         }
+        if (name === 'io') void io.refresh();
     };
     for (const tab of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-tab')))) {
         tab.addEventListener('click', () => showTab(/** @type {string} */ (tab.dataset.tab)));
@@ -87,6 +94,13 @@ export function openMainWindow(bridge) {
         void presets.open(presetId);
     };
     const libRoot = /** @type {HTMLElement} */ (root.querySelector('.pm-root'));
+
+    io = createIoTab(
+        /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="io"]')),
+        bridge,
+        { onOpen, onLibraryChanged: () => void refresh(libRoot, bridge, { onOpen }) },
+    );
+
     renderLibrary(libRoot, bridge, { onOpen });
     void refresh(libRoot, bridge, { onOpen });
 
