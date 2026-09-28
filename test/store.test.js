@@ -53,9 +53,10 @@ test('store: import -> library -> get roundtrip; name conflict is 409', async ()
         () => store.importPreset({ st: sampleSt(), name: 'Test Preset' }),
         (err) => /** @type {{status?: number}} */ (err).status === 409,
     );
-    // replace: true wins
+    // replace: true wins, and replaces the SAME document (identity kept)
     const doc2 = await store.importPreset({ st: sampleSt(), name: 'Test Preset', replace: true });
-    assert.notEqual(doc2.id, doc.id);
+    assert.equal(doc2.id, doc.id);
+    assert.equal(store.listLibrary().length, 1);
 });
 
 test('store: import rejects non-CC JSON with 400', async () => {

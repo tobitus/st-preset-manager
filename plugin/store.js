@@ -281,17 +281,16 @@ export class Store {
 
     /**
      * Import an ST preset (runs recognizers) or accept a native doc.
+     * Replacing an existing name (`replace: true`) keeps the replaced
+     * document's identity: id, createdAt, revision history and, if it was
+     * bound to the working slot, that binding. A fresh id is minted only
+     * for a true copy (new name, or a native id already taken by another
+     * document).
      * @param {{ st?: any, native?: any, name?: string, folder?: string, tags?: string[], replace?: boolean, sourceRef?: string }} body
      */
     async importPreset(body) {
         return this.enqueue(async () => {
             let doc;
-            if (body.folder !== undefined) {
-                // validate BEFORE building the doc: rejects absolute paths
-                // and `..` escapes with a 400 (folders are the library's
-                // layout, never a write target outside presetsDir)
-                this._safeDir(body.folder);
-            }
             if (body.native) {
                 const errs0 = nativeShapeErrors(body.native);
                 if (errs0.length) throw new StoreError(`invalid native document: ${errs0.join(', ')}`);
@@ -306,8 +305,6 @@ export class Store {
                     ensureDefaultLoadout(doc);
                 }
                 stripLeafEnabled(doc); // native uploads may still carry leaf bits
-                const errs = validateDoc(doc);
-                if (errs.length) throw new StoreError(`invalid native document: ${errs.join(', ')}`);
             } else if (body.st) {
                 assertStPreset(body.st, body.name ?? 'preset');
                 const name = sanitizeName(body.name ?? body.st.name);
@@ -325,26 +322,45 @@ export class Store {
             } else {
                 throw new StoreError('body must carry {st, name} or {native}');
             }
-            doc.folder = String(body.folder ?? doc.folder ?? '');
-            const existing = this.findByName(doc.name);
-            if (existing && existing.id !== doc.id && !body.replace) {
-                throw Object.assign(new StoreError(`name "${doc.name}" is already taken`, 409), { conflict: existing.id });
-            }
-            if (existing && existing.id !== doc.id && body.replace) {
-                // the new doc overwrites the same file: drop the stale index
-                // entry (until now /library listed both and the old id served
-                // a document whose file no longer exists) and retire the old
-                // preset's revisions with its id
-                this.index.delete(existing.id);
-                await fsp.rm(path.join(this.revisionsDir, existing.id), { recursive: true, force: true });
-            }
+            // effective folder: an explicit body.folder wins, otherwise the
+            // native doc's own folder; validate it now, BEFORE any lookup
+            // or write touches the existing document (a bad folder must
+            // never delete history)
+            doc.folder = String(body.folder !== undefined ? body.folder : (doc.folder ?? ''));
+            this._safeDir(doc.folder);
             // normalize structure so outline ops are byte-exact from the start (v1 derive_structure)
             for (const seq of doc.sequences) seq.rows = rebuildSeq(flattenSeq(seq.rows));
-            if (!body.native) {
-                // native docs were validated above; validate the ST-derived
-                // one too (connection keys etc. must never reach disk)
-                const errs = validateDoc(doc);
-                if (errs.length) throw new StoreError(`invalid imported document: ${errs.join(', ')}`);
+            const errs = validateDoc(doc);
+            if (errs.length) {
+                const label = body.native ? 'invalid native document' : 'invalid imported document';
+                throw new StoreError(`${label}: ${errs.join(', ')}`);
+            }
+
+            const existing = this.findByName(doc.name);
+            if (existing && !body.replace) {
+                throw Object.assign(new StoreError(`name "${doc.name}" is already taken`, 409), { conflict: existing.id });
+            }
+            if (existing && body.replace) {
+                // replace in place: the new content becomes the next
+                // revision of the SAME document (same id, same createdAt,
+                // history and slot binding kept)
+                doc.id = existing.id;
+                doc.createdAt = existing.doc.createdAt;
+                const desired = this.state.presetId === existing.id;
+                if (desired) this._markSlotChanged();
+                const saved = await this._savePresetNow(doc);
+                if (desired && this.state.loadoutId && !Object.prototype.hasOwnProperty.call(saved.loadouts ?? {}, this.state.loadoutId)) {
+                    // the slot's loadout id no longer exists in the new
+                    // document (an ST re-import re-mints loadout ids):
+                    // fall back to the doc's active loadout
+                    await this._mutateStateNow((st) => { st.loadoutId = null; });
+                }
+                return saved;
+            }
+            if (this.index.has(doc.id)) {
+                // a native upload whose id is already taken, under a name
+                // that isn't: it's a copy, mint it a fresh id
+                doc.id = `p_${ulid()}`;
             }
             await this._writeDoc(doc, this._safeDir(doc.folder));
             await this._bumpRev();

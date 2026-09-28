@@ -8,7 +8,7 @@
  * one of those.
  *
  *   node dev/check-phase3.mjs              all checks
- *   node dev/check-phase3.mjs 10 9 ui native 11   subset
+ *   node dev/check-phase3.mjs 10 9 ui native slot 11   subset
  *
  * Checks:
  *   setup   reset + fixtures, window opened via the UI
@@ -17,10 +17,13 @@
  *           FrankenSIM imported flat via the file picker and editable,
  *           container log stays clean
  *   9       ST export (format=st) carries no notes/groups/cardinality keys
- *   ui      drop import, ST-list import (409 then replace), st/native
- *           export downloads == the API export, screenshots
- *   native  native export -> import round trip (replace), no silent
- *           overwrite without replace
+ *   ui      drop import, drop outside the drop zone is swallowed,
+ *           ST-list import (409 then identity-preserving replace),
+ *           st/native export downloads == the API export, screenshots
+ *   native  native export -> import: 409 without replace, delete, then a
+ *           free-id reimport is byte-identical to the export (id included)
+ *   slot    replacing the slot's own preset keeps it bound: panel edits in
+ *           ST and switch edits in the v2 window both keep flowing
  *   11      ST round trip in a freshly reset ST: export a preset as ST
  *           JSON, import both the export and the original fixture into a
  *           clean ST, compare live oai state and mock-captured generation
@@ -35,7 +38,7 @@ import os from 'node:os';
 import path from 'node:path';
 
 import {
-    FF, Probe, REPO,
+    FF, Probe, REPO, SLOT_NAME,
     cleanupTabs, createApi, createReporter, httpJson, sleep, until,
 } from './harness.mjs';
 import { FIXTURE_DIR, PARITY_FILES, jsStructure, structureDiff, v1Structure } from './parity.mjs';
@@ -72,6 +75,33 @@ const setValue = (/** @type {string} */ sel, /** @type {string} */ value, evt = 
 const setChecked = (/** @type {string} */ sel, /** @type {boolean} */ value) => probe.eval(`(() => {
     const el = document.querySelector(${J(sel)}); if (!el) return false;
     el.checked = ${value ? 'true' : 'false'}; el.dispatchEvent(new Event('change', { bubbles: true })); return true; })()`);
+
+/** ST's live chat-completion state (order entries verbatim for byte compares). */
+function oai() {
+    return probe.eval(`(() => {
+        const o = SillyTavern.getContext().chatCompletionSettings;
+        return {
+            preset: o.preset_settings_openai,
+            order: o.prompt_order?.[0]?.order ?? [],
+            prompts: (o.prompts ?? []).map((p) => ({ identifier: p.identifier, content: p.content ?? '' })),
+        };
+    })()`);
+}
+/** ST's OWN prompt-manager rows. @returns {Promise<{identifier: string, enabled: boolean}[]>} */
+function stDom() {
+    return probe.eval(`Array.from(document.querySelectorAll('#completion_prompt_manager_list li[data-pm-identifier]')).map((r) => ({
+        identifier: r.dataset.pmIdentifier,
+        enabled: !!r.querySelector('.prompt-manager-toggle-action.fa-toggle-on'),
+    }))`);
+}
+const getSlot = async () => (await api('GET', '/slot')).json;
+/** The live order equals the compiled slot order (converged). */
+async function converged() {
+    const [o, s] = await Promise.all([oai(), getSlot()]);
+    return o.preset === SLOT_NAME && J(o.order) === J(s.compiled?.prompt_order?.[0]?.order) ? o : null;
+}
+/** Click ST's own toggle; false while the bridge's apply overlay is up (retry). */
+const clickStToggle = (/** @type {string} */ id) => probe.eval(`(() => { if (document.querySelector('.pm-apply-blocker')) return false; const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${id}"] .prompt-manager-toggle-action'); if (!el) return false; el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); return true; })()`);
 
 /**
  * ST can pop a modal <dialog> in a fresh profile a few seconds after boot; a
@@ -428,14 +458,22 @@ async function main() {
             const name = '10 container log: no new error/stack';
             try {
                 const whole = spawnSync('podman', ['logs', 'st-pm-dev'], { encoding: 'utf8' });
+                const since = spawnSync('podman', ['logs', '--since', t0, 'st-pm-dev'], { encoding: 'utf8' });
+                const cmdOk = (/** @type {any} */ res) => res.error === undefined && res.status === 0;
+                const wholeOk = cmdOk(whole);
+                const sinceOk = cmdOk(since);
+                if (!wholeOk || !sinceOk) {
+                    const failing = !wholeOk ? "podman logs st-pm-dev" : "podman logs --since <t0> st-pm-dev";
+                    const failedRes = !wholeOk ? whole : since;
+                    throw new Error(`${failing} failed: status=${failedRes.status} error=${failedRes.error?.message ?? 'none'} stderr="${(failedRes.stderr ?? '').slice(0, 200)}"`);
+                }
                 const wholeText = `${whole.stdout ?? ''}\n${whole.stderr ?? ''}`;
                 const positiveControl = wholeText.includes('[st-preset-manager] plugin initialized');
-                const since = spawnSync('podman', ['logs', '--since', t0, 'st-pm-dev'], { encoding: 'utf8' });
                 const lines = `${since.stdout ?? ''}\n${since.stderr ?? ''}`.split('\n').filter((l) => l.length > 0);
                 const bad = /\b(TypeError|ReferenceError|SyntaxError|RangeError|Unhandled|uncaught)\b|^\s+at .+:\d+:\d+\)?$|\[st-preset-manager\]/i;
                 const offending = lines.filter((l) => bad.test(l));
                 report(name, positiveControl && offending.length === 0,
-                    `positiveControl=${positiveControl} linesSinceT0=${lines.length} offending=${offending.slice(0, 3).join(' | ')}`);
+                    `wholeStatus=${whole.status} sinceStatus=${since.status} positiveControl=${positiveControl} linesSinceT0=${lines.length} offending=${offending.slice(0, 3).join(' | ')}`);
             } catch (err) {
                 report(name, false, /** @type {Error} */ (err).message);
             }
@@ -509,6 +547,64 @@ async function main() {
             }
         }
         {
+            const name = 'ui file drop outside the zone is swallowed';
+            try {
+                const strayText = fs.readFileSync(path.join(REPO, 'dev', 'fixtures', 'presets', 'Sola V2 Flame.json'), 'utf8');
+                /** Dispatch dragenter/dragover/drop with a stray file on `sel`; returns whether dragover was prevented, or null if `sel` is missing. */
+                const dispatchStrayDrop = (/** @type {string} */ sel) => probe.eval(`(() => {
+                    const el = document.querySelector(${J(sel)});
+                    if (!el) return null;
+                    const file = new File([${J(strayText)}], 'P3 Stray.json', { type: 'application/json' });
+                    const dt = new DataTransfer();
+                    dt.items.add(file);
+                    let dragoverPrevented = null;
+                    for (const type of ['dragenter', 'dragover', 'drop']) {
+                        const evt = new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt });
+                        const notCancelled = el.dispatchEvent(evt);
+                        if (type === 'dragover') dragoverPrevented = !notCancelled;
+                    }
+                    return { dragoverPrevented };
+                })()`);
+                const toasts = () => probe.eval(`Array.from(document.querySelectorAll('#toast-container .toast')).map((t) => t.textContent.trim())`);
+                const clearToasts = () => probe.eval(`(() => { document.querySelectorAll('#toast-container .toast').forEach((t) => t.remove()); return true; })()`);
+
+                // non-vacuity control: the same stray drop OUTSIDE our window
+                // DOES hit ST's own body drop handler (proves the detector works)
+                await clearToasts();
+                await dispatchStrayDrop('body');
+                const controlToasts = await until(async () => {
+                    const t = await toasts();
+                    return t.some((/** @type {string} */ x) => /import|invalid|corrupt/i.test(x)) ? t : null;
+                }, 3000, 'ST toast for a stray body drop (non-vacuity control)');
+                await clearToasts();
+
+                const targets = ['#pm-window .pm-io-log', '#pm-window .pm-io-export-row', '#pm-window .pm-tabs'];
+                /** @type {string[]} */
+                const evid = [];
+                let allPass = true;
+                for (const sel of targets) {
+                    if (!(await exists(sel))) { allPass = false; evid.push(`${sel}: MISSING`); continue; }
+                    const charsBefore = await probe.eval('SillyTavern.getContext().characters.length');
+                    const libBefore = ((await api('GET', '/library')).json ?? []).length;
+                    const rowsBefore = await probe.eval(`document.querySelectorAll('#pm-window .pm-io-result').length`);
+                    await clearToasts();
+                    const dropRes = await dispatchStrayDrop(sel);
+                    await sleep(1500);
+                    const toastsAfter = await toasts();
+                    const charsAfter = await probe.eval('SillyTavern.getContext().characters.length');
+                    const libAfter = ((await api('GET', '/library')).json ?? []).length;
+                    const rowsAfter = await probe.eval(`document.querySelectorAll('#pm-window .pm-io-result').length`);
+                    const noToast = !toastsAfter.some((/** @type {string} */ t) => /import|invalid|corrupt/i.test(t));
+                    const pass = noToast && charsAfter === charsBefore && libAfter === libBefore && rowsAfter === rowsBefore && dropRes?.dragoverPrevented === true;
+                    if (!pass) allPass = false;
+                    evid.push(`${sel}: chars ${charsBefore}->${charsAfter} lib ${libBefore}->${libAfter} rows ${rowsBefore}->${rowsAfter} dragoverPrevented=${dropRes?.dragoverPrevented} toasts=${J(toastsAfter)}`);
+                }
+                report(name, allPass, `control=${J(controlToasts)}; ${evid.join(' | ')}`);
+            } catch (err) {
+                report(name, false, /** @type {Error} */ (err).message);
+            }
+        }
+        {
             const name = 'ui ST-list import (409 then replace)';
             try {
                 const before = (await api('GET', '/library')).json ?? [];
@@ -518,6 +614,7 @@ async function main() {
                 await until(() => exists('.pm-io-result[data-status="error"][data-name="DEUS.EX.MACHINA.V2.5.ST"][data-http-status="409"]'), 10000, '409 result');
                 const afterErr = (await api('GET', '/library')).json ?? [];
                 const unchangedAfterErr = afterErr.length === before.length;
+                const revBefore = (await api('GET', `/presets/${presetIds.dem}`)).json.rev;
                 await setChecked('#pm-window .pm-io-replace', true);
                 await click('#pm-window .pm-io-st-import');
                 const okSel = '.pm-io-result[data-status="ok"][data-name="DEUS.EX.MACHINA.V2.5.ST"]';
@@ -526,15 +623,15 @@ async function main() {
                     return probe.eval(`document.querySelector(${J(okSel)}).dataset.presetId`);
                 }, 10000, 'replace result');
                 const afterOk = (await api('GET', '/library')).json ?? [];
-                const idChanged = newId !== presetIds.dem;
-                const oldGone = !afterOk.some((/** @type {any} */ e) => e.id === presetIds.dem);
+                const idKept = newId === presetIds.dem;
+                const stillListed = afterOk.some((/** @type {any} */ e) => e.id === presetIds.dem);
                 const countSame = afterOk.length === before.length;
                 const newDoc = (await api('GET', `/presets/${newId}`)).json;
+                const revIncreased = newDoc.rev > revBefore;
                 const absDem = path.join(FIXTURE_DIR, 'DEUS.EX.MACHINA.V2.5.ST.json');
                 const diff = structureDiff(v1Structure(absDem), jsStructure(newDoc));
-                presetIds.dem = newId;
-                report(name, unchangedAfterErr && idChanged && oldGone && countSame && diff.length === 0,
-                    `409 unchanged=${unchangedAfterErr} newId=${newId} oldGone=${oldGone} count ${before.length}->${afterOk.length} diff=${diff.slice(0, 2).join(' | ')}`);
+                report(name, unchangedAfterErr && idKept && stillListed && countSame && revIncreased && diff.length === 0,
+                    `409 unchanged=${unchangedAfterErr} idKept=${idKept} (${presetIds.dem}) stillListed=${stillListed} count ${before.length}->${afterOk.length} rev ${revBefore}->${newDoc.rev} diff=${diff.slice(0, 2).join(' | ')}`);
             } catch (err) {
                 report(name, false, /** @type {Error} */ (err).message);
             }
@@ -574,16 +671,124 @@ async function main() {
             const conflictOk = conflictRes.status === 409 && conflictRes.json?.conflict === presetIds.ff;
             const preserved = firstDiff((await api('GET', `/presets/${presetIds.ff}`)).json, n1) === null;
             const before = (await api('GET', '/library')).json ?? [];
-            const replaceRes = await api('POST', '/presets', { native: n1, replace: true });
-            const n2 = replaceRes.json;
-            const diffN = firstDiff(omit(n1, ['id', 'createdAt']), omit(n2, ['id', 'createdAt']));
+            await api('DELETE', `/presets/${presetIds.ff}`);
+            const libAfterDelete = (await api('GET', '/library')).json ?? [];
+            const deleted = !libAfterDelete.some((/** @type {any} */ e) => e.id === presetIds.ff);
+            const importRes = await api('POST', '/presets', { native: n1 });
+            const n2 = importRes.json;
+            const diffN = firstDiff(n1, n2);
             const getN2 = (await api('GET', `/presets/${n2.id}`)).json;
             const diffGet = firstDiff(getN2, n2);
             const after = (await api('GET', '/library')).json ?? [];
             const countSame = after.length === before.length;
             presetIds.ff = n2.id;
-            report(name, replaceRes.status === 201 && conflictOk && preserved && diffN === null && diffGet === null && countSame,
-                `conflict409=${conflictOk} preserved=${preserved} replace201=${replaceRes.status === 201} diffN=${diffN ?? 'none'} diffGet=${diffGet ?? 'none'} count ${before.length}->${after.length}`);
+            report(name, importRes.status === 201 && conflictOk && preserved && deleted && diffN === null && diffGet === null && countSame,
+                `conflict=${conflictOk} deleted=${deleted} firstDiff=${diffN ?? 'none'} import201=${importRes.status === 201} diffGet=${diffGet ?? 'none'} count ${before.length}->${after.length}`);
+        } catch (err) {
+            report(name, false, /** @type {Error} */ (err).message);
+        }
+    }
+
+    // -------------------------------------------------------------- slot
+    if (wanted('slot')) {
+        const name = 'replace slot preset: slot stays bound, panel + window edits flow';
+        try {
+            // -- 1. load FF into the slot through the UI (check-phase2 pattern)
+            await click('#pm-window .pm-tab[data-tab="library"]');
+            await until(() => exists('#pm-window .pm-pane[data-pane="library"]:not([hidden])'), 5000, 'library tab shown');
+            let row = `#pm-window .pm-library-row[data-preset-id="${presetIds.ff}"]`;
+            if (!(await exists(row))) {
+                // the library list can be stale after check D minted a new id; a
+                // reopen (#pm-menu-item replaces the window in place) refetches it
+                await click('#pm-menu-item');
+                await until(() => exists('#pm-window .pm-tabs'), 10000, 'window reopened');
+                await click('#pm-window .pm-tab[data-tab="library"]');
+                await until(() => exists('#pm-window .pm-pane[data-pane="library"]:not([hidden])'), 5000, 'library tab shown');
+            }
+            await until(() => exists(row), 10000, 'library row for the current ff id');
+            await click(`${row} .pm-load`);
+            await until(async () => {
+                const o = await converged();
+                return o && (await stDom()).length === o.order.length;
+            }, 15000, 'FF converged in the slot');
+            await dismissPopups(); // FF triggers ST's embedded-regex popup
+
+            // -- 2. open FF in the Presets tab
+            await click(`${row} .pm-open`);
+            await until(() => exists(`#pm-window .pm-preset-view[data-preset-id="${presetIds.ff}"] .pm-outline li.pm-node`), 10000, 'presets tab open');
+
+            // -- 3. replace the SAME document (identity kept) with an edited native export
+            const N = (await api('GET', `/presets/${presetIds.ff}/export?format=native`)).json;
+            N.notes = 'p3 replace in slot';
+            const replaceRes = await api('POST', '/presets', { native: N, replace: true });
+            const idKept = replaceRes.status === 201 && replaceRes.json?.id === presetIds.ff;
+            if (!idKept) throw new Error(`identity not kept: before=${presetIds.ff} after=${replaceRes.json?.id} status=${replaceRes.status}`);
+
+            // -- 4. the slot stays bound and the edit lands
+            const slot = await until(async () => {
+                const s = (await api('GET', '/slot')).json;
+                return s.desired?.presetId === presetIds.ff && s.compiled !== null ? s : null;
+            }, 5000, 'slot stays bound after replace');
+            const notesOk = await until(async () => (await api('GET', `/presets/${presetIds.ff}`)).json.notes === 'p3 replace in slot', 5000, 'notes land');
+
+            // -- 5. ST panel -> ST -> API: a block toggled in ST's own panel reaches the doc
+            const doc = (await api('GET', `/presets/${presetIds.ff}`)).json;
+            const activeLoadout = doc.activeLoadoutId;
+            const blockRows = doc.sequences[0].rows.filter((/** @type {any} */ r) => r.kind === 'block');
+            if (blockRows.length < 2) throw new Error(`need 2 top-level block leaves, found ${blockRows.length}`);
+            const A = blockRows[0].ref;
+            const B = blockRows[1].ref;
+            const aBefore = doc.loadouts[activeLoadout].enabled[A];
+
+            await dismissPopups(); // again, before real input into ST's panel
+            await probe.eval(`(() => {
+                window.__p3PanelPosts = [];
+                window.__p3OrigFetch = window.fetch;
+                window.fetch = async (...args) => {
+                    const res = await window.__p3OrigFetch(...args);
+                    try {
+                        const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
+                        const method = (args[1]?.method ?? args[0]?.method ?? 'GET').toUpperCase();
+                        if (method === 'POST' && url.includes('/slot/panel')) window.__p3PanelPosts.push({ url, status: res.status });
+                    } catch {}
+                    return res;
+                };
+                return true;
+            })()`);
+            await until(() => clickStToggle(A), 10000, 'ST toggle clickable (A)');
+            await until(async () => (await api('GET', `/presets/${presetIds.ff}`)).json.loadouts[activeLoadout].enabled[A] === !aBefore, 5000, 'A flip reaches the API');
+            const aAfter = !aBefore;
+            const panelPosts = await probe.eval('window.__p3PanelPosts');
+            const panel409 = panelPosts.some((/** @type {any} */ p) => p.status === 409);
+            const panel200 = panelPosts.some((/** @type {any} */ p) => p.status === 200);
+
+            // -- 6. v2 window -> ST: a block switched in the window reaches ST's live settings
+            const bBefore = doc.loadouts[activeLoadout].enabled[B];
+            const bT0 = Date.now();
+            await click(`#pm-window li.pm-node[data-identifier="${B}"] > .pm-row input.pm-switch`);
+            const bMs = await until(async () => {
+                const o = await oai();
+                const entry = o.order.find((/** @type {any} */ e) => e.identifier === B);
+                return entry && entry.enabled === !bBefore ? Date.now() - bT0 : null;
+            }, 5000, 'B flip reaches ST live settings');
+            const bAfter = !bBefore;
+
+            // -- 7. restore A and B (best effort) + remove the spy
+            try {
+                await until(() => clickStToggle(A), 10000, 'ST toggle clickable (A restore)');
+                await until(async () => (await api('GET', `/presets/${presetIds.ff}`)).json.loadouts[activeLoadout].enabled[A] === aBefore, 5000, 'A restored');
+            } catch { /* best effort */ }
+            try {
+                await click(`#pm-window li.pm-node[data-identifier="${B}"] > .pm-row input.pm-switch`);
+                await until(async () => {
+                    const o = await oai();
+                    return o.order.find((/** @type {any} */ e) => e.identifier === B)?.enabled === bBefore;
+                }, 5000, 'B restored');
+            } catch { /* best effort */ }
+            await probe.eval(`(() => { window.fetch = window.__p3OrigFetch; delete window.__p3OrigFetch; return true; })()`);
+
+            report(name, idKept && !!slot && notesOk && aAfter === !aBefore && !panel409 && panel200 && bMs !== null,
+                `ffId=${presetIds.ff} replaceId=${replaceRes.json?.id} compiledNull=${slot ? slot.compiled === null : 'n/a'} notesOk=${notesOk} A ${aBefore}->${aAfter} panelPosts=${J(panelPosts)} B ${bBefore}->${bAfter} ms=${bMs}`);
         } catch (err) {
             report(name, false, /** @type {Error} */ (err).message);
         }

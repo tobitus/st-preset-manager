@@ -3,7 +3,8 @@
  * (load into slot, open in the Presets tab); Presets = per-preset editor
  * tabs (ext/tabs/*); Import/Export = file import/export (ext/tabs/io.js).
  * Uses plain DOM + CSS from style.css; jQuery UI draggable/resizable are
- * available globally in ST and used for the window.
+ * available globally in ST and used for the window. The window also swallows
+ * file drag/drop events anywhere inside it so ST's body-level importer never sees them (see below).
  */
 import { api, SLOT_NAME } from './st.js';
 import { createPresetsTab } from './tabs/presets.js';
@@ -70,6 +71,20 @@ export function openMainWindow(bridge) {
             <div class="pm-pane" data-pane="io" hidden></div>`,
     });
     const root = win.root;
+
+    // ST binds its own drag-and-drop character importer on document.body
+    // (public/scripts/dragdrop.js). Any file dropped inside our window that
+    // isn't caught by the dedicated Import/Export drop zone would otherwise
+    // bubble up and trigger ST's "Could not import character" toast, so we
+    // swallow file drags anywhere in the window here.
+    for (const type of ['dragenter', 'dragover', 'drop']) {
+        root.addEventListener(type, (/** @type {DragEvent} */ ev) => {
+            if (ev.dataTransfer && Array.from(ev.dataTransfer.types ?? []).includes('Files')) {
+                ev.preventDefault();
+                ev.stopPropagation();
+            }
+        });
+    }
 
     const showTab = (/** @type {string} */ name) => {
         for (const tab of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-tab')))) {

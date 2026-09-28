@@ -142,7 +142,8 @@ export function makeRouter() {
     router.post('/presets', async (req, res, next) => {
         try {
             const doc = /** @type {{id: string}} */ (await req.pm.store.importPreset(req.body ?? {}));
-            broadcast(req, 'preset', doc.id);
+            if (req.pm.store.state.presetId === doc.id) broadcast(req, 'slot', null);
+            else broadcast(req, 'preset', doc.id);
             res.status(201).json(doc);
         } catch (err) { next(err); }
     });

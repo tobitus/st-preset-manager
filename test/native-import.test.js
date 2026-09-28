@@ -100,16 +100,75 @@ test('native: body.name imports a copy under that name (into a subfolder); origi
     assert.equal(store.listLibrary().length, 2);
 });
 
-test('native: replace:true on a taken name replaces it with an otherwise identical doc', async () => {
+test('replace: native replace:true keeps the SAME document identity and history', async () => {
     const store = await freshStore();
-    const exported = await richDoc(store);
-    const replaced = await store.importPreset({ native: structuredClone(exported), replace: true });
-    const { id: _a, ...r1 } = replaced;
-    const { id: _b, ...r2 } = exported;
-    assert.deepEqual(r1, r2);
+    const before = await richDoc(store);
+    const revsBefore = store.listRevisions(before.id).length;
+    const upload = structuredClone(before);
+    upload.notes = 'replaced notes';
+    const replaced = await store.importPreset({ native: upload, replace: true });
+    assert.equal(replaced.id, before.id, 'replace keeps the id');
+    assert.equal(replaced.createdAt, before.createdAt, 'replace keeps createdAt');
+    assert.equal(replaced.rev, before.rev + 1, 'replace is a new revision of the same doc');
+    assert.equal(replaced.notes, 'replaced notes');
+    const { rev: _r1, updatedAt: _u1, notes: _n1, ...restNew } = replaced;
+    const { rev: _r2, updatedAt: _u2, notes: _n2, ...restOld } = before;
+    assert.deepEqual(restNew, restOld, 'everything else is the upload');
+    assert.deepEqual(store.getPreset(before.id), replaced);
     const lib = store.listLibrary();
     assert.equal(lib.length, 1);
-    assert.equal(lib[0].id, replaced.id);
+    assert.equal(lib[0].id, before.id);
+    const revs = store.listRevisions(before.id);
+    assert.ok(revs.length >= revsBefore && revs.length >= 1, 'history kept (not deleted)');
+    const newest = store.getRevision(before.id, revs.at(-1).rev);
+    assert.deepEqual(newest.doc, before, 'the pre-replace document is snapshotted');
+});
+
+test('replace: replacing the slot preset (native or ST) keeps the slot bound and compilable', async () => {
+    const { compile } = await import('../shared/compile.js');
+    for (const kind of ['native', 'st']) {
+        const store = await freshStore();
+        const doc = await richDoc(store);
+        const lid = doc.activeLoadoutId;
+        await store.mutateState((st) => { st.presetId = doc.id; st.loadoutId = lid; });
+        const changedBefore = store.slotChangedRev ?? 0;
+        const body = kind === 'native'
+            ? { native: { ...structuredClone(doc), notes: 'n2' }, replace: true }
+            : { st: sampleSt(), name: doc.name, replace: true };
+        const out = await store.importPreset(body);
+        assert.equal(out.id, doc.id, `${kind}: id kept`);
+        assert.equal(store.state.presetId, doc.id, `${kind}: slot still names the doc`);
+        const live = store.getDocNow(store.state.presetId);
+        assert.ok(live, `${kind}: the slot's document exists`);
+        const lo = store.state.loadoutId ?? live.activeLoadoutId;
+        assert.ok(live.loadouts[lo], `${kind}: the desired loadout exists in the new doc`);
+        assert.doesNotThrow(() => compile(live, null, {}, lo));
+        if (kind === 'native') assert.equal(store.state.loadoutId, lid, 'native: same loadout ids, desired loadout kept');
+        assert.ok((store.slotChangedRev ?? 0) > changedBefore, `${kind}: slot marked changed (stale panel bases get 409)`);
+    }
+});
+
+test('replace: a bad destination or invalid upload is rejected BEFORE anything is touched', async () => {
+    const store = await freshStore();
+    const before = await richDoc(store);
+    const revs = store.listRevisions(before.id);
+    const file = path.join(store.root, 'presets', 'Rich.json');
+    assert.ok(fs.existsSync(file));
+    const bad = [
+        { native: { ...structuredClone(before), folder: '../outside' }, replace: true },
+        { native: { ...structuredClone(before), folder: '/etc' }, replace: true },
+        { native: { ...structuredClone(before), folder: 'a/../../b' }, replace: true },
+        { native: { ...structuredClone(before), settings: { ...before.settings, custom_url: 'http://x' } }, replace: true },
+        { st: sampleSt(), name: 'Rich', folder: '../outside', replace: true },
+    ];
+    for (const body of bad) {
+        await assert.rejects(() => store.importPreset(body), (/** @type {any} */ err) => err.status === 400);
+        assert.deepEqual(store.getPreset(before.id), before, 'original doc untouched');
+        assert.deepEqual(store.listRevisions(before.id), revs, 'history untouched');
+        assert.ok(fs.existsSync(file), 'file untouched');
+        assert.equal(store.listLibrary().length, 1);
+    }
+    assert.equal(fs.existsSync(path.join(store.root, 'outside')), false);
 });
 
 test('native: malformed documents are a clean 400 (StoreError, never a TypeError) and write nothing', async () => {
