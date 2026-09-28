@@ -2,13 +2,14 @@
  * ST access layer. The only module that touches SillyTavern internals;
  * everything else in the extension goes through this (PLAN §1.1).
  *
- * `../openai.js` is ST's own public/scripts/openai.js: this file lives at
- * public/scripts/extensions/third-party/st-preset-manager/ext/st.js (the
- * plugin mount / plugins/st-preset-manager never imports it — extension
- * files are browser-only), so the relative path resolves to the same module
- * in both install layouts (third-party mount and regular user extension).
+ * `../../../../openai.js` is ST's own public/scripts/openai.js: this file is
+ * served at public/scripts/extensions/third-party/st-preset-manager/ext/st.js
+ * (regular user extensions get the same /scripts/extensions/third-party/<name>
+ * URL, src/endpoints/extensions.js:1219), so four levels up land on
+ * public/scripts/. This is how third-party extensions import ST modules.
+ * The plugin mount (plugins/st-preset-manager) never loads browser code.
  */
-import { getPresetApplicationPromise, getChatCompletionPreset } from '../openai.js';
+import { getPresetApplicationPromise, getChatCompletionPreset } from '../../../../openai.js';
 
 /** @returns {any} SillyTavern.getContext() */
 export function ctx() {

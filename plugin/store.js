@@ -58,7 +58,9 @@ export class Store {
     /** @param {string} root plugin data root (<user>/preset-manager) */
     constructor(root) {
         this.root = root;
-        this.presetsDir = path.join(root, 'presets');
+        // absolute: _safeDir compares resolved paths against it (ST's data
+        // root can be relative to the server's cwd)
+        this.presetsDir = path.resolve(path.join(root, 'presets'));
         this.shelfDir = path.join(root, 'shelf');
         this.revisionsDir = path.join(root, 'revisions');
         this.modelsFile = path.join(root, 'models.json');

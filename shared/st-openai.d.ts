@@ -1,9 +1,10 @@
 /**
  * Ambient declaration for ST's own public/scripts/openai.js as seen from the
- * extension (ext/st.js imports it relatively as `../openai.js` when mounted
- * under public/scripts/extensions/third-party/st-preset-manager/). Only the
- * exports the extension consumes are declared; tsc --checkJs never resolves
- * ST's own tree.
+ * extension (ext/st.js imports it relatively as `../../../../openai.js`:
+ * ext/st.js is served at
+ * public/scripts/extensions/third-party/st-preset-manager/ext/st.js, so four
+ * levels up land on public/scripts/). Only the exports the extension
+ * consumes are declared; tsc --checkJs never resolves ST's own tree.
  */
 declare module '*/openai.js' {
     /** Resolves when the currently pending preset application completes (openai.js:5015). */
