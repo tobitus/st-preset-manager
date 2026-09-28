@@ -127,8 +127,9 @@ function leafLi(node, selectedKey) {
 }
 
 /**
- * A group's row IS its header leaf when one exists (switch = header's switch);
- * headerless groups show the group name and no handle/switch.
+ * A group's row IS its header leaf when one exists, but the header never
+ * gets a switch (only options do); headerless groups show the group name
+ * and no handle.
  * @param {GroupNode} node
  * @param {string|null} selectedKey
  * @returns {HTMLLIElement}
@@ -144,7 +145,7 @@ function groupLi(node, selectedKey) {
     const row = document.createElement('div');
     row.className = 'pm-row pm-group-row' + selectedSuffix(key, selectedKey);
     if (node.header) {
-        row.append(handleSpan(), makeSwitch(node.header), nameSpan(node.header.name));
+        row.append(handleSpan(), nameSpan(node.header.name));
     } else {
         row.append(nameSpan(node.name || '(options)'));
     }

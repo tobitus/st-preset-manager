@@ -21,7 +21,10 @@
  */
 
 /**
- * A rendered group row (its header, if any, is a LeafNode member too).
+ * A rendered group row. Its header (if any) is shown without a switch (v1:
+ * headings are not choosable). `noneOn` tallies options only; `conflict`
+ * still counts an enabled heading, because compile's pick-one normalize
+ * (shared/groups.js) treats it as a member and would collapse the pair.
  *
  * @typedef {Object} GroupNode
  * @property {'group'} type
@@ -121,8 +124,8 @@ function groupNode(doc, enabled, row) {
     const pickOne = row.cardinality === 'pick-one';
     const header = row.header ? leafNode(doc, enabled, row.header, pickOne) : null;
     const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, enabled, o, pickOne));
-    const members = header ? [header, ...options] : options;
-    const on = members.filter((/** @type {LeafNode} */ m) => m.enabled).length;
+    const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
+    const headerOn = header?.enabled ? 1 : 0;
     return {
         type: 'group',
         key: row.key,
@@ -131,7 +134,7 @@ function groupNode(doc, enabled, row) {
         cardinality: row.cardinality ?? 'pick-one-or-more',
         guessed: !!row.guessed,
         pickOne,
-        conflict: pickOne && on >= 2,
+        conflict: pickOne && on + headerOn >= 2,
         noneOn: pickOne && on === 0,
         options,
     };

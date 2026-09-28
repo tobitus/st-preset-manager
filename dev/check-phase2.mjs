@@ -7,7 +7,7 @@
  * `oai` settings, ST's own prompt-manager DOM) — never only the REST API.
  *
  *   node dev/check-phase2.mjs              all checks
- *   node dev/check-phase2.mjs 6 9          subset (live, 6, 9, editor, editor-hold, keys, 14)
+ *   node dev/check-phase2.mjs 6 9          subset (live, heading, 6, 9, editor, editor-hold, keys, 14, layout, leak)
  *
  * Checks:
  *   setup   reset + fixtures, FF 5.4 loaded AND opened through the window
@@ -211,6 +211,41 @@ async function main() {
         await click(uiSwitch(mainId));
         await timeUntil(async () => (await stDom()).find((r) => r.identifier === mainId)?.enabled === was, 5000);
         await until(converged, 10000, 'converged after live');
+    }
+
+    // ----------------------------------------------------------- heading
+    // A pick-one group's HEADING is not a choice (v1: no switch on headings,
+    // only options count): clicking anywhere on the heading row never changes
+    // which option is chosen, in the library or in ST.
+    if (wanted('heading')) {
+        const name = 'heading: clicking a pick-one heading row never changes the chosen option';
+        try {
+            const hdr = g.pov.header?.ref ?? g.pov.header?.identifier;
+            if (!hdr) throw new Error('POV group has no heading');
+            await until(converged, 10000, 'converged before heading');
+            const d0 = await getDoc();
+            const en0 = d0.loadouts[d0.activeLoadoutId].enabled;
+            const members = [hdr, ...optIds(g.pov)];
+            const before = members.map((id) => !!en0[id]);
+            const chosen = optIds(g.pov).filter((id) => en0[id]);
+            if (chosen.length !== 1) throw new Error(`precondition: exactly one POV option on (got ${J(chosen)})`);
+            const rowSel = `#pm-window li.pm-node[data-identifier="${hdr}"] > .pm-row`;
+            if (!(await exists(rowSel))) throw new Error('heading row not rendered');
+            const switches = await probe.eval(`document.querySelectorAll(${J(`${rowSel} input:not(.pm-none)`)}).length`);
+            // click the heading's switch if one is rendered (the bug), else the row itself
+            await probe.eval(`(() => { const r = document.querySelector(${J(rowSel)}); const el = r.querySelector('input:not(.pm-none)') ?? r.querySelector('.pm-name') ?? r; el.click(); return true; })()`);
+            await sleep(2000);
+            await until(converged, 10000, 'converged after the click');
+            const d1 = await getDoc();
+            const en1 = d1.loadouts[d1.activeLoadoutId].enabled;
+            const after = members.map((id) => !!en1[id]);
+            const dom = await stDom();
+            const stChosen = dom.filter((r) => optIds(g.pov).includes(r.identifier) && r.enabled).map((r) => r.identifier);
+            report(name, switches === 0 && J(after) === J(before) && J(stChosen) === J(chosen),
+                `switches on heading=${switches}; library heading+options ${J(before)} -> ${J(after)}; ST chosen ${J(stChosen)} (was ${J(chosen)})`);
+        } catch (err) {
+            report(name, false, /** @type {Error} */ (err).message);
+        }
     }
 
     // ------------------------------------------------------------------ 6
