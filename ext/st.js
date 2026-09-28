@@ -89,12 +89,49 @@ export async function applyCompiledToSlot(compiled) {
     const pm = ctx().getPresetManager('openai');
     await pm.savePreset(SLOT_NAME, compiled);
     // savePreset POSTs /api/presets/save and updateList() selects it;
-    // onSettingsPresetChange runs via the select's change event. Await the
-    // application promise so callers can measure settled state (ST exports
-    // getPresetApplicationPromise from openai.js:5015).
-    await getPresetApplicationPromise();
+    // onSettingsPresetChange runs via the select's change event. ST exports
+    // getPresetApplicationPromise from openai.js:5015 covering the listener
+    // aftermath — but its chain ends in PRESET_CHANGED listeners we do not
+    // control, and in some environments it never settles, wedging any caller
+    // that awaits it. So it is only a bounded optimisation here (a path
+    // where it settles fast skips the poll); correctness comes from
+    // OBSERVING ST's state below.
+    await Promise.race([
+        getPresetApplicationPromise().catch(() => {}),
+        new Promise((resolve) => setTimeout(resolve, 200)),
+    ]);
+    // Poll until ST's own state canonically matches what we saved. Must not
+    // silently proceed: callers rely on apply meaning "the panel now shows
+    // the compiled preset"; a false success would make the next panel op
+    // diff user edits against the wrong baseline.
+    const deadline = performance.now() + 5000;
+    for (;;) {
+        const oai = ctx().chatCompletionSettings;
+        const applied =
+            currentPresetName() === SLOT_NAME &&
+            canonEq(oai.prompt_order, compiled.prompt_order) &&
+            canonEq(promptsIdentifiers(oai), promptsIdentifiers(compiled));
+        if (applied) break;
+        if (performance.now() > deadline) {
+            const detail = currentPresetName() !== SLOT_NAME
+                ? `preset is ${JSON.stringify(currentPresetName())}, not the slot`
+                : `order rows ${oai.prompt_order?.[0]?.order?.length ?? 0} vs ${compiled.prompt_order?.[0]?.order?.length ?? 0}, prompts ${oai.prompts?.length ?? 0} vs ${compiled.prompts?.length ?? 0}`;
+            throw new Error(`applyCompiledToSlot: ST did not show ${JSON.stringify(SLOT_NAME)} with the compiled prompt_order/prompts within 5s (${detail})`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+    }
     // ST sanitizes the name for the filesystem; use what it reports back.
     return ctx().chatCompletionSettings.preset_settings_openai ?? SLOT_NAME;
+}
+
+/** @param {any} a @param {any} b deep structural equality via canonical JSON */
+function canonEq(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/** @param {any} src object with a prompts array (or null) */
+function promptsIdentifiers(src) {
+    return (src?.prompts ?? []).map((p) => p?.identifier);
 }
 
 /**
@@ -107,7 +144,12 @@ export async function snapshotPanel() {
     // getContext() in ST 1.19.0 — import it from the module instead.
     const full = getChatCompletionPreset?.(ctx().chatCompletionSettings) ?? null;
     if (!full) return null;
-    const out = { ...full };
+    // DEEP copy: prompts/prompt_order are top-level ARRAY fields whose
+    // values alias oai_settings' live arrays; a shallow spread made every
+    // "base" share identity with every later "snapshot", so the plugin's
+    // base->snapshot delta saw no structural change and toggle write-backs
+    // routed nothing.
+    const out = JSON.parse(JSON.stringify(full));
     delete out.proxy_password;
     delete out.reverse_proxy;
     delete out.custom_url;

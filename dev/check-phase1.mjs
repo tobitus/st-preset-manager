@@ -170,7 +170,8 @@ let chromeChild = null;
  * WebSocket (node ≥22). One chromium for the whole run; tab = its page.
  */
 async function startProbe(tab) {
-    cleanupTabs();
+    // only this tab's leftovers: tab B may still be running (check 8 → 9)
+    cleanupTabs([tab]);
     const port = await new Promise((resolve) => {
         const srv = http.createServer();
         srv.listen(0, '127.0.0.1', () => {
@@ -262,8 +263,9 @@ async function evalInPage(expression) {
     return res.result?.value;
 }
 
-function cleanupTabs() {
-    for (const tab of [TAB_A, TAB_B]) {
+/** Kill leftover probe chromia. With `tabs`, only those; default: both. */
+function cleanupTabs(tabs = [TAB_A, TAB_B]) {
+    for (const tab of tabs) {
         try { execSync(`pkill -9 -f "user-data-dir=${profileDir(tab)}"`, { stdio: 'ignore' }); } catch { /* none */ }
     }
 }
@@ -587,14 +589,14 @@ async function main() {
             missing.length ? `missing: ${missing.slice(0, 4).join(' | ')}` : `${enabledBlocks.length}/${enabledBlocks.length} blocks present in capture (ST macro model applied)`);
     }
 
-    // ------------------------------------------------------------------ 5
     {
         // panel toggle + slider write back into the doc
         const before = (await api('GET', `/presets/${ffId}`)).json;
         const target = before.loadouts[before.activeLoadoutId].enabled;
         const ident = Object.keys(target).find((k) => target[k] === true && before.blocks[k]);
         if (!ident) fatal('5', 'no enabled block to toggle');
-        evalInPage(`(() => { const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${ident}"] .prompt-manager-toggle-action'); el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); return true; })()`);
+        const clicked = await evalInPage(`(() => { const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${ident}"] .prompt-manager-toggle-action'); if (!el) return { ident: '${ident}', found: false }; el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); return { ident: '${ident}', found: true }; })()`);
+        if (!clicked?.found) fatal('5', `toggle control not found for ${ident}`);
         await until(async () => {
             const doc = (await api('GET', `/presets/${ffId}`)).json;
             return doc.loadouts[doc.activeLoadoutId].enabled[ident] === false;
@@ -722,8 +724,16 @@ async function main() {
         const slotAfter = fs.existsSync(slotFile) ? fs.statSync(slotFile).mtimeMs : 0;
         const untouched = stBefore === stAfter && slotBefore === slotAfter;
         await startProbe(TAB_A);
-        const t = await probeAll();
+        // cold boot: extension init (SETTINGS_LOADED) + bridge apply land
+        // after the preset select fills, so wait for convergence the same
+        // way check 4 does instead of probing immediately
         const view = (await api('GET', '/slot')).json;
+        await until(async () => {
+            const t = await probeAll();
+            return t.preset === SLOT_NAME
+                && JSON.stringify(t.prompt_order) === JSON.stringify(view.compiled.prompt_order[0].order);
+        }, 20000, 'cold tab applies slot');
+        const t = await probeAll();
         const applied = t.preset === SLOT_NAME
             && JSON.stringify(t.prompt_order) === JSON.stringify(view.compiled.prompt_order[0].order);
         const pass = untouched && applied;
@@ -734,7 +744,8 @@ async function main() {
     // ------------------------------------------------------------------ 8
     {
         // two tabs + API: latest write wins everywhere
-        await startProbe(TAB_B);
+        // (startTabB launches tab B's chromium itself; calling startProbe
+        // here would cleanupTabs() tab A away and kill its live CDP ws)
         await startTabB();
         await until(async () => (await probeAllB()).prompt_order.length > 0, 20000, 'tab B up');
         const demDoc = (await api('GET', `/presets/${demId}`)).json;
@@ -751,15 +762,29 @@ async function main() {
         };
         let evidence = '';
         let pass = true;
-        // API wins over A's click
-        evalInPage(clickToggle(leaf));
+        // API wins over A's click. A's click reaches the doc through the
+        // bridge's panel write-back (base->snapshot delta), so it lands a
+        // beat later than the click itself; firing the API toggle first
+        // would race the echo. Let the click land, then fire the API write
+        // — it is then genuinely the latest write and must win everywhere.
+        await evalInPage(clickToggle(leaf));
+        await until(async () => {
+            const doc = (await api('GET', `/presets/${demId}`)).json;
+            return doc.loadouts[doc.activeLoadoutId].enabled[leaf] === false;
+        }, 10000, 'A click write-back lands');
         await api('POST', `/presets/${demId}/ops`, { op: 'toggle', identifier: leaf, value: true });
         await until(async () => {
             const { a, b } = await readAll();
             return rowOf(a, leaf) === true && rowOf(b, leaf) === true;
         }, 10000, 'API-on settles in A+B');
-        // A's slider vs API
+        // A's slider vs API. A's slider reaches the doc via panel write-back
+        // (a beat after the input event), so settle it first; the API write
+        // is then genuinely the latest and must win.
         await setTemp(0.42, 'A');
+        await until(async () => {
+            const doc = (await api('GET', `/presets/${demId}`)).json;
+            return doc.settings?.temperature === 0.42;
+        }, 10000, 'A 0.42 write-back lands');
         await api('POST', `/presets/${demId}/ops`, { op: 'setSettings', settings: { temperature: 0.9 } });
         await until(async () => {
             const { slot, a, b } = await readAll();
@@ -768,8 +793,15 @@ async function main() {
         const { slot: s2 } = await readAll();
         pass = s2.compiled.temperature === 0.9;
         evidence = `latest write (0.9) in slot+A+B`;
-        // and the reverse order: API first, A's slider last
+        // and the reverse order: API first, A's slider last. The API write
+        // must land in the doc BEFORE A's slider fires, otherwise the panel
+        // echo and the reconcile it triggers can interleave (same race as
+        // phase 1); settled first, A's slider is genuinely the latest write.
         await api('POST', `/presets/${demId}/ops`, { op: 'setSettings', settings: { temperature: 0.42 } });
+        await until(async () => {
+            const slot = (await api('GET', '/slot')).json;
+            return slot.compiled.temperature === 0.42;
+        }, 10000, 'API 0.42 lands');
         await setTemp(0.66, 'A');
         await until(async () => {
             const { slot, a, b } = await readAll();
@@ -839,7 +871,9 @@ let portB = null;
 
 /** Launch a second chromium for tab B and attach the B websocket. */
 async function startTabB() {
-    cleanupTabs();
+    // only tab B: cleanupTabs() with no args would kill tab A's live chrome
+    // and leave its CDP ws permanently timed out (found by check 8)
+    cleanupTabs([TAB_B]);
     portB = await new Promise((resolve) => {
         const srv = http.createServer();
         srv.listen(0, '127.0.0.1', () => {
@@ -924,7 +958,7 @@ async function evalInPageB(expression) {
 
 main().catch((err) => {
     console.error('[check] crashed:', err?.stack ?? err);
+    report('crashed', false, String(err?.message ?? err).slice(0, 200));
     stopChrome();
-    process.exitCode = 1;
     finish();
 });
