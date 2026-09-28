@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Phase 1 acceptance as one repeatable script (PLAN Phase 1, checks 1–10
- * + 2b rescan + race). Deterministic: it sets up its own state
+ * + 2b rescan + race + race-blocked/race-flush-first/race-409). Deterministic: it sets up its own state
  * (dev/reset.sh + fixture import), holds and kills its own probe tabs,
  * and prints one PASS/FAIL line per check with short evidence. Exit 1 on
  * any FAIL, so it can double as the regression suite in later phases.
@@ -451,6 +451,9 @@ async function main() {
     const solaId = byName.get('Sola V2 Flame');
     const demId = byName.get('DEUS.EX.MACHINA.V2.5.ST');
     if (!ffId || !solaId || !demId) fatal('setup', `fixtures missing from library: FF=${ffId} Sola=${solaId} DEM=${demId}`);
+    // Shared pristine DEM snapshot for the race checks + check 8 restore
+    // baselines (the fixture state, before any probe applies anything)
+    const demDoc0 = (await api('GET', `/presets/${demId}`)).json;
 
     // Probe tab: one held tab drives checks 3–8; killed at the end.
     console.error('[check] starting probe tab…');
@@ -711,6 +714,222 @@ async function main() {
             pass ? `tab on ${view.desired.presetId === demId ? 'DEM' : '?'} rev=${view.rev} with toggled row visible` : 'tab did not converge to latest rev');
     }
 
+    // ------------------------------------------------------ race-blocked
+    {
+        // finding 7 (observed panel edit during an apply): the reconcile op's
+        // input blocker is not decorative. Hold the op's GET /slot with a
+        // page-side fetch hook, trigger a reconcile from an API ops write,
+        // and observe that user-like edits are REFUSED while held (no silent
+        // queuing, no lost edit): clickToggle returns false through the
+        // overlay, and a slider set races the flush instead of landing.
+        // Releasing then converges everything on the API's value. No sleeps
+        // as correctness conditions: the hold itself is the clock. No idle
+        // pre-gate either: arming the hold before firing the ops write
+        // guarantees the next reconcile parks on its GET (an SSE rev is only
+        // ignored once consumed, and consuming it takes a reconcile), and a
+        // busy queue only means the blocker is up for that reason too.
+        await evalInPage(HOLD_INSTALL);
+        const doc = (await api('GET', `/presets/${demId}`)).json;
+        const enabled = doc.loadouts[doc.activeLoadoutId].enabled;
+        const heldLeaf = Object.keys(enabled).find((k) => demDoc0.blocks[k]);
+        if (!heldLeaf) fatal('race-blocked', 'no leaf block to toggle on DEM');
+        const heldBefore = enabled[heldLeaf];
+        try {
+            // API write: the SSE 'preset' event enqueues the reconcile whose
+            // GET the hook then holds after the op's flush. A leftover queued
+            // op from the earlier checks can consume the hold with an EMPTY
+            // flush first; that is retryable (release, drain, re-arm), not a
+            // failure — bounded retries, each condition observable state.
+            let parked = null;
+            let ops = null;
+            for (let attempt = 1; attempt <= 4 && !parked; attempt++) {
+                await evalInPage(HOLD_BEGIN);
+                ops = api('POST', `/presets/${demId}/ops`, { op: 'toggle', identifier: heldLeaf, value: !heldBefore });
+                const deadline = Date.now() + 8000;
+                while (!parked && Date.now() < deadline) {
+                    if (await evalInPage(`!!document.querySelector('.pm-apply-blocker')`)) parked = true;
+                    else await sleep(250);
+                }
+                if (!parked) {
+                    await evalInPage(HOLD_RELEASE);
+                    await until(async () => (await evalInPage(`!!document.querySelector('.pm-apply-blocker')`)) === false, 15000, 'queue drains between race-blocked attempts');
+                }
+            }
+            if (!parked) throw new Error('race-blocked: no reconcile mounted the blocker under the hold in 4 attempts');
+            // parked mid-op: user-like edits must be REFUSED while held…
+            const click = await evalInPage(clickToggle(heldLeaf));
+            const slider = await evalInPage(`(() => { const el = document.getElementById('temp_openai'); el.value = 0.42; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`);
+            const stillHeld = await evalInPage(`!!window.__pmHold`);
+            if (!stillHeld) throw new Error('hold released early');
+            const opsStatus = (await ops).status;
+            const pass = click === false && slider === true && stillHeld && opsStatus === 200;
+            report('race-blocked: edits refused while reconcile holds', !!pass,
+                `click refused=${click === false} (overlay present=${parked}) slider raced=${slider === true} ops=${opsStatus}`);
+            // release: the parked GET completes, the apply lands the API state
+            await evalInPage(HOLD_RELEASE);
+            const slot = await until(async () => {
+                const s = (await api('GET', '/slot')).json;
+                const t = await probeAll();
+                const want = JSON.stringify(s.compiled.prompt_order[0].order);
+                return s.compiled !== null
+                    && JSON.stringify(t.prompt_order) === want
+                    && (t.dom.find((/** @type {any} */ r) => r.identifier === heldLeaf) ?? {}).enabled === !heldBefore
+                    ? s : null;
+            }, 15000, 'race-blocked convergence');
+            report('race-blocked: release converges to API state', !!slot,
+                `slot on ${slot?.desired?.presetId === demId ? 'DEM' : '?'} rev=${slot?.rev} row ${heldLeaf.slice(0, 10)}…=${!heldBefore} in tab+slot, blocker gone`);
+        } finally {
+            await releaseHold();
+            // restore the doc so later checks start from the fixture state
+            await api('POST', `/presets/${demId}/ops`, { op: 'toggle', identifier: heldLeaf, value: heldBefore });
+            await until(async () => {
+                const d = (await api('GET', `/presets/${demId}`)).json;
+                return d.loadouts[d.activeLoadoutId].enabled[heldLeaf] === heldBefore;
+            }, 8000, 'race-blocked doc restore');
+        }
+    }
+
+    // -------------------------------------------------- race-flush-first
+    {
+        // finding 7, lost-edit direction: a user slider edit made while a
+        // slot update is in flight must reach the server BEFORE the incoming
+        // state is applied over it (reconcileOp flushes first). 0.77 is set
+        // like a user, and the API write is fired in the SAME page turn so
+        // it cannot depend on debounce timing; the held GET then freezes the
+        // op deterministically between its flush and its GET. The op's
+        // flush posts 0.77, so 0.77 — the user's edit — is the last write
+        // everywhere. No idle pre-gate: a leftover queued op can consume
+        // the hold with an empty flush, which is retryable (release, drain,
+        // re-arm); the real proof is observing 0.77 land in the doc WHILE
+        // the hold is still armed.
+        await evalInPage(HOLD_INSTALL);
+        let tab = null;
+        try {
+            let attempt = 1;
+            for (; attempt <= 4 && !tab; attempt++) {
+                // user edit + API write in ONE page-side evaluate: the
+                // slider events fire first, then the API setSettings is
+                // posted from the page (same session, same CSRF path as the
+                // bridge's own calls)
+                const fired = await evalInPage(`(async () => {
+                    const el = document.getElementById('temp_openai');
+                    el.value = 0.77;
+                    el.dispatchEvent(new Event('input',{bubbles:true}));
+                    el.dispatchEvent(new Event('change',{bubbles:true}));
+                    const csrf = (await (await fetch('/csrf-token', { credentials: 'include' })).json()).token;
+                    const res = await fetch('/api/plugins/st-preset-manager/presets/${demId}/ops', {
+                        method: 'POST', credentials: 'include',
+                        headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+                        body: JSON.stringify({ op: 'setSettings', settings: { temperature: 0.31 } }),
+                    });
+                    return res.status;
+                })()`);
+                if (fired !== 200) fatal('race-flush-first', `page-side API write failed: ${fired}`);
+                await evalInPage(HOLD_BEGIN);
+                // flush-first, observed: 0.77 must reach the doc while the
+                // GET is still parked — before any incoming state could be
+                // applied over it. If a straggler parked with an empty
+                // flush instead, nothing lands under the hold: release,
+                // drain, re-arm, try again.
+                const deadline = Date.now() + 8000;
+                while (!tab && Date.now() < deadline) {
+                    const docT = (await api('GET', `/presets/${demId}`)).json;
+                    if (docT.settings?.temperature === 0.77) {
+                        const holdStill = await evalInPage(`!!window.__pmHold`);
+                        if (!holdStill) throw new Error('hold released early');
+                        const stillHeld = await evalInPage(`!!document.querySelector('.pm-apply-blocker')`);
+                        report('race-flush-first: user edit flushed before held GET', true,
+                            `doc=0.77 while blocker=${stillHeld} and GET still held (user 0.77 beat the incoming 0.31)`);
+                        // release: the parked GET returns the 0.77 slot and
+                        // applies it; everything converges with no straggler
+                        await evalInPage(HOLD_RELEASE);
+                        tab = await until(async () => {
+                            const t = await probeAll();
+                            const slotT = (await api('GET', '/slot')).json;
+                            return slotT.compiled?.temperature === 0.77 && t.temperature === 0.77
+                                ? { slot: slotT, tab: t } : null;
+                        }, 15000, 'race-flush-first 0.77 in slot+tab');
+                        break;
+                    }
+                    await sleep(250);
+                }
+                if (!tab) {
+                    await evalInPage(HOLD_RELEASE);
+                    await until(async () => (await evalInPage(`!!document.querySelector('.pm-apply-blocker')`)) === false, 15000, 'queue drains between flush-first attempts');
+                }
+            }
+            report('race-flush-first: user edit wins everywhere', !!tab,
+                tab ? `slot=${tab.slot.compiled.temperature} tab=${tab.tab.temperature} (flush reached the server before the GET)` : '0.77 never landed under the hold in 4 attempts');
+        } finally {
+            await releaseHold();
+            // restore: API write is the latest, converges everywhere
+            await api('POST', `/presets/${demId}/ops`, { op: 'setSettings', settings: { temperature: demDoc0.settings?.temperature ?? 1 } });
+            await until(async () => {
+                const { slot, a } = await (async () => ({ slot: (await api('GET', '/slot')).json, a: await probeAll() }))();
+                return slot.compiled?.temperature === (demDoc0.settings?.temperature ?? 1) && a.temperature === (demDoc0.settings?.temperature ?? 1);
+            }, 8000, 'race-flush-first restore');
+        }
+    }
+
+    // ---------------------------------------------------------- race-409
+    {
+        // finding 7, stale-base direction: a panel POST computed against the
+        // tab's OLD base must 409 after a slot/load (slotChangedRev guard)
+        // and leave preset X's document untouched — no cross-preset delta
+        // pour into preset Y. While the reconcile's GET is held, load
+        // preset Y via the API and replay the panel POST from the page with
+        // the tab's current (stale) base + a flipped toggle. No idle
+        // pre-gate: arming the hold first guarantees the reconcile the load
+        // triggers parks on its GET, so the replayed POST finds the exact
+        // state it was computed against.
+        await evalInPage(HOLD_INSTALL);
+        // tab is attached to DEM (X); capture its live base + rev BEFORE the
+        // try so the finally cannot touch a half-captured leaf
+        const xDoc = (await api('GET', `/presets/${demId}`)).json;
+        const enabled = xDoc.loadouts[xDoc.activeLoadoutId].enabled;
+        const soloLeaf = Object.keys(enabled).find((k) => demDoc0.blocks[k]);
+        const soloBefore = enabled[soloLeaf];
+        try {
+            await evalInPage(HOLD_BEGIN);
+            // Y's load bumps rev; slotChangedRev = rev parks ABOVE the tab's baseRev
+            const loadY = await api('POST', '/slot/load', { presetId: solaId });
+            if (loadY.status !== 200) fatal('race-409', `slot/load Sola failed: ${loadY.text.slice(0, 100)}`);
+            const replay = await evalInPage(`(async () => {
+                const b = globalThis.__pmStarted.bridge;
+                const csrf = (await (await fetch('/csrf-token', { credentials: 'include' })).json()).token;
+                const snapshot = JSON.parse(JSON.stringify(b.baseSnapshot));
+                const order = snapshot.prompt_order[snapshot.prompt_order.length - 1].order;
+                const row = order.find((o) => o.identifier === '${soloLeaf}');
+                row.enabled = !row.enabled;
+                const res = await fetch('/api/plugins/st-preset-manager/slot/panel', {
+                    method: 'POST', credentials: 'include',
+                    headers: { 'Content-Type': 'application/json', 'x-csrf-token': csrf },
+                    body: JSON.stringify({ clientId: 'race-409-replay', baseRev: b.appliedRev, base: b.baseSnapshot, snapshot }),
+                });
+                return { status: res.status, body: await res.json().catch(() => null) };
+            })()`);
+            const xAfter = (await api('GET', `/presets/${demId}`)).json;
+            const untouched = xAfter.loadouts[xAfter.activeLoadoutId].enabled[soloLeaf] === soloBefore;
+            const pass = replay?.status === 409 && untouched;
+            report('race-409: stale-base panel replay rejected, X unchanged', !!pass,
+                `panel replay status=${replay?.status} (${replay?.body?.error ? String(replay.body.error).slice(0, 60) : 'no body'}), DEM ${soloLeaf.slice(0, 10)}… still ${soloBefore}`);
+            await evalInPage(HOLD_RELEASE);
+            // the queued reconcile (SSE 'slot' event from the load) now gets
+            // through: the tab converges onto Y
+            const yView = await until(async () => {
+                const s = (await api('GET', '/slot')).json;
+                const t = await probeAll();
+                return s.desired?.presetId === solaId
+                    && JSON.stringify(t.prompt_order) === JSON.stringify(s.compiled.prompt_order[0].order)
+                    ? s : null;
+            }, 20000, 'race-409 tab converges to Sola');
+            report('race-409: released tab converges to loaded preset Y', !!yView,
+                yView ? `tab on ${yView.desired.presetId === solaId ? 'Sola' : '?'} rev=${yView.rev}` : 'tab did not reach Sola after release');
+        } finally {
+            await releaseHold();
+        }
+    }
+
     // ------------------------------------------------------------------ 7
     {
         // cold tab: kill probe, load DEM, settings.json untouched, fresh tab applies desired
@@ -885,6 +1104,53 @@ function clickToggle(/** @type {string} */ ident) {
 function rowOf(probeView, ident) {
     const row = probeView.dom.find((/** @type {any} */ r) => r.identifier === ident);
     return row ? row.enabled : null;
+}
+
+// ------------------------------------------------------------------ race helpers
+
+/**
+ * Page-side fetch hook for the deterministic race windows (finding 7):
+ * HOLD_INSTALL wraps window.fetch so a GET …/st-preset-manager/slot is held
+ * until HOLD_RELEASE resolves window.__pmHold — the bridge's reconcile op
+ * then freezes mid-flight, after its flushPanel and BEFORE its GET. The
+ * panel POST (/slot/panel) and everything else pass through untouched
+ * (method gate); EventSource does not use fetch at all. Each check wraps
+ * its body in try/finally { releaseHold() } so a failure cannot leak the
+ * hook into the next check.
+ */
+const HOLD_INSTALL = `(() => {
+    if (window.__pmRealFetch) return false;
+    const real = window.fetch.bind(window);
+    window.__pmRealFetch = real;
+    window.__pmHold = null;
+    window.__pmRelease = null;
+    window.__pmHeld = 0;
+    window.fetch = function (input, init) {
+        const url = typeof input === 'string' ? input : (input && input.url) || '';
+        const method = (init && init.method) || (input && input.method) || 'GET';
+        if (window.__pmHold && method === 'GET' && url.includes('/st-preset-manager/slot')) {
+            window.__pmHeld += 1;
+            const p = window.__pmHold.then(() => real(input, init));
+            p.finally(() => { window.__pmHold = null; });
+            return p;
+        }
+        return real(input, init);
+    };
+    return true;
+})()`;
+const HOLD_BEGIN = `(() => { window.__pmHold = new Promise((r) => { window.__pmRelease = r; }); return true; })()`;
+const HOLD_RELEASE = `(() => { const r = window.__pmRelease; window.__pmRelease = null; if (r) r(); return !!r; })()`;
+const HOLD_UNINSTALL = `(() => {
+    window.__pmHold = null;
+    window.__pmRelease = null;
+    if (window.__pmRealFetch) { window.fetch = window.__pmRealFetch; window.__pmRealFetch = null; }
+    return true;
+})()`;
+
+/** Release + remove the fetch hold hook, however the check ended. */
+async function releaseHold() {
+    try { await evalInPage(HOLD_RELEASE); } catch { /* page gone */ }
+    try { await evalInPage(HOLD_UNINSTALL); } catch { /* page gone */ }
 }
 
 // ------------------------------------------------------------------ tab B
