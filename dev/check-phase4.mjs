@@ -518,6 +518,78 @@ async function main() {
         return `edit 1.33 during the held report -> mock global 1.33, ST ${c.s.temperature}; FF Kimi override kept ${kimiOv}; mock restored to ${mockT}`;
     });
 
+    // ------------------------------------------------------------------ 2d
+    /**
+     * B = Mock's report is held so an ST edit is a transition edit; B's edit
+     * POST is held; profile C loads (optionally with an ST-side clamp to 1,
+     * so C's recorded transition values differ from B's edit); release.
+     */
+    const transitionRace = async (/** @type {string} */ cProfile, /** @type {string} */ cModel, /** @type {boolean} */ clamp, /** @type {number} */ V) => {
+      try {
+        await loadViaLibrary(ids.ff);
+        await ensureModel(KIMI, HAP);
+        const mockT = (await getModels()).models[mockName].tuning.temperature;
+        const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+        must(kimiOv !== V, `precondition: ${V} is a fresh value`);
+        if (mockT === V) must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } })).status === 200, 'reset mock tuning');
+        await probe.eval(`(() => {
+            window.__chkErrors = [];
+            window.__chkConsoleError = window.__chkConsoleError ?? console.error;
+            console.error = (...a) => { window.__chkErrors.push(a.map((x) => String(x?.stack ?? x)).join(' ')); window.__chkConsoleError(...a); };
+            window.addEventListener('unhandledrejection', (e) => window.__chkErrors.push(String(e.reason?.stack ?? e.reason)));
+            return true; })()`);
+        try {
+            // B = Mock: its report is held, so the edit below is a transition edit
+            await holdFetch('/api/plugins/st-preset-manager/slot/model');
+            must(await pickStProfile('Mock'), 'dropdown pick failed');
+            await until(() => probe.eval('window.__chkHeld === true'), 10000, 'report for Mock held');
+            must(await setSlider('temp_openai', V), 'no #temp_openai');
+            await sleep(1500); // ST's debounced save queues the panel op
+            // hold B's genuine-edit POST, then let B's report go
+            await probe.eval('(() => { const r = window.__chkRelease; window.__chkRelease = undefined; r?.(); return true; })()');
+            await holdFetch('/api/plugins/st-preset-manager/slot/panel', String(V));
+            await until(() => probe.eval('window.__chkHeld === true'), 10000, 'B\'s edit POST held');
+            // C loads while B's edit is in flight
+            if (clamp) {
+                await probe.eval(`(() => {
+                    const c = SillyTavern.getContext();
+                    const fn = () => {
+                        c.eventSource.removeListener(c.eventTypes.CONNECTION_PROFILE_LOADED, fn);
+                        c.chatCompletionSettings.temp_openai = 1;
+                        const el = document.getElementById('temp_openai'); if (el) el.value = 1;
+                    };
+                    c.eventSource.makeFirst(c.eventTypes.CONNECTION_PROFILE_LOADED, fn);
+                    return true; })()`);
+            }
+            must(await pickStProfile(cProfile), 'dropdown pick failed');
+            await until(async () => (await st()).model === cModel, 8000, `ST on ${cProfile} (C)`);
+            await sleep(500);
+        } finally {
+            await unhold();
+        }
+        await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+        const c = await until(async () => {
+            const x = await converged();
+            return x && x.s.model === cModel ? x : null;
+        }, 15000, `ST settled on ${cProfile}`);
+        await sleep(1500);
+        const ff = await getDoc(ids.ff);
+        const c2 = await st();
+        must(c2.temperature === kimiOv, `ST on ${cProfile} shows ${c2.temperature}, FF Kimi override is now ${ff.tuningOverrides[KIMI].temperature} (was ${kimiOv})`);
+        must(ff.tuningOverrides[KIMI].temperature === kimiOv, `FF Kimi override became ${ff.tuningOverrides[KIMI].temperature} (B's edit went to C's Model)`);
+        must((await getModels()).models[KIMI].tuning.temperature !== V, `Kimi global got ${V}`);
+        const errs = (await probe.eval('window.__chkErrors')).filter((/** @type {string} */ e) => /TypeError|Cannot (set|read) propert/.test(e));
+        await probe.eval('(() => { if (window.__chkConsoleError) console.error = window.__chkConsoleError; return true; })()');
+        must(errs.length === 0, `errors: ${errs[0]?.slice(0, 200)}`);
+        must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: mockT } })).status === 200, 'restore mock tuning');
+        return `B (mock) edit ${V} -> mock global; C (${cProfile}${clamp ? ', ST clamps to 1 on load' : ''}) at the FF Kimi override ${c.s.temperature}, override unchanged; no errors`;
+      } finally {
+        await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+      }
+    };
+    await check('2d a transition edit in flight when another profile loads (ST clamps on that load) stays on its own Model', () => transitionRace('Kimi via nanogpt', NANO, true, 1.44));
+    await check('2e a transition edit in flight when the tab switches back to its original connection lands without errors', () => transitionRace('Kimi via hapuppy', HAP, false, 1.47));
+
     // ------------------------------------------------------------------ 3
     await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
         await loadViaLibrary(ids.ff);

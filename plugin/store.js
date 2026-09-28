@@ -869,9 +869,15 @@ export class Store {
                     for (const n of names) delete loadout.overrides[n];
 
                     // pick-one winner: Model precedence (order of `names`)
-                    // decides, not merged's key insertion order. First Model
-                    // in `names` whose own override chose a member of the
-                    // group wins (last-in-that-map true if it chose several).
+                    // decides. Walk `names`; for each Model's own override
+                    // map `m`, if `m` has any group member true, the last
+                    // such member in `m`'s key order wins and we stop. Else
+                    // if `m` names every group member and all are false,
+                    // that Model explicitly chose none: every member goes
+                    // false and we stop. Otherwise that Model didn't decide
+                    // (doesn't mention the group, or only some members) —
+                    // move to the next Model. If no Model decides, `merged`
+                    // is left as-is.
                     for (const grp of collectGroups(doc)) {
                         if (grp.cardinality !== 'pick-one') continue;
                         const members = [];
@@ -879,19 +885,26 @@ export class Store {
                         for (const opt of grp.options ?? []) members.push(opt);
                         const ids = members.map((leaf) => leaf.ref ?? leaf.identifier).filter((id) => id != null);
                         let winner;
+                        let decided = false;
                         for (const n of names) {
-                            const enabled = originalEnabled[n];
-                            if (!enabled) continue;
+                            const m = originalEnabled[n];
+                            if (!m) continue;
                             let candidate;
-                            for (const k of Object.keys(enabled)) {
-                                if (ids.includes(k) && enabled[k] === true) candidate = k;
+                            for (const k of Object.keys(m)) {
+                                if (ids.includes(k) && m[k] === true) candidate = k;
                             }
                             if (candidate !== undefined) {
                                 winner = candidate;
+                                decided = true;
+                                break;
+                            }
+                            const allNamedFalse = ids.every((id) => Object.prototype.hasOwnProperty.call(m, id) && m[id] === false);
+                            if (allNamedFalse) {
+                                decided = true;
                                 break;
                             }
                         }
-                        if (winner !== undefined) {
+                        if (decided) {
                             for (const id of ids) merged[id] = id === winner;
                         }
                     }

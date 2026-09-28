@@ -588,9 +588,17 @@ export class Bridge {
      * — a TUNING_KEYS value that changed since is a real user edit, not
      * ST's own transition mutation. Any such edits are POSTed in a SECOND
      * request, on top of the restore, addressed at the NEW connection
-     * (raw = currentRaw()) so they land on the new Model instead of being
-     * silently restored away, and are then folded into `_transition.tuning`
-     * so they are never resent.
+     * (raw = the raw the edit was diffed against) so they land on the new
+     * Model instead of being silently restored away, and are then folded
+     * into `_transition.tuning` — but only if `_transition` still IS that
+     * same object: `currentRaw()` and `this._transition` are read ONCE at
+     * flush start (`liveRaw`/`tr`) and reused for the whole flush, because
+     * either can change out from under an in-flight await (a second
+     * transition superseding the one this flush diffed against). Without
+     * this, the second POST could address the wrong raw, or the fold could
+     * write a stale genuine edit into an unrelated newer transition (and
+     * make its own untouched value look genuine later), or the fold could
+     * throw against a `_transition` the connection switch already nulled.
      * @param {any} [given] a snapshot taken earlier; skips the fresh
      *   snapshot when provided
      * @returns {Promise<any>} the snapshot sent, or null if nothing was sent
@@ -607,13 +615,15 @@ export class Bridge {
         if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
         let snapshot = given ?? await snapshotPanel();
         if (!snapshot) return null;
+        const liveRaw = currentRaw();
+        const tr = this._transition;
         /** @type {Record<string, any>|null} genuine tuning edits made since the transition (null: no transition to diff against) */
         let genuine = null;
-        /** @type {Record<string, any>|null} this._transition.tuning, only when it still names the CURRENT raw */
+        /** @type {Record<string, any>|null} tr.tuning, only when it still names the CURRENT raw */
         let transitionTuning = null;
-        if (this.baseRaw && this.hashOf(currentRaw()) !== this.hashOf(this.baseRaw)) {
+        if (this.baseRaw && this.hashOf(liveRaw) !== this.hashOf(this.baseRaw)) {
             const S = snapshot;
-            transitionTuning = this._transition && this.hashOf(this._transition.raw) === this.hashOf(currentRaw()) ? this._transition.tuning : null;
+            transitionTuning = tr && this.hashOf(tr.raw) === this.hashOf(liveRaw) ? tr.tuning : null;
             genuine = {};
             if (transitionTuning) {
                 for (const key of TUNING_KEYS) {
@@ -641,7 +651,7 @@ export class Bridge {
                     baseRev: this.appliedRev,
                     base: this.baseSnapshot,
                     snapshot,
-                    raw: this.baseRaw ?? currentRaw(),
+                    raw: this.baseRaw ?? liveRaw,
                 });
             } catch (err) {
                 if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
@@ -697,7 +707,7 @@ export class Bridge {
                     baseRev: this.appliedRev,
                     base: B2,
                     snapshot: S2,
-                    raw: currentRaw(),
+                    raw: tr.raw,
                 });
             } catch (err) {
                 if (/** @type {Error & {status?: number}} */ (err)?.status !== 409) throw err;
@@ -710,8 +720,19 @@ export class Bridge {
             // forces the reconcile that follows to re-apply the new Model's
             // compile instead of comparing a hash taken against the old one
             this.appliedHash = null;
-            // never resend: fold the sent edits into the transition tuning
-            for (const key of Object.keys(genuine)) this._transition.tuning[key] = genuine[key];
+            // never resend: fold the sent edits into the transition tuning —
+            // unless a newer transition has since replaced this one (a
+            // replaced or cleared `_transition` is left alone, never thrown on)
+            if (this._transition === tr) {
+                for (const key of Object.keys(genuine)) tr.tuning[key] = genuine[key];
+            }
+            // the sent values are accounted for: if the tab returns to its
+            // baseline connection before the next apply, the panel still
+            // shows them, and they must not be re-read as an edit made under
+            // that connection (they belong to tr.raw's Model)
+            if (this.baseSnapshot) {
+                for (const key of Object.keys(genuine)) this.baseSnapshot[key] = genuine[key];
+            }
             this.emit({ slot: { rev: res2.rev, desired: null, compiled: res2.compiled, hash: res2.hash }, attached: true });
         }
         return snapshot;

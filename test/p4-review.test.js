@@ -271,3 +271,43 @@ test('R2-4 rename migrates a preset whose folder was given with a trailing slash
     assert.deepEqual(res.migrated, [imp.id]);
     assert.deepEqual(store.getPreset(imp.id).tuningOverrides, { Alpha: { temperature: 0.9 } });
 });
+
+// ------------------------------------------------------------ round 3
+
+test('R3-1 merge: an explicit all-off (none) choice of a higher-priority Model wins over a lower one\'s option', async () => {
+    const { store, id, lid } = await fixture();
+    const doc = store.getPreset(id);
+    doc.loadouts[lid].overrides = {
+        A: { enabled: { hdr: false, a: false, b: false } },
+        B: { enabled: { hdr: false, a: false, b: true } },
+    };
+    await store.savePreset(doc);
+    await store.mergeModelsTx(['A', 'B'], 'AB');
+    const ov = store.getPreset(id).loadouts[lid].overrides.AB.enabled;
+    assert.equal(ov.a, false, JSON.stringify(ov));
+    assert.equal(ov.b, false, `A chose none; B's b must not win: ${JSON.stringify(ov)}`);
+    assert.equal(ov.hdr, false);
+});
+
+test('R3-1 merge: a Model that does not mention the group falls through to the next one', async () => {
+    const { store, id, lid } = await fixture();
+    const doc = store.getPreset(id);
+    doc.loadouts[lid].overrides = { A: { enabled: { c: false } }, B: { enabled: { a: false, b: true } } };
+    await store.savePreset(doc);
+    await store.mergeModelsTx(['A', 'B'], 'AB');
+    const ov = store.getPreset(id).loadouts[lid].overrides.AB.enabled;
+    assert.equal(ov.b, true, JSON.stringify(ov));
+    assert.equal(ov.a, false);
+    assert.equal(ov.c, false);
+});
+
+test('R3-1 merge: a partial mention (one member off, none on) is not a choice; the next Model decides', async () => {
+    const { store, id, lid } = await fixture();
+    const doc = store.getPreset(id);
+    doc.loadouts[lid].overrides = { A: { enabled: { a: false } }, B: { enabled: { b: true } } };
+    await store.savePreset(doc);
+    await store.mergeModelsTx(['A', 'B'], 'AB');
+    const ov = store.getPreset(id).loadouts[lid].overrides.AB.enabled;
+    assert.equal(ov.b, true, JSON.stringify(ov));
+    assert.equal(ov.a, false);
+});

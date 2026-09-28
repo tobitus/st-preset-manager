@@ -310,8 +310,9 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 - **Model rename / merge** (Settings tab) are plugin transactions (`POST /models/rename`,
   `POST /models/merge`) that re-key every document's `tuningOverrides[Model]` and
   `loadouts[*].overrides[Model]` with the registry, published as one step; a merge keeps
-  the first-listed Model's value per key (tuning) / identifier (override, pick-one
-  completed), and each touched document gets a labelled revision holding the old values.
+  the first-listed Model's value per key (tuning) / identifier (override); for each pick-one
+  group the first Model that chose in it decides: an option on, or every member listed off
+  (= none); a Model that does not list all members off without choosing falls through, and each touched document gets a labelled revision holding the old values.
 
 ### 1.6 REST API (`/api/plugins/st-preset-manager/…`; JSON; all non-GET need cookie + `x-csrf-token`)
 
