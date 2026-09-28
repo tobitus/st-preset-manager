@@ -2,13 +2,13 @@
  * Preset Manager v2 — extension entry. ST loads this file as
  * <script type=module> (extensions.js:813-819).
  *
- * Phase 1 surface: a floating wand-menu entry + icon opening a minimal
- * window with a Library tab (list, tags, "load into slot", loadout select)
- * and — when the plugin is missing — only the install notice (acceptance 15).
+ * Surface: a floating wand-menu entry + icon opening the main window
+ * (Library tab, Presets tab) and — when the plugin is missing — only the
+ * install notice (acceptance 15).
  */
-import { pluginHealth, api, ctx } from './ext/st.js';
+import { pluginHealth, ctx } from './ext/st.js';
 import { Bridge } from './ext/bridge.js';
-import { openWindow, renderLibrary } from './ext/window.js';
+import { openWindow, openMainWindow } from './ext/window.js';
 
 const NOTICE_HTML = `
 <div class="pm-install-notice" style="padding:16px;max-width:420px;line-height:1.5">
@@ -40,34 +40,9 @@ async function start() {
     }
 
     await bridge.start();
-    registerMenu(() => {
-        const w = openWindow({ title: 'Preset Manager', content: '<div class="pm-root"></div>' });
-        renderLibrary(/** @type {HTMLElement} */ (w.body), bridge);
-        void refreshLibrary(w.body, bridge);
-    });
+    registerMenu(() => openMainWindow(bridge));
 
     win.__pmStarted = { bridge, stop: () => bridge.stop() };
-}
-
-/**
- * @param {HTMLElement} root
- * @param {Bridge} bridge
- */
-async function refreshLibrary(root, bridge) {
-    try {
-        const items = await api('GET', '/library');
-        const slot = await api('GET', '/slot');
-        renderLibrary(root, bridge, { items, desired: slot.desired });
-    } catch (err) {
-        root.querySelector('.pm-library')?.replaceChildren(errorDiv(/** @type {Error} */ (err)));
-    }
-}
-
-function errorDiv(/** @type {Error} */ err) {
-    const div = document.createElement('div');
-    div.className = 'pm-error';
-    div.textContent = `Preset Manager: ${err.message}`;
-    return div;
 }
 
 function registerMenu(/** @type {() => void} */ open) {

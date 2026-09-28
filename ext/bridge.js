@@ -2,7 +2,9 @@
  * Live bridge (PLAN §1.4): SSE push + tab reconciliation + panel write-back.
  *
  * One serial op queue (a promise chain) carries EVERYTHING that reads or
- * writes ST's preset state: `reconcile` ops and `panel` ops. No op ever
+ * writes ST's preset state: `reconcile` ops, `panel` ops, and `edit` ops
+ * (one UI write per edit op: flush unsent panel edits, run the write, then
+ * enqueue a reconcile so the live slot converges). No op ever
  * calls another op directly — ops only ENQUEUE follow-ups — so an op can
  * never observe a half-applied preset, and a queued follow-up always
  * re-reads the latest state instead of replaying a stale view.
@@ -144,6 +146,31 @@ export class Bridge {
     }
 
     /**
+     * Run a UI write as ONE op on the serial op queue (PLAN §1.4: one
+     * serial op queue). Unsent ST-panel edits are flushed first so the
+     * server receipt order stays most-recent-wins, and the apply overlay is
+     * up for the whole op so no panel edit can interleave. A reconcile is
+     * enqueued afterwards (success or failure) so the live slot converges
+     * even before the SSE echo. NOT coalesced: no `key`, every UI write
+     * runs.
+     * @template T
+     * @param {() => Promise<T>} fn
+     * @returns {Promise<T>} `fn()`'s result; errors propagate to the caller
+     */
+    edit(fn) {
+        return this._enqueue(async () => {
+            this._setApplyOverlay(true);
+            try {
+                if (currentPresetName() === SLOT_NAME && this.baseSnapshot) await this.flushPanel();
+                return await fn();
+            } finally {
+                this._setApplyOverlay(false);
+                this.enqueueReconcile();
+            }
+        });
+    }
+
+    /**
      * reconcile op: flush any unsent panel edits FIRST (so a user edit made
      * while an update was in flight reaches the server before incoming
      * state is applied over it — server receipt order = most recent wins),
@@ -278,6 +305,9 @@ export class Bridge {
                 blocker.style.pointerEvents = 'auto';
                 blocker.style.cursor = 'wait';
                 blocker.__pmKeydown = (/** @type {any} */ ev) => {
+                    // the v2 window's own shortcuts are queued edit ops (bridge.edit):
+                    // they never interleave an apply, so they are not blocked
+                    if (ev.target?.closest?.('#pm-window')) return;
                     ev.stopImmediatePropagation();
                 };
                 el.style.pointerEvents = 'none';
@@ -308,6 +338,9 @@ export class Bridge {
                 // no origin checks: the queue + hash gate make our own echo a
                 // cheap no-op (re-GET returns the hash we already applied)
                 if (msg.rev > this.appliedRev) this.enqueueReconcile();
+                // also surface the event (e.g. the Presets tab re-fetches
+                // docs changed elsewhere)
+                this.emit({ event: msg });
             } else {
                 this.emit({ event: msg });
             }

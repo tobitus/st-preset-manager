@@ -9,7 +9,7 @@
  * public/scripts/. This is how third-party extensions import ST modules.
  * The plugin mount (plugins/st-preset-manager) never loads browser code.
  */
-import { getPresetApplicationPromise, getChatCompletionPreset } from '../../../../openai.js';
+import { getPresetApplicationPromise, getChatCompletionPreset, promptManager } from '../../../../openai.js';
 
 /** @returns {any} SillyTavern.getContext() */
 export function ctx() {
@@ -176,6 +176,12 @@ export async function applyCompiledToSlot(compiled) {
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
+    // ST re-renders the prompt manager on OAI_PRESET_CHANGED_AFTER only
+    // through its 1 s renderDebounced (PromptManager.js:818-831), so the
+    // panel's rows would lag the applied state by a second (acceptance 9 and
+    // the v2 window's toggles have a 2 s budget). Render now, without the
+    // token-count dry run; the debounced render still follows with counts.
+    promptManager?.render(false);
     // ST sanitizes the name for the filesystem; use what it reports back.
     return ctx().chatCompletionSettings.preset_settings_openai ?? SLOT_NAME;
 }

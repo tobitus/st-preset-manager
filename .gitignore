@@ -9,3 +9,4 @@ dev/*.log
 dev/.cookies.jar
 dev/*.cookies
 dev/.*.cookies.jar
+dev/shots/

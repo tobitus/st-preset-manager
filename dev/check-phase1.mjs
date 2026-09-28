@@ -26,21 +26,17 @@
  *   - comparison: whitespace-normalized containment of each enabled
  *     non-marker block's expanded text in the mock-captured prompt.
  */
-import { spawn, execSync, execFileSync } from 'node:child_process';
+import { execSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
-import os from 'node:os';
-import crypto from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 
-const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const ST_URL = process.env.ST_URL ?? 'http://127.0.0.1:8002';
-const BASE = `${ST_URL}/api/plugins/st-preset-manager`;
+import {
+    BASE, CHROME, FF, Probe, REPO, SLOT_NAME, ST_URL,
+    cleanupTabs, createApi, createReporter, httpJson, sleep, until,
+} from './harness.mjs';
+
 const MOCK = 'http://127.0.0.1:8099';
-const CHROME = '/usr/bin/chromium-browser';
-const FF = 'Freaky Frankenstein 5.4 Internal States (2)';
-const SLOT_NAME = '⟨PM⟩ working';
 const TAB_A = 'chk-a';
 const TAB_B = 'chk-b';
 const PERSONA = 'Jon';       // dev/seed-settings.mjs seeds username: "Jon"
@@ -48,235 +44,50 @@ const CHARNAME = 'Assistant'; // dev seed character
 
 // ------------------------------------------------------------------ results
 
-const results = [];
-/** @param {string} name @param {boolean} pass @param {string} evidence */
-function report(name, pass, evidence) {
-    results.push({ name, pass, evidence });
-    console.log(`${pass ? 'PASS' : 'FAIL'} ${name}${evidence ? ` — ${evidence}` : ''}`);
-}
-/** @param {string} name @param {string} evidence @returns {never} */
-function fatal(name, evidence) {
-    report(name, false, evidence);
-    console.error('aborting: setup failure above');
-    finish();
-}
-function finish() {
-    const failed = results.filter((r) => !r.pass);
-    console.log(`\n${results.length - failed.length}/${results.length} checks PASS`);
-    process.exit(failed.length ? 1 : 0);
-}
+const { report, fatal, finish, onExit } = createReporter();
+// every fatal()/finish() path kills both probe chromia before exiting
+onExit(stopChrome);
 process.on('exit', () => {
-    cleanupTabs();
+    cleanupTabs([TAB_A, TAB_B]);
 });
 /** @param {string[]} only */
 const wanted = (/** @type {string} */ name) => process.argv.slice(2).length === 0 || process.argv.slice(2).includes(name);
 
-const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
-
-/** GET http://127.0.0.1:<port><pathPart> as JSON. @param {number} port @param {string} pathPart @returns {Promise<any>} */
-function httpJson(port, pathPart) {
-    return new Promise((resolve, reject) => {
-        http.get({ host: '127.0.0.1', port, path: pathPart }, (res) => {
-            let d = '';
-            res.on('data', (c) => (d += c));
-            res.on('end', () => {
-                try { resolve(JSON.parse(d)); } catch (e) { reject(e); }
-            });
-        }).on('error', reject);
-    });
-}
-
 // ------------------------------------------------------------------ http api
 
-const cookieJar = path.join(REPO, 'dev', '.check-phase1.cookies.jar');
-let csrfToken = null;
-
-/** @param {string} method @param {string} pathPart @param {any} [body] @returns {Promise<{status:number, json:any, text:string, ms:number}>} */
-async function api(method, pathPart, body = undefined) {
-    for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-            return await apiOnce(method, pathPart, body);
-        } catch (err) {
-            if (attempt === 2) throw err;
-            await sleep(1500); // container restart window: socket hang up
-        }
-    }
-    throw new Error('unreachable');
-}
-
-/** @param {string} method @param {string} pathPart @param {any} [body] @returns {Promise<{status:number, json:any, text:string, ms:number}>} */
-function apiOnce(method, pathPart, body = undefined) {
-    return new Promise((resolve, reject) => {
-        const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
-        const req = http.request(`${BASE}${pathPart}`, {
-            method,
-            host: '127.0.0.1', port: 8002,
-            headers: {
-                ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}),
-                ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),
-                ...(fs.existsSync(cookieJar) ? { cookie: fs.readFileSync(cookieJar, 'utf8').trim() } : {}),
-            },
-        }, (res) => {
-            let d = '';
-            res.on('data', (c) => (d += c));
-            res.on('end', () => {
-                let json = null;
-                try { json = JSON.parse(d); } catch { /* stream endpoints */ }
-                resolve({ status: res.statusCode ?? 0, json, text: d, ms: 0 });
-            });
-        });
-        req.on('error', reject);
-        if (data) req.write(data);
-        req.end();
-    });
-}
-
-/** GET /csrf-token, remember cookie + token (session-bound). */
-async function primeSession() {
-    const jar = path.join(REPO, 'dev', '.cookies.jar'); // st-api.sh's jar, same session rules
-    void jar;
-    let raw = null;
-    for (let attempt = 0; attempt < 10; attempt++) {
-        try {
-            raw = await new Promise((resolve, reject) => {
-                http.get(`${ST_URL}/csrf-token`, (res) => {
-                    let d = '';
-                    res.on('data', (c) => (d += c));
-                    res.on('end', () => resolve({ setCookie: res.headers['set-cookie'] ?? [], body: d }));
-                }).on('error', reject);
-            });
-            if (raw.setCookie && raw.body.includes('token')) break;
-        } catch { /* restart window */ }
-        await sleep(1500);
-    }
-    const cookies = Array.isArray(raw?.setCookie)
-        ? raw.setCookie.map((/** @type {string} */ c) => c.split(';')[0]).join('; ')
-        : '';
-    if (!cookies) fatal('session', 'no session cookie from /csrf-token');
-    fs.writeFileSync(cookieJar, cookies);
-    csrfToken = JSON.parse(raw.body).token;
-}
+const { api, apiOnce, primeSession } = createApi({
+    jar: path.join(REPO, 'dev', '.check-phase1.cookies.jar'),
+    onFatal: fatal,
+});
 
 // ------------------------------------------------------------------ probe
 
-/** @param {string} tab */
-function profileDir(tab) { return path.join(REPO, 'dev', `chrome-profile-${tab}`); }
+const probeA = new Probe(TAB_A, { onFatal: fatal });
+// tab B's probe failures are reported under its check name '8' (today's
+// startTabB called fatal('8', …), never fatal('probe', …))
+const probeB = new Probe(TAB_B, { onFatal: (name, evidence) => fatal(name === 'probe' ? '8' : name, evidence) });
 
-let cdpPort = null;
-let chromeChild = null;
-
-/**
- * Raw CDP WebSocket framing without deps: use /json/version + the global
- * WebSocket (node ≥22). One chromium for the whole run; tab = its page.
- */
+/** Thin wrapper so the 800 lines of checks keep their call sites. */
 async function startProbe(tab) {
-    // only this tab's leftovers: tab B may still be running (check 8 → 9)
-    cleanupTabs([tab]);
-    const port = await new Promise((resolve) => {
-        const srv = http.createServer();
-        srv.listen(0, '127.0.0.1', () => {
-            const p = /** @type {any} */ (srv.address()).port;
-            srv.close(() => resolve(p));
-        });
-    });
-    chromeChild = spawn(CHROME, [
-        '--headless=new', '--window-size=1500,950',
-        `--remote-debugging-port=${port}`,
-        `--user-data-dir=${profileDir(tab)}`,
-        '--no-first-run', '--disable-gpu',
-        `${ST_URL}/`,
-    ], { stdio: 'ignore' });
-    cdpPort = port;
-    for (let i = 0; i < 60; i++) {
-        try { await cdpSendRaw(port, 'Browser.getVersion', {}); break; } catch { await sleep(500); }
-    }
-    let target = null;
-    for (let i = 0; i < 120; i++) {
-        try {
-            const list = await httpJson(port, '/json/list');
-            target = list.find((/** @type {any} */ t) => t.type === 'page' && t.url.startsWith(ST_URL));
-            if (target) break;
-        } catch { /* not up yet */ }
-        await sleep(500);
-    }
-    if (!target) fatal('probe', 'chromium opened but no SillyTavern page target appeared');
-    cdpWs = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((res, rej) => { cdpWs.onopen = res; cdpWs.onerror = () => rej(new Error('ws error')); });
-    // wait for ST boot: preset select filled (script.js getSettings done)
-    for (let i = 0; i < 240; i++) {
-        const ready = await evalInPage('(document.getElementById("settings_preset_openai")?.options.length ?? 0) > 1');
-        if (ready) return;
-        await sleep(500);
-    }
-    fatal('probe', 'SillyTavern did not finish booting in the probe tab');
+    if (tab !== TAB_A && tab !== TAB_B) throw new Error(`unknown tab: ${tab}`);
+    await (tab === TAB_B ? probeB : probeA).start();
 }
 
-let cdpWs = null;
-const cdpPending = new Map();
-let cdpNextId = 1;
-
-function wireWs() {
-    cdpWs.onmessage = (ev) => {
-        const msg = JSON.parse(/** @type {any} */ (ev).data);
-        if (msg.id && cdpPending.has(msg.id)) {
-            const { resolve, reject, timer } = cdpPending.get(msg.id);
-            clearTimeout(timer);
-            cdpPending.delete(msg.id);
-            if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-            else resolve(msg.result);
-        }
-    };
-}
-
-/**
- * @param {number} port
- * @param {string} method
- * @param {any} params
- */
-function cdpSendRaw(port, method, params) {
-    return new Promise((resolve, reject) => {
-        http.get({ host: '127.0.0.1', port, path: '/json/version' }, () => resolve(undefined)).on('error', reject);
-        void method; void params;
-    });
-}
-
-/**
- * Evaluate in the ST page's MAIN world.
- * @param {string} expression
- * @returns {Promise<any>}
- */
+/** Evaluate in tab A's ST page. @param {string} expression @returns {Promise<any>} */
 async function evalInPage(expression) {
-    if (!cdpWs) throw new Error('probe not started');
-    wireWs();
-    const id = cdpNextId++;
-    const res = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => {
-            cdpPending.delete(id);
-            reject(new Error(`CDP timeout: ${expression.slice(0, 60)}`));
-        }, 30000);
-        cdpPending.set(id, { resolve, reject, timer });
-        cdpWs.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true, replMode: false } }));
-    });
-    if (res.exceptionDetails) {
-        throw new Error(`page threw: ${res.exceptionDetails.exception?.description ?? JSON.stringify(res.exceptionDetails)}`);
-    }
-    return res.result?.value;
+    return probeA.eval(expression);
 }
 
-/** Kill leftover probe chromia. With `tabs`, only those; default: both. */
-function cleanupTabs(tabs = [TAB_A, TAB_B]) {
-    for (const tab of tabs) {
-        try { execSync(`pkill -9 -f "user-data-dir=${profileDir(tab)}"`, { stdio: 'ignore' }); } catch { /* none */ }
-    }
+/** Evaluate in tab B's ST page. @param {string} expression @returns {Promise<any>} */
+async function evalInPageB(expression) {
+    return probeB.eval(expression);
 }
+
+/** SIGKILL both probe chromia; every fatal()/finish() path ends here via onExit. */
 function stopChrome() {
-    try { chromeChild?.kill('SIGKILL'); } catch { /* gone */ }
-    try { chromeB?.kill('SIGKILL'); } catch { /* gone */ }
-    cleanupTabs();
-    chromeChild = null;
-    chromeB = null;
-    cdpWs = null;
-    cdpWsB = null;
+    probeA.kill();
+    probeB.kill();
+    cleanupTabs([TAB_A, TAB_B]);
 }
 
 // ------------------------------------------------------------------ helpers
@@ -404,22 +215,6 @@ async function probeAll() {
     })()`);
 }
 
-/** Wait until fn() is true. @param {() => any|Promise<any>} fn @param {number} [ms] */
-async function until(fn, ms = 8000, label = 'condition') {
-    const end = Date.now() + ms;
-    let last = null;
-    for (;;) {
-        let v;
-        try { v = await fn(); last = v; } catch (e) { last = `err:${e?.message ?? e}`; }
-        if (v) return v;
-        if (Date.now() > end) {
-            const brief = typeof last === 'object' && last !== null ? JSON.stringify(last).slice(0, 200) : String(last);
-            throw new Error(`timeout waiting for ${label} (last: ${brief})`);
-        }
-        await sleep(250);
-    }
-}
-
 // ===========================================================================
 
 async function main() {
@@ -514,7 +309,7 @@ async function main() {
         // SSE hello arrives unbuffered (compression must not sit on it)
         const got = await new Promise((resolve) => {
             const chunks = [];
-            const req = http.request(`${BASE}/events`, { method: 'GET', host: '127.0.0.1', port: 8002, headers: { cookie: fs.readFileSync(cookieJar, 'utf8').trim() } }, (res) => {
+            const req = http.request(`${BASE}/events`, { method: 'GET', host: '127.0.0.1', port: 8002, headers: { cookie: fs.readFileSync(path.join(REPO, 'dev', '.check-phase1.cookies.jar'), 'utf8').trim() } }, (res) => {
                 res.on('data', (c) => chunks.push(c));
             });
             req.on('error', () => resolve(null));
@@ -1186,53 +981,18 @@ async function releaseHold() {
 
 // ------------------------------------------------------------------ tab B
 
-let cdpWsB = null;
-const cdpPendingB = new Map();
-let cdpNextIdB = 1;
-let chromeB = null;
-let portB = null;
-
-/** Launch a second chromium for tab B and attach the B websocket. */
+/**
+ * Launch tab B's chromium via its own Probe. Tab-B-specific behaviour kept
+ * from startTabB: its cleanup is scoped to [TAB_B] only (Probe.start does
+ * that per tab — never tab A's live chrome), the fatal name is '8', the
+ * boot wait swallows per-try errors while ST is still booting, and its
+ * fatal message on timeout is tab-B's own wording.
+ */
 async function startTabB() {
-    // only tab B: cleanupTabs() with no args would kill tab A's live chrome
-    // and leave its CDP ws permanently timed out (found by check 8)
-    cleanupTabs([TAB_B]);
-    portB = await new Promise((resolve) => {
-        const srv = http.createServer();
-        srv.listen(0, '127.0.0.1', () => {
-            const p = /** @type {any} */ (srv.address()).port;
-            srv.close(() => resolve(p));
-        });
-    });
-    chromeB = spawn(CHROME, [
-        '--headless=new', '--window-size=1500,950',
-        `--remote-debugging-port=${portB}`,
-        `--user-data-dir=${profileDir(TAB_B)}`,
-        '--no-first-run', '--disable-gpu',
-        `${ST_URL}/`,
-    ], { stdio: 'ignore' });
-    let target = null;
-    for (let i = 0; i < 120; i++) {
-        try {
-            const list = await httpJson(portB, '/json/list');
-            target = list.find((/** @type {any} */ t) => t.type === 'page' && t.url.startsWith(ST_URL));
-            if (target) break;
-        } catch { /* not up yet */ }
-        await sleep(500);
-    }
-    if (!target) fatal('8', 'tab B chromium produced no ST page');
-    cdpWsB = new WebSocket(target.webSocketDebuggerUrl);
-    await new Promise((res, rej) => { cdpWsB.onopen = res; cdpWsB.onerror = () => rej(new Error('ws B error')); });
-    cdpWsB.onmessage = (ev) => {
-        const msg = JSON.parse(/** @type {any} */ (ev).data);
-        if (msg.id && cdpPendingB.has(msg.id)) {
-            const { resolve, reject, timer } = cdpPendingB.get(msg.id);
-            clearTimeout(timer);
-            cdpPendingB.delete(msg.id);
-            if (msg.error) reject(new Error(JSON.stringify(msg.error)));
-            else resolve(msg.result);
-        }
-    };
+    // no bootCheck: tab B's boot wait tolerates per-try eval errors while
+    // ST is still booting (Probe.start's strict loop would surface the
+    // first error instead of retrying), so the wait stays here
+    await probeB.start({ bootCheck: false });
     // wait for ST boot
     for (let i = 0; i < 240; i++) {
         try {
@@ -1246,7 +1006,7 @@ async function startTabB() {
 
 /** @returns {Promise<any>} */
 async function probeAllB() {
-    if (!cdpWsB) throw new Error('tab B not started');
+    if (!probeB.ws) throw new Error('tab B not started');
     return evalInPageB(`(() => {
         const ctx = SillyTavern.getContext();
         const oai = ctx.chatCompletionSettings;
@@ -1262,22 +1022,7 @@ async function probeAllB() {
     })()`);
 }
 
-/**
- * @param {string} expression
- * @returns {Promise<any>}
- */
-async function evalInPageB(expression) {
-    const id = cdpNextIdB++;
-    const res = await new Promise((resolve, reject) => {
-        const timer = setTimeout(() => { cdpPendingB.delete(id); reject(new Error('CDP B timeout')); }, 30000);
-        cdpPendingB.set(id, { resolve, reject, timer });
-        cdpWsB.send(JSON.stringify({ id, method: 'Runtime.evaluate', params: { expression, awaitPromise: true, returnByValue: true, replMode: false } }));
-    });
-    if (res.exceptionDetails) throw new Error(`B page threw: ${res.exceptionDetails.exception?.description ?? ''}`);
-    return res.result?.value;
-}
-
-// startProbe for tab B (separate chromium, separate ws) is startTabB above.
+// tab B's evalInPageB/evalInPage wrappers live in the probe section above.
 
 main().catch((err) => {
     console.error('[check] crashed:', err?.stack ?? err);

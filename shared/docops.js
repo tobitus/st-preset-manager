@@ -569,11 +569,17 @@ function dispatchOp(doc, op, a) {
             return { key: a.key };
         }
         case 'moveLeaf': {
-            if (typeof a?.key !== 'string' || !Number.isInteger(a?.delta)) {
-                throw new OpError('moveLeaf needs {key, delta}');
-            }
+            if (typeof a?.key !== 'string' || !Number.isInteger(a?.delta)) throw new OpError('moveLeaf needs {key, delta}');
             findRowKey(doc, a.key);
-            moveLeaf(doc, a.key, a.delta);
+            // |delta| sibling steps, all-or-nothing: an illegal step (top/bottom,
+            // section/group limit) restores the sequences and fails the whole op
+            const saved = structuredClone(doc.sequences);
+            try {
+                for (let i = 0; i < Math.abs(a.delta); i++) moveLeaf(doc, a.key, Math.sign(a.delta));
+            } catch (err) {
+                doc.sequences = saved;
+                throw err;
+            }
             return { key: a.key, delta: a.delta };
         }
         case 'createGroup': return opCreateGroup(doc, a);

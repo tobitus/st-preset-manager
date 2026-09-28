@@ -11,4 +11,6 @@ declare module '*/openai.js' {
     export function getPresetApplicationPromise(): Promise<void>;
     /** Build the settingsToUpdate view of an oai_settings object (openai.js:4582). */
     export function getChatCompletionPreset(settings: unknown): Record<string, unknown>;
+    /** ST's prompt manager instance (openai.js:535, `export let`; null before init). */
+    export let promptManager: { render(afterTryGenerate?: boolean): void } | null;
 }

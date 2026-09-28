@@ -1,9 +1,11 @@
 /**
- * Minimal floating window (Phase 1): one Library tab. Full tabbed window
- * arrives in Phase 2. Uses plain DOM + a little CSS from style.css; jQuery UI
- * draggable is available globally in ST and used for the title bar.
+ * Floating window shell (2b): one window, two tabs. Library = preset list
+ * (load into slot, open in the Presets tab); Presets = per-preset editor
+ * tabs (ext/tabs/*). Uses plain DOM + CSS from style.css; jQuery UI
+ * draggable/resizable are available globally in ST and used for the window.
  */
 import { api, SLOT_NAME } from './st.js';
+import { createPresetsTab } from './tabs/presets.js';
 
 /**
  * @param {{ title: string, content: string }} opts
@@ -32,10 +34,59 @@ export function openWindow({ title, content }) {
 }
 
 /**
+ * Open the main window: tab strip + Library and Presets panes, wired to the
+ * bridge. Library "Open" switches to the Presets tab and opens the preset.
+ * @param {import('./bridge.js').Bridge} bridge
+ * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void, presets: { open(presetId: string): Promise<void> } }}
+ */
+export function openMainWindow(bridge) {
+    const win = openWindow({
+        title: 'Preset Manager',
+        content: `
+            <div class="pm-tabs">
+                <button type="button" class="pm-tab menu_button pm-active" data-tab="library">Library</button>
+                <button type="button" class="pm-tab menu_button" data-tab="presets">Presets</button>
+            </div>
+            <div class="pm-pane" data-pane="library">
+                <div class="pm-root"></div>
+            </div>
+            <div class="pm-pane" data-pane="presets" hidden></div>`,
+    });
+    const root = win.root;
+
+    const showTab = (/** @type {string} */ name) => {
+        for (const tab of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-tab')))) {
+            tab.classList.toggle('pm-active', tab.dataset.tab === name);
+        }
+        for (const pane of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-pane')))) {
+            pane.hidden = pane.dataset.pane !== name;
+        }
+    };
+    for (const tab of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-tab')))) {
+        tab.addEventListener('click', () => showTab(/** @type {string} */ (tab.dataset.tab)));
+    }
+
+    const presets = createPresetsTab(
+        /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="presets"]')),
+        bridge,
+    );
+
+    const onOpen = (/** @type {string} */ presetId) => {
+        showTab('presets');
+        void presets.open(presetId);
+    };
+    const libRoot = /** @type {HTMLElement} */ (root.querySelector('.pm-root'));
+    renderLibrary(libRoot, bridge, { onOpen });
+    void refresh(libRoot, bridge, { onOpen });
+
+    return { root: win.root, body: win.body, close: win.close, presets };
+}
+
+/**
  * Render the Library tab.
  * @param {HTMLElement} root .pm-root element
  * @param {import('./bridge.js').Bridge} _bridge
- * @param {{ items?: any[], desired?: any }} [state]
+ * @param {{ items?: any[], desired?: any, onOpen?: (presetId: string) => void }} [state]
  */
 export function renderLibrary(root, _bridge, state = {}) {
     root.innerHTML = `
@@ -56,14 +107,14 @@ export function renderLibrary(root, _bridge, state = {}) {
         const filtered = tag ? items.filter((i) => i.tags.includes(tag)) : items;
         slotState.textContent = state.desired?.presetId ? `slot: ${SLOT_NAME}` : 'slot: empty';
         list.replaceChildren(...filtered.map((item) => libraryRow(item, state.desired?.presetId, () => {
-            void refresh(root, _bridge);
-        })));
+            void refresh(root, _bridge, state);
+        }, state.onOpen)));
     };
     filter.addEventListener('input', render);
     render();
 }
 
-function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredId, /** @type {() => void} */ onChange) {
+function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredId, /** @type {() => void} */ onChange, /** @type {((presetId: string) => void)|undefined} */ onOpen) {
     const row = document.createElement('div');
     row.className = 'pm-library-row' + (item.id === desiredId ? ' pm-in-slot' : '');
     row.dataset.presetId = item.id;
@@ -78,8 +129,10 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     row.innerHTML = `
         <span class="pm-name">${escapeHtml(item.name)}</span>${tags}
         <span class="pm-row-actions">${loadouts}
+            <button class="menu_button pm-open" title="Open in the Presets tab">Open</button>
             <button class="menu_button pm-load" title="Load into working slot">Load</button>
         </span>`;
+    row.querySelector('.pm-open')?.addEventListener('click', () => onOpen?.(item.id));
     row.querySelector('.pm-load')?.addEventListener('click', async () => {
         const lid = /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.value ?? undefined;
         await api('POST', '/slot/load', { presetId: item.id, ...(lid ? { loadoutId: lid } : {}) });
@@ -92,14 +145,29 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     return row;
 }
 
-async function refresh(/** @type {HTMLElement} */ root, /** @type {import('./bridge.js').Bridge} */ bridge) {
+/**
+ * Re-fetch items + slot and re-render, keeping state (onOpen) wired through
+ * every re-render. On failure the error stays visible in the library list.
+ * @param {HTMLElement} root .pm-root element
+ * @param {import('./bridge.js').Bridge} bridge
+ * @param {{ onOpen?: (presetId: string) => void }} [state]
+ */
+async function refresh(root, bridge, state = {}) {
     try {
         const [items, slot] = await Promise.all([
             api('GET', '/library'),
             api('GET', '/slot'),
         ]);
-        renderLibrary(root, bridge, { items, desired: slot.desired });
-    } catch { /* window may be closed */ }
+        renderLibrary(root, bridge, { onOpen: state.onOpen, items, desired: slot.desired });
+    } catch (err) {
+        // error display moved here from index.js refreshLibrary
+        const list = /** @type {HTMLElement|null} */ (root.querySelector('.pm-library-list'));
+        if (!list) return; /* window closed */
+        const div = document.createElement('div');
+        div.className = 'pm-error';
+        div.textContent = `Preset Manager: ${/** @type {Error} */ (err).message}`;
+        list.replaceChildren(div);
+    }
 }
 
 function escapeHtml(/** @type {string} */ s) {
