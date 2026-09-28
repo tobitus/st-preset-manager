@@ -100,23 +100,27 @@ export async function applyCompiledToSlot(compiled) {
         getPresetApplicationPromise().catch(() => {}),
         new Promise((resolve) => setTimeout(resolve, 200)),
     ]);
-    // Poll until ST's own state canonically matches what we saved. Must not
-    // silently proceed: callers rely on apply meaning "the panel now shows
-    // the compiled preset"; a false success would make the next panel op
-    // diff user edits against the wrong baseline.
+    // Poll until ST's own state shows the FULL compiled projection — the
+    // complete panel projection: prompts (all fields), prompt_order (order
+    // and enabled bits) and every sampler / other preset setting — not just
+    // the slot name and the prompt structure. A content-only or sampler-only
+    // apply left the old partial predicate true while ST still exposed the
+    // old values, so the bridge recorded a half-applied baseline and could
+    // later mistake the real apply for a panel edit. Must not silently
+    // proceed: callers rely on apply meaning "the panel now shows the
+    // compiled preset"; a false success would make the next panel op diff
+    // user edits against the wrong baseline. The bounded ST-promise await
+    // above is only a fast path; this observation is the correctness check.
     const deadline = performance.now() + 5000;
     for (;;) {
-        const oai = ctx().chatCompletionSettings;
-        const applied =
-            currentPresetName() === SLOT_NAME &&
-            canonEq(oai.prompt_order, compiled.prompt_order) &&
-            canonEq(promptsIdentifiers(oai), promptsIdentifiers(compiled));
-        if (applied) break;
+        const shown = await snapshotPanel();
+        if (shown && showsCompiled(shown, compiled)) break;
         if (performance.now() > deadline) {
-            const detail = currentPresetName() !== SLOT_NAME
-                ? `preset is ${JSON.stringify(currentPresetName())}, not the slot`
-                : `order rows ${oai.prompt_order?.[0]?.order?.length ?? 0} vs ${compiled.prompt_order?.[0]?.order?.length ?? 0}, prompts ${oai.prompts?.length ?? 0} vs ${compiled.prompts?.length ?? 0}`;
-            throw new Error(`applyCompiledToSlot: ST did not show ${JSON.stringify(SLOT_NAME)} with the compiled prompt_order/prompts within 5s (${detail})`);
+            const name = currentPresetName();
+            const mismatches = shown
+                ? Object.keys(compiled).filter((key) => !canonEq(shown[key], compiled[key])).slice(0, 5)
+                : ['(snapshotPanel returned null)'];
+            throw new Error(`applyCompiledToSlot: ST did not show ${JSON.stringify(SLOT_NAME)} with the full compiled projection within 5s${name !== SLOT_NAME ? ` (preset is ${JSON.stringify(name)}, not the slot)` : ''}; mismatched keys: ${mismatches.join(', ')}`);
         }
         await new Promise((resolve) => setTimeout(resolve, 50));
     }
@@ -129,9 +133,35 @@ function canonEq(a, b) {
     return JSON.stringify(a) === JSON.stringify(b);
 }
 
-/** @param {any} src object with a prompts array (or null) */
-function promptsIdentifiers(src) {
-    return (src?.prompts ?? []).map((p) => p?.identifier);
+/**
+ * Does the panel projection ST currently shows match `compiled`? Compares
+ * the complete projection — prompts (all fields), prompt_order (order +
+ * enabled bits) and every other preset setting (samplers etc.) — because a
+ * partial predicate (name + identifier list + order) accepted an apply half
+ * way through and mis-baselined the bridge.
+ *
+ * Key-set note: the compiled body carries exactly the keys ST presets carry
+ * (all of getChatCompletionPreset's settingsToUpdate keys minus connection
+ * keys — shared/compile.js strips CONNECTION_KEYS and preset_settings_openai,
+ * and preset_settings_openai is not a settingsToUpdate key, so it never
+ * appears in a compiled body). A snapshot from snapshotPanel() therefore has
+ * no extra non-connection keys to compare; the loop below observes every
+ * compiled key on the live panel.
+ * @param {any} shown snapshotPanel() output
+ * @param {any} compiled full compiled ST preset body
+ * @returns {boolean}
+ */
+function showsCompiled(shown, compiled) {
+    if (!shown) return false;
+    // The slot NAME must match first: ST's rename/apply is not atomic, and
+    // the name is what makes the panel "the working slot" at all.
+    if (currentPresetName() !== SLOT_NAME) return false;
+    // Every compiled key must be visible in ST's live state (superset is
+    // fine: e.g. preset_settings_openai is panel-only).
+    for (const key of Object.keys(compiled)) {
+        if (!canonEq(shown[key], compiled[key])) return false;
+    }
+    return true;
 }
 
 /**

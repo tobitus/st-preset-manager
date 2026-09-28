@@ -19,14 +19,48 @@
  * Reconcile ops flush unsent panel edits FIRST (flushPanel), so a user edit
  * made while a slot update was in flight reaches the server before the
  * incoming state is applied over it — server receipt order stays
- * most-recent-wins and the live edit is never lost.
+ * most-recent-wins and the live edit is never lost. A failed flush aborts
+ * the reconcile (it re-throws); the op fails, the queue survives, and the
+ * next SETTINGS_UPDATED or SSE event retries.
+ *
+ * While an apply runs the bridge blocks panel input (transparent overlay on
+ * the prompt manager + sampler panel), so user edits cannot interleave with
+ * an apply and no timing-based sampling heuristic is needed.
  */
 import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, SLOT_NAME, PLUGIN_BASE } from './st.js';
+
+/**
+ * Surfaces the user edits a chat-completion preset from, covered by the
+ * apply overlay (ST 1.19.0):
+ *  - '#completion_prompt_manager' — the prompt manager root
+ *    (public/index.html:2274), wired as PromptManager's container
+ *    (public/scripts/openai.js:686); its list is drag-sortable and toggle-
+ *    clickable (public/scripts/PromptManager.js:1921 sortable on the list).
+ *  - '#completion_prompt_manager_popup' — the prompt edit form drawer
+ *    (public/index.html:7276).
+ *  - '#ai_response_configuration' — the AI Response Configuration drawer
+ *    body (public/index.html:89): every sampler slider / checkbox binds
+ *    input/change -> saveSettingsDebounced (public/scripts/openai.js:6776+).
+ * @type {string[]}
+ */
+const APPLY_OVERLAY_SELECTORS = [
+    '#completion_prompt_manager',
+    '#completion_prompt_manager_popup',
+    '#ai_response_configuration',
+];
+const APPLY_OVERLAY_CLASS = 'pm-apply-blocker';
 
 export class Bridge {
     constructor() {
         this.appliedHash = null;
         this.appliedRev = 0;
+        /** Global plugin rev at which the state we last mirrored into ST
+         * became the desired slot state (GET /slot slotChangedRev). Equals
+         * appliedRev when the last event we applied was itself a slot
+         * change; when panel write-backs advance only `rev`, this stays
+         * behind, which is what lets reconcileOp tell "same state, newer
+         * revision counter" apart from a genuinely new desired state. */
+        this.appliedSlotChangedRev = 0;
         /** Panel projection of the last applied state: the write-back
          * baseline. panel ops POST only when the snapshot differs from it. */
         this.baseSnapshot = null;
@@ -108,18 +142,54 @@ export class Bridge {
      * reconcile op: flush any unsent panel edits FIRST (so a user edit made
      * while an update was in flight reaches the server before incoming
      * state is applied over it — server receipt order = most recent wins),
-     * then GET /slot; apply desired if the tab does not already show that
-     * exact compiled state. Idempotent — always fetches fresh, so any
+     * then GET /slot. Apply desired state when the tab does not already
+     * show that exact compiled state; advance the applied base without
+     * applying when it does. Idempotent — always fetches fresh, so any
      * number of queued runs converge on the latest server state.
      */
     async reconcileOp() {
         if (currentPresetName() === SLOT_NAME && this.baseSnapshot) {
+            // A failed flush means unsent user edits would be overwritten by
+            // the apply below — abort this op entirely (Finding: "Abort
+            // reconciliation when flushing fails"). flushPanel re-throws
+            // non-409 failures; a 409 (stale) also throws, and this op's
+            // rejection is the retry signal (next SETTINGS_UPDATED or SSE
+            // event enqueues a fresh reconcile that re-reads /slot).
             await this.flushPanel();
         }
-        const slot = await api('GET', '/slot');
-        if (slot.desired?.presetId && slot.compiled && slot.hash !== this.appliedHash) {
-            await this.apply(slot);
-        } else if (!slot.desired?.presetId) {
+        const slot = /** @type {{rev: number, slotChangedRev?: number, desired: any, compiled: any, hash: string}} */ (await api('GET', '/slot'));
+        const slotChangedRev = slot.slotChangedRev ?? 0;
+        if (slot.desired?.presetId && slot.compiled) {
+            if (slot.hash !== this.appliedHash) {
+                await this.apply(slot);
+                this.appliedSlotChangedRev = slotChangedRev;
+            } else {
+                // Same compiled hash. Three sub-cases (Finding: "Advance the
+                // panel base after a same-hash slot change"):
+                // - a slot change (load / model swap) that compiles to the
+                //   same hash: no apply is needed, but appliedRev must
+                //   advance, or every later panel post uses an old baseRev
+                //   and 409s forever while this op keeps being re-queued as
+                //   a hash no-op;
+                // - a mere rev bump (panel write-back echo, save of the
+                //   same content): re-baseline too — the panel below is
+                //   compared against baseSnapshot either way;
+                // - genuinely nothing new (SSE echo of our own write): skip.
+                const revAdvanced = slot.rev > this.appliedRev || slotChangedRev > this.appliedSlotChangedRev;
+                if (revAdvanced) {
+                    const panel = await snapshotPanel();
+                    if (!panel || this.hashOf(panel) !== this.hashOf(this.baseSnapshot)) {
+                        // The panel drifted from our baseline while the hash
+                        // stayed the server truth: it may carry unsent user
+                        // edits (flushPanel above returned null) — send them
+                        // before re-baselining.
+                        await this.flushPanel(panel);
+                    }
+                    this.appliedRev = Math.max(this.appliedRev, slot.rev);
+                    this.appliedSlotChangedRev = slotChangedRev;
+                }
+            }
+        } else {
             this.attached = currentPresetName() === SLOT_NAME;
         }
         this.emit({ slot, attached: this.attached });
@@ -130,53 +200,81 @@ export class Bridge {
      * Apply a slot view into ST, then re-baseline the panel projection.
      * Only ever called from reconcileOp — the queue serializes applies, so
      * an op can never snapshot a half-applied preset.
+     *
+     * Edit-interleave policy (replaces the old fixed-interval sampler):
+     * while the apply runs, edits to the panel are PREVENTED, not sampled.
+     * The bridge sets `this.applying` and mounts a transparent input
+     * blocker over the surfaces the user edits a chat-completion preset
+     * from (APPLY_OVERLAY_SELECTORS below, with the ST source lines that
+     * justify each) and removes it in `finally`. User edits therefore
+     * cannot interleave with an apply, and no timing heuristic decides what
+     * counts as a user edit. Edits made BEFORE the apply starts are covered
+     * by flushPanel in reconcileOp, which runs before apply within the same
+     * op.
      * @param {{ compiled: any, hash: string, rev: number }} slot
      */
     async apply(slot) {
-        // A panel edit landing DURING the apply is the user's latest write,
-        // but ST's preset load is about to clobber it in oai_settings and
-        // the debounced SETTINGS_UPDATED afterwards compares equal to the
-        // fresh baseline — the edit would never reach the server. Sample
-        // the panel while the apply runs; anything that differs from the
-        // fresh baseline below is such a mid-apply edit.
-        const samplePromise = this.sampleDuringApply();
-        await applyCompiledToSlot(slot.compiled);
-        this.appliedHash = slot.hash;
-        this.appliedRev = Math.max(this.appliedRev, slot.rev);
-        this.attached = true;
-        // the projection ST actually shows is the honest write-back baseline:
-        // the SETTINGS_UPDATED our apply triggers must compare equal to it
-        this.baseSnapshot = await snapshotPanel();
-        // an edit made while the apply ran is still the most recent write:
-        // route it onto the current doc (server receipt order), then converge
-        // via the queue — never apply inline (an op does not call another op).
-        const midEdit = await samplePromise;
-        if (midEdit && midEdit.temperature !== this.baseSnapshot.temperature) {
-            const keepOrder = JSON.stringify(midEdit.prompt_order) === JSON.stringify(this.baseSnapshot.prompt_order);
-            if (keepOrder) await this.flushPanel(midEdit);
-            else this.appliedHash = null; // structure changed under the apply: full re-reconcile
+        if (this.applying) throw new Error('bridge: overlapping apply (queue invariant violated)');
+        this.applying = true;
+        this._setApplyOverlay(true);
+        try {
+            await applyCompiledToSlot(slot.compiled);
+            this.appliedHash = slot.hash;
+            this.appliedRev = Math.max(this.appliedRev, slot.rev);
+            this.attached = true;
+            // the projection ST actually shows is the honest write-back
+            // baseline: the SETTINGS_UPDATED our apply triggers must
+            // compare equal to it
+            this.baseSnapshot = await snapshotPanel();
+        } finally {
+            this.applying = false;
+            this._setApplyOverlay(false);
         }
         return true;
     }
 
     /**
-     * Sample the panel a few times while `applyCompiledToSlot` runs, keeping
-     * the LAST sample that still carries the current prompt structure (the
-     * final stages of the apply rewrite it; an edit before that does not).
-     * @returns {Promise<any|null>} last pre-clobber sample, or null
+     * Transparent input blocker over the editable preset surfaces for the
+     * duration of an apply. `pointer-events: none` stops clicks / sliders /
+     * drag-sort (PromptManager's sortable starts on pointerdown);
+     * capture-phase keydown stopImmediatePropagation stops keyboard
+     * shortcuts and global hotkeys from reaching anything while the blocker
+     * is up.
+     * The overlay is inert (aria-hidden, transparent) and does not affect
+     * elements OUTSIDE the surfaces covered by APPLY_OVERLAY_SELECTORS.
+     * @param {boolean} on
      */
-    async sampleDuringApply() {
-        const structureOf = (/** @type {any} */ s) => JSON.stringify([s?.prompts?.map((/** @type {any} */ p) => p?.identifier), s?.prompt_order?.[0]?.order?.map((/** @type {any} */ o) => o?.identifier), s?.prompt_order?.[0]?.order?.map((/** @type {any} */ o) => o?.enabled)]);
-        let prev = await snapshotPanel();
-        if (!prev) return null;
-        const structure = structureOf(prev);
-        for (let i = 0; i < 10; i++) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
-            const s = await snapshotPanel();
-            if (!s) break;
-            if (structureOf(s) === structure) prev = s;
+    _setApplyOverlay(on) {
+        for (const selector of APPLY_OVERLAY_SELECTORS) {
+            const el = /** @type {any} */ (document).querySelector(selector);
+            if (!el) continue;
+            if (on) {
+                const blocker = /** @type {any} */ (document).createElement('div');
+                blocker.className = APPLY_OVERLAY_CLASS;
+                blocker.setAttribute('aria-hidden', 'true');
+                blocker.style.position = 'fixed';
+                blocker.style.inset = '0';
+                blocker.style.zIndex = '9999';
+                blocker.style.background = 'transparent';
+                blocker.style.pointerEvents = 'auto';
+                blocker.style.cursor = 'wait';
+                blocker.__pmKeydown = (/** @type {any} */ ev) => {
+                    ev.stopImmediatePropagation();
+                };
+                el.style.pointerEvents = 'none';
+                el.appendChild(blocker);
+                // capture phase: block BEFORE ST's own key handlers see it
+                document.addEventListener('keydown', blocker.__pmKeydown, true);
+                blocker.__pmCovered = el;
+            } else {
+                const blocker = /** @type {any} */ (el.querySelector(`:scope > .${APPLY_OVERLAY_CLASS}`));
+                if (blocker) {
+                    document.removeEventListener('keydown', blocker.__pmKeydown, true);
+                    blocker.remove();
+                }
+                el.style.pointerEvents = '';
+            }
         }
-        return prev;
     }
 
     openStream() {
@@ -202,13 +300,19 @@ export class Bridge {
 
     /**
      * panel op: flush unsent panel edits (see flushPanel), then — if the
-     * flush collapsed a pick-one choice or similar (appliedHash cleared) —
-     * enqueue a reconcile so the tab converges on the stored projection.
+     * flush collapsed a pick-one choice or similar (appliedHash cleared) or
+     * went stale (409) — enqueue a reconcile so the tab converges on the
+     * stored projection. A non-409 failure re-throws out of flushPanel: the
+     * op fails while the queue survives, and the unsent snapshot stays
+     * pending as the next delta.
      */
     async panelOp() {
         this._flushStale = false;
-        await this.flushPanel();
-        if (this.appliedHash === null || this._flushStale) this.enqueueReconcile();
+        try {
+            await this.flushPanel();
+        } finally {
+            if (this.appliedHash === null || this._flushStale) this.enqueueReconcile();
+        }
         return null;
     }
 
@@ -220,9 +324,14 @@ export class Bridge {
      * Snapshot ST (or use `given`) ; if it differs from the baseline, POST
      * the delta (base + snapshot) and let the plugin route only what the
      * user changed.
-     * @param {any} [given] a snapshot taken earlier (mid-apply edit); skips
-     *   the fresh snapshot when provided
+     * @param {any} [given] a snapshot taken earlier; skips the fresh
+     *   snapshot when provided
      * @returns {Promise<any>} the snapshot sent, or null if nothing was sent
+     * @throws any non-409 POST failure (network down, 5xx, plugin restart):
+     *   the unsent snapshot is NOT dropped — baseSnapshot still names it as
+     *   the next delta — and callers must abort rather than proceed over
+     *   the still-unsent edit (Finding: "Abort reconciliation when flushing
+     *   a panel edit fails").
      */
     async flushPanel(given = undefined) {
         if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
@@ -230,33 +339,22 @@ export class Bridge {
         if (!snapshot) return null;
         const sameBase = this.baseSnapshot && this.hashOf(snapshot) === this.hashOf(this.baseSnapshot);
         if (sameBase) return null;
-        try {
-            const res = await api('POST', '/slot/panel', {
-                clientId: clientId(),
-                baseRev: this.appliedRev,
-                base: this.baseSnapshot,
-                snapshot,
-            });
-            this.appliedHash = res.hash;
-            this.appliedRev = Math.max(this.appliedRev, res.rev);
-            this.baseSnapshot = snapshot;
-            // pick-one collapse and friends: the stored projection differs
-            // from what the panel shows — let the caller converge via the
-            // queue (panelOp enqueues the reconcile; never apply inline).
-            if (this.hashOf(res.compiled) !== this.hashOf(snapshot)) {
-                this.appliedHash = null;
-            }
-            this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
-        } catch (err) {
-            if (err?.status === 409) {
-                // stale (desired changed under us, or no base): drop this
-                // snapshot; the caller re-reads the server state and re-bases
-                // (reconcileOp does it by construction, panelOp via the flag).
-                this._flushStale = true;
-            } else {
-                console.error('[preset-manager] panel write-back failed', err);
-            }
+        const res = await api('POST', '/slot/panel', {
+            clientId: clientId(),
+            baseRev: this.appliedRev,
+            base: this.baseSnapshot,
+            snapshot,
+        });
+        this.appliedHash = res.hash;
+        this.appliedRev = Math.max(this.appliedRev, res.rev);
+        this.baseSnapshot = snapshot;
+        // pick-one collapse and friends: the stored projection differs from
+        // what the panel shows — let the caller converge via the queue
+        // (panelOp enqueues the reconcile; never apply inline).
+        if (this.hashOf(res.compiled) !== this.hashOf(snapshot)) {
+            this.appliedHash = null;
         }
+        this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
         return snapshot;
     }
 
