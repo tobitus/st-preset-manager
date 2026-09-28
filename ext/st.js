@@ -156,9 +156,12 @@ function showsCompiled(shown, compiled) {
     // The slot NAME must match first: ST's rename/apply is not atomic, and
     // the name is what makes the panel "the working slot" at all.
     if (currentPresetName() !== SLOT_NAME) return false;
-    // Every compiled key must be visible in ST's live state (superset is
-    // fine: e.g. preset_settings_openai is panel-only).
+    // Every compiled key ST echoes must match its live state. Keys the panel
+    // projection never carries (getChatCompletionPreset skips e.g. the
+    // *_group_models / *_sort_models connection-flagged keys) cannot be
+    // observed and are skipped; they would otherwise make every apply time out.
     for (const key of Object.keys(compiled)) {
+        if (!(key in shown)) continue;
         if (!canonEq(shown[key], compiled[key])) return false;
     }
     return true;

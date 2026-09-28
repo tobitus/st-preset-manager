@@ -123,7 +123,9 @@ export class Bridge {
 
     /** Extension init: reconcile then stream. */
     async start() {
-        await this.enqueueReconcile();
+        // a failed first reconcile must not leave the tab without a bridge:
+        // the stream's hello and later events re-enqueue it
+        await this.enqueueReconcile().catch((err) => console.error('[preset-manager] initial reconcile failed', err));
         this.openStream();
         this.watchPanel();
     }
@@ -148,6 +150,20 @@ export class Bridge {
      * number of queued runs converge on the latest server state.
      */
     async reconcileOp() {
+        // The input blocker covers the WHOLE op, not just apply(): an edit
+        // made after the flush below but before apply (e.g. during GET /slot)
+        // would be neither flushed nor blocked, and the apply would overwrite
+        // it. Mounted synchronously first, so every earlier edit is caught by
+        // the flush and no later edit can land until the op finishes.
+        this._setApplyOverlay(true);
+        try {
+            return await this._reconcileInner();
+        } finally {
+            this._setApplyOverlay(false);
+        }
+    }
+
+    async _reconcileInner() {
         if (currentPresetName() === SLOT_NAME && this.baseSnapshot) {
             // A failed flush means unsent user edits would be overwritten by
             // the apply below — abort this op entirely (Finding: "Abort
@@ -202,21 +218,18 @@ export class Bridge {
      * an op can never snapshot a half-applied preset.
      *
      * Edit-interleave policy (replaces the old fixed-interval sampler):
-     * while the apply runs, edits to the panel are PREVENTED, not sampled.
-     * The bridge sets `this.applying` and mounts a transparent input
-     * blocker over the surfaces the user edits a chat-completion preset
-     * from (APPLY_OVERLAY_SELECTORS below, with the ST source lines that
-     * justify each) and removes it in `finally`. User edits therefore
-     * cannot interleave with an apply, and no timing heuristic decides what
-     * counts as a user edit. Edits made BEFORE the apply starts are covered
-     * by flushPanel in reconcileOp, which runs before apply within the same
-     * op.
+     * edits are PREVENTED, not sampled. reconcileOp mounts a transparent
+     * input blocker over the surfaces the user edits a chat-completion
+     * preset from (APPLY_OVERLAY_SELECTORS below, with the ST source lines
+     * that justify each) for the whole op, flush → GET → apply, and removes
+     * it in `finally`. Edits made before the op are sent by its flush; none
+     * can land after it, so no timing heuristic decides what counts as a
+     * user edit.
      * @param {{ compiled: any, hash: string, rev: number }} slot
      */
     async apply(slot) {
         if (this.applying) throw new Error('bridge: overlapping apply (queue invariant violated)');
         this.applying = true;
-        this._setApplyOverlay(true);
         try {
             await applyCompiledToSlot(slot.compiled);
             this.appliedHash = slot.hash;
@@ -228,7 +241,6 @@ export class Bridge {
             this.baseSnapshot = await snapshotPanel();
         } finally {
             this.applying = false;
-            this._setApplyOverlay(false);
         }
         return true;
     }

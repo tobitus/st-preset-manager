@@ -751,7 +751,12 @@ async function main() {
         const demDoc = (await api('GET', `/presets/${demId}`)).json;
         const enabledMap = demDoc.loadouts[demDoc.activeLoadoutId].enabled;
         const leaf = Object.keys(enabledMap).find((k) => demDoc.blocks[k]);
-        const setTemp = (/** @type {number} */ v, /** @type {string} */ which) => evalInPage(`(() => { const el = document.getElementById('temp_openai'); el.value = ${v}; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`);
+        // A user cannot edit through the bridge's apply overlay: check the
+        // blocker and set the slider in ONE synchronous page turn (the overlay
+        // mounts in a different task), retrying while an apply is running.
+        const setTemp = async (/** @type {number} */ v, /** @type {string} */ which) => {
+            await until(async () => (await evalInPage(`(() => { if (document.querySelector('.pm-apply-blocker')) return false; const el = document.getElementById('temp_openai'); el.value = ${v}; el.dispatchEvent(new Event('input',{bubbles:true})); el.dispatchEvent(new Event('change',{bubbles:true})); return true; })()`)) === true, 10000, `set temperature ${v} on ${which}`);
+        };
         /** @param {string} tab which tab to click on (A|B) — the probe chrome is shared; tab B runs in the same page (same profile? no) */
         // NOTE: TAB_B is a separate chromium; drive it by switching cdp ws targets.
         const readAll = async () => {
@@ -767,7 +772,7 @@ async function main() {
         // beat later than the click itself; firing the API toggle first
         // would race the echo. Let the click land, then fire the API write
         // — it is then genuinely the latest write and must win everywhere.
-        await evalInPage(clickToggle(leaf));
+        await until(async () => (await evalInPage(clickToggle(leaf))) === true, 10000, `click ${leaf} on A`);
         await until(async () => {
             const doc = (await api('GET', `/presets/${demId}`)).json;
             return doc.loadouts[doc.activeLoadoutId].enabled[leaf] === false;
@@ -870,9 +875,11 @@ async function main() {
     finish();
 }
 
-/** click helper string for a leaf toggle in the prompt manager list */
+/** click helper string for a leaf toggle in the prompt manager list. Like a
+ * user, it cannot click through the bridge's apply overlay or on a row ST has
+ * not rendered yet: returns false then, and the caller retries. */
 function clickToggle(/** @type {string} */ ident) {
-    return `(() => { const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${ident}"] .prompt-manager-toggle-action'); el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); return true; })()`;
+    return `(() => { if (document.querySelector('.pm-apply-blocker')) return false; const el = document.querySelector('#completion_prompt_manager_list li[data-pm-identifier="${ident}"] .prompt-manager-toggle-action'); if (!el) return false; el.dispatchEvent(new MouseEvent('click', {bubbles:true,cancelable:true})); return true; })()`;
 }
 /** @param {any} probeView @param {string} ident */
 function rowOf(probeView, ident) {
