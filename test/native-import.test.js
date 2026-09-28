@@ -228,3 +228,69 @@ test('st: a non-preset JSON (array of regex scripts) is a 400 "not a Chat Comple
     }
     assert.equal(store.listLibrary().length, 0);
 });
+
+/**
+ * GET /slot runs OUTSIDE the store queue (routes.js slotView). Replicate its
+ * read: the slot's doc + (desired loadout ?? the doc's active loadout).
+ */
+function slotRead(store, compile) {
+    const doc = store.getDocNow(store.state.presetId);
+    if (!doc) return { ok: false, err: 'no doc' };
+    const lid = store.state.loadoutId ?? doc.activeLoadoutId;
+    try {
+        compile(doc, null, {}, lid);
+        return { ok: true, id: doc.id, lid, notes: doc.notes };
+    } catch (err) {
+        return { ok: false, err: /** @type {Error} */ (err).message };
+    }
+}
+
+test('replace: a GET /slot interleaved at every await of a slot replace never sees doc/loadout out of step', async () => {
+    const { compile } = await import('../shared/compile.js');
+    for (const kind of ['st', 'native-without-that-loadout']) {
+        const store = await freshStore();
+        const doc = await richDoc(store);
+        await store.mutateState((st) => { st.presetId = doc.id; st.loadoutId = 'l_second'; });
+        assert.ok(slotRead(store, compile).ok, 'precondition: slot compiles');
+        /** @type {any[]} */
+        const reads = [];
+        // inject a slot read at each filesystem await of the write path
+        for (const m of ['_writeRevision', '_writeDoc', '_bumpRev']) {
+            const orig = store[m].bind(store);
+            store[m] = async (...args) => {
+                reads.push({ at: `${m}:before`, ...slotRead(store, compile) });
+                const r = await orig(...args);
+                reads.push({ at: `${m}:after`, ...slotRead(store, compile) });
+                return r;
+            };
+        }
+        const body = kind === 'st'
+            ? { st: sampleSt(), name: doc.name, replace: true } // ST import re-mints loadout ids
+            : { native: { ...structuredClone(doc), loadouts: { [doc.activeLoadoutId]: structuredClone(doc.loadouts[doc.activeLoadoutId]) } }, replace: true };
+        await store.importPreset(body);
+        assert.ok(reads.length >= 4, `${kind}: reads were injected (${reads.length})`);
+        const bad = reads.filter((r) => !r.ok);
+        assert.deepEqual(bad, [], `${kind}: every interleaved slot read compiles`);
+        const final = slotRead(store, compile);
+        assert.ok(final.ok, `${kind}: final slot compiles`);
+        assert.equal(store.state.presetId, doc.id);
+    }
+});
+
+test('replace: a slot replace that fails at the file move leaves the slot marker and state untouched', async () => {
+    const store = await freshStore();
+    const doc = await richDoc(store);
+    await store.mutateState((st) => { st.presetId = doc.id; st.loadoutId = doc.activeLoadoutId; });
+    // an unindexed file already sits at the move target
+    fs.mkdirSync(path.join(store.root, 'presets', 'sub'), { recursive: true });
+    fs.writeFileSync(path.join(store.root, 'presets', 'sub', 'Rich.json'), '{}');
+    const markerBefore = store.slotChangedRev ?? 0;
+    const stateBefore = structuredClone(store.state);
+    await assert.rejects(
+        () => store.importPreset({ native: { ...structuredClone(doc), folder: 'sub', notes: 'x' }, replace: true }),
+        (/** @type {any} */ err) => err.status === 409,
+    );
+    assert.equal(store.slotChangedRev ?? 0, markerBefore, 'no spurious slot-changed marker (it would 409 fresh panel posts)');
+    assert.deepEqual(store.state, stateBefore);
+    assert.deepEqual(store.getPreset(doc.id), doc);
+});

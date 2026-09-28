@@ -717,12 +717,49 @@ async function main() {
             await click(`${row} .pm-open`);
             await until(() => exists(`#pm-window .pm-preset-view[data-preset-id="${presetIds.ff}"] .pm-outline li.pm-node`), 10000, 'presets tab open');
 
+            // -- 2b. pick a group OPTION block C (top-level blocks are reserved
+            // for A/B below): the first group row (sections walked too) with a
+            // block option, preferring an option enabled in the compiled order
+            const slot0 = await getSlot();
+            const compiledIds0 = new Set((slot0.compiled?.prompt_order?.[0]?.order ?? []).map((/** @type {any} */ e) => e.identifier));
+            const doc0 = (await api('GET', `/presets/${presetIds.ff}`)).json;
+            const notesBefore = doc0.notes;
+            const groupRows0 = allRows(doc0.sequences[0].rows).filter((/** @type {any} */ r) => r.kind === 'group' && (r.options ?? []).some((/** @type {any} */ o) => o.kind === 'block'));
+            if (!groupRows0.length) throw new Error('no group with a block option to select as C');
+            const blockOptions0 = groupRows0[0].options.filter((/** @type {any} */ o) => o.kind === 'block');
+            const C = blockOptions0.find((/** @type {any} */ o) => compiledIds0.has(o.ref))?.ref ?? blockOptions0[0].ref;
+            if (!C) throw new Error('no block in the compiled order to select as C');
+            const cContentBefore = doc0.blocks[C].content;
+            await click(`#pm-window li.pm-node[data-identifier="${C}"] > .pm-row .pm-name`);
+            await until(() => probe.eval(`document.querySelector('#pm-window textarea.pm-block-content')?.value === ${J(cContentBefore)}`), 5000, 'editor shows C');
+
             // -- 3. replace the SAME document (identity kept) with an edited native export
             const N = (await api('GET', `/presets/${presetIds.ff}/export?format=native`)).json;
             N.notes = 'p3 replace in slot';
+            N.blocks[C].content = `${N.blocks[C].content}\n[p3 replaced ${Date.now()}]`;
+            const newText = N.blocks[C].content;
             const replaceRes = await api('POST', '/presets', { native: N, replace: true });
             const idKept = replaceRes.status === 201 && replaceRes.json?.id === presetIds.ff;
             if (!idKept) throw new Error(`identity not kept: before=${presetIds.ff} after=${replaceRes.json?.id} status=${replaceRes.status}`);
+
+            // -- 3b. C's new content reaches ST's live settings and the still-open
+            // window editor within 2s of the POST response
+            const postT0 = Date.now();
+            const pollFor = async (/** @type {() => Promise<string|undefined>} */ read) => {
+                let tail = '';
+                while (Date.now() - postT0 <= 2000) {
+                    tail = (await read()) ?? '';
+                    if (tail === newText) return { ms: Date.now() - postT0, tail };
+                    await sleep(50);
+                }
+                return { ms: null, tail };
+            };
+            const [stLive, tab] = await Promise.all([
+                pollFor(async () => (await oai()).prompts.find((/** @type {any} */ p) => p.identifier === C)?.content),
+                pollFor(() => probe.eval(`document.querySelector('#pm-window textarea.pm-block-content')?.value`)),
+            ]);
+            const stLiveMs = stLive.ms;
+            const tabMs = tab.ms;
 
             // -- 4. the slot stays bound and the edit lands
             const slot = await until(async () => {
@@ -730,12 +767,15 @@ async function main() {
                 return s.desired?.presetId === presetIds.ff && s.compiled !== null ? s : null;
             }, 5000, 'slot stays bound after replace');
             const notesOk = await until(async () => (await api('GET', `/presets/${presetIds.ff}`)).json.notes === 'p3 replace in slot', 5000, 'notes land');
+            const rowsExpected = slot.compiled.prompt_order[0].order.length;
+            const rowsGot = (await stDom()).length;
+            const rowsOk = rowsGot === rowsExpected;
 
             // -- 5. ST panel -> ST -> API: a block toggled in ST's own panel reaches the doc
             const doc = (await api('GET', `/presets/${presetIds.ff}`)).json;
             const activeLoadout = doc.activeLoadoutId;
-            const blockRows = doc.sequences[0].rows.filter((/** @type {any} */ r) => r.kind === 'block');
-            if (blockRows.length < 2) throw new Error(`need 2 top-level block leaves, found ${blockRows.length}`);
+            const blockRows = doc.sequences[0].rows.filter((/** @type {any} */ r) => r.kind === 'block' && r.ref !== C);
+            if (blockRows.length < 2) throw new Error(`need 2 top-level block leaves besides C, found ${blockRows.length}`);
             const A = blockRows[0].ref;
             const B = blockRows[1].ref;
             const aBefore = doc.loadouts[activeLoadout].enabled[A];
@@ -785,10 +825,21 @@ async function main() {
                     return o.order.find((/** @type {any} */ e) => e.identifier === B)?.enabled === bBefore;
                 }, 5000, 'B restored');
             } catch { /* best effort */ }
+
+            // -- 7b. restore C's content and the preset notes — NOT best
+            // effort: a leftover edit here would poison the later export/
+            // diff checks (e.g. 11's round trip against FF's original body)
+            const restoreContent = await api('POST', `/presets/${presetIds.ff}/ops`, { op: 'editBlock', identifier: C, content: cContentBefore });
+            if (restoreContent.status !== 200) throw new Error(`restore C content failed: status=${restoreContent.status} body=${restoreContent.text.slice(0, 200)}`);
+            await until(async () => (await api('GET', `/presets/${presetIds.ff}`)).json.blocks[C].content === cContentBefore, 5000, 'C content restored');
+            const restoreNotes = await api('PATCH', `/presets/${presetIds.ff}/meta`, { notes: notesBefore });
+            if (restoreNotes.status !== 200) throw new Error(`restore notes failed: status=${restoreNotes.status} body=${restoreNotes.text.slice(0, 200)}`);
+            await until(async () => (await api('GET', `/presets/${presetIds.ff}`)).json.notes === notesBefore, 5000, 'notes restored');
             await probe.eval(`(() => { window.fetch = window.__p3OrigFetch; delete window.__p3OrigFetch; return true; })()`);
 
-            report(name, idKept && !!slot && notesOk && aAfter === !aBefore && !panel409 && panel200 && bMs !== null,
-                `ffId=${presetIds.ff} replaceId=${replaceRes.json?.id} compiledNull=${slot ? slot.compiled === null : 'n/a'} notesOk=${notesOk} A ${aBefore}->${aAfter} panelPosts=${J(panelPosts)} B ${bBefore}->${bAfter} ms=${bMs}`);
+            report(name, idKept && !!slot && notesOk && aAfter === !aBefore && !panel409 && panel200 && bMs !== null
+                && stLiveMs !== null && stLiveMs <= 2000 && tabMs !== null && tabMs <= 2000 && rowsOk,
+                `C=${C.slice(0, 8)} stLive=${stLiveMs !== null ? `${stLiveMs}ms` : `timeout:"${stLive.tail.slice(0, 60)}"`} tab=${tabMs !== null ? `${tabMs}ms` : `timeout:"${tab.tail.slice(0, 60)}"`} rows=${rowsGot}/${rowsExpected} ffId=${presetIds.ff} replaceId=${replaceRes.json?.id} compiledNull=${slot ? slot.compiled === null : 'n/a'} notesOk=${notesOk} A ${aBefore}->${aAfter} panelPosts=${J(panelPosts)} B ${bBefore}->${bAfter} ms=${bMs}`);
         } catch (err) {
             report(name, false, /** @type {Error} */ (err).message);
         }

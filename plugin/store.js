@@ -347,14 +347,27 @@ export class Store {
                 doc.id = existing.id;
                 doc.createdAt = existing.doc.createdAt;
                 const desired = this.state.presetId === existing.id;
-                if (desired) this._markSlotChanged();
-                const saved = await this._savePresetNow(doc);
-                if (desired && this.state.loadoutId && !Object.prototype.hasOwnProperty.call(saved.loadouts ?? {}, this.state.loadoutId)) {
-                    // the slot's loadout id no longer exists in the new
-                    // document (an ST re-import re-mints loadout ids):
-                    // fall back to the doc's active loadout
-                    await this._mutateStateNow((st) => { st.loadoutId = null; });
-                }
+                // GET /slot reads this.index + this.state OUTSIDE the store
+                // queue, so the slot-changed marker and the loadout-id
+                // fallback must land in the SAME synchronous instant the
+                // new doc is published into this.index — not before (the
+                // old doc is still indexed) and not after (a reader could
+                // observe the new doc with a stale loadout id in between).
+                // onPublish runs synchronously right after this.index.set.
+                const saved = await this._savePresetNow(doc, {
+                    onPublish: (indexedDoc) => {
+                        if (!desired) return;
+                        this._markSlotChanged();
+                        if (this.state.loadoutId && !Object.prototype.hasOwnProperty.call(indexedDoc.loadouts ?? {}, this.state.loadoutId)) {
+                            // the slot's loadout id no longer exists in the
+                            // new document (an ST re-import re-mints
+                            // loadout ids): fall back to the doc's active
+                            // loadout. _bumpRev() right after this persists
+                            // this.state to disk with the matching rev.
+                            this.state.loadoutId = null;
+                        }
+                    },
+                });
                 return saved;
             }
             if (this.index.has(doc.id)) {
@@ -386,7 +399,7 @@ export class Store {
      * + save). Never call outside the queue — the single-writer invariant
      * is what makes its reads trustworthy.
      * @param {any} doc
-     * @param {{ label?: string }} [opts]
+     * @param {{ label?: string, onPublish?: (indexedDoc: any) => void }} [opts]
      */
     async _savePresetNow(doc, opts = {}) {
         {
@@ -405,7 +418,7 @@ export class Store {
                 await fsp.mkdir(path.dirname(newPath), { recursive: true });
                 await fsp.rename(oldNamePath, newPath);
             }
-            await this._writeDoc(doc, path.dirname(newPath));
+            await this._writeDoc(doc, path.dirname(newPath), opts.onPublish);
             await this._bumpRev();
             return structuredClone(doc);
         }
@@ -423,11 +436,20 @@ export class Store {
         });
     }
 
-    /** @param {any} doc @param {string} dir */
-    async _writeDoc(doc, dir) {
+    /**
+     * @param {any} doc @param {string} dir
+     * @param {((indexedDoc: any) => void)|undefined} [onPublish] invoked
+     *   synchronously right after the doc is published into `this.index`,
+     *   with no `await` in between. GET /slot reads `this.index` +
+     *   `this.state` OUTSIDE the store queue, so a caller that needs a
+     *   state change (e.g. slot-changed marker, loadout fallback) to be
+     *   visible in the SAME instant the new doc becomes visible must do
+     *   it here, not after this call returns.
+     */
+    async _writeDoc(doc, dir, onPublish = undefined) {
         const file = path.join(dir, `${sanitizeName(doc.name)}.json`);
         await atomicWrite(file, JSON.stringify(doc, null, 2) + '\n');
-        this.index.set(doc.id, {
+        const indexed = {
             id: doc.id,
             path: file,
             name: doc.name,
@@ -435,7 +457,9 @@ export class Store {
             tags: doc.tags ?? [],
             updatedAt: doc.updatedAt,
             doc: structuredClone(doc),
-        });
+        };
+        this.index.set(doc.id, indexed);
+        if (onPublish) onPublish(indexed.doc);
     }
 
     // ------------------------------------------------------------- revisions
