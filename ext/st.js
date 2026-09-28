@@ -29,10 +29,14 @@ export function clientId() {
 /** GET /csrf-token once, reuse cookie + token for every non-GET. */
 let /** @type {string|null} */ csrfToken = null;
 
-/** @returns {Promise<string>} */
-export async function getCsrfToken() {
+/**
+ * GET /csrf-token once, reuse cookie + token for every non-GET.
+ * @param {AbortSignal} [signal] deadline covering the acquisition fetch
+ * @returns {Promise<string>}
+ */
+export async function getCsrfToken(signal = undefined) {
     if (csrfToken) return csrfToken;
-    const res = await fetch('/csrf-token', { credentials: 'include' });
+    const res = await fetch('/csrf-token', { credentials: 'include', signal });
     const data = await res.json();
     csrfToken = data.token;
     return /** @type {string} */ (csrfToken);
@@ -54,20 +58,25 @@ export async function api(method, path, body = undefined, opts = undefined) {
         headers: {},
     };
     if (method !== 'GET') {
-        init.headers = {
-            'Content-Type': 'application/json',
-            'x-csrf-token': await getCsrfToken(),
-        };
         init.body = JSON.stringify(body ?? {});
     }
-    // LIVENESS BOUND (15 s): every plugin request is bounded, so a request
-    // that never settles (dead socket, plugin wedged) cannot hold a bridge
-    // op open — reconcileOp holds the full-screen apply overlay across
-    // flush -> GET -> apply, and an unbounded fetch would keep input blocked
-    // indefinitely. With the deadline the op rejects, reconcileOp's finally
-    // unmounts the overlay and the queue stays alive for a retry.
+    // LIVENESS BOUND (15 s): created BEFORE CSRF acquisition so the deadline
+    // covers the whole request, not just the plugin fetch — on a tab's first
+    // non-GET, getCsrfToken() performs its own unbounded fetch, and a
+    // /csrf-token that never settles would otherwise keep this call (and the
+    // bridge op holding the apply overlay) open indefinitely. With the
+    // deadline the op rejects, reconcileOp's finally unmounts the overlay
+    // and the queue stays alive for a retry. Every plugin request is
+    // bounded: a request that never settles (dead socket, plugin wedged)
+    // cannot hold a bridge op open.
     const deadline = AbortSignal.timeout(15000);
     init.signal = opts?.signal ? AbortSignal.any([opts.signal, deadline]) : deadline;
+    if (method !== 'GET') {
+        init.headers = {
+            'Content-Type': 'application/json',
+            'x-csrf-token': await getCsrfToken(deadline),
+        };
+    }
     const res = await fetch(`${PLUGIN_BASE}${path}`, init);
     if (!res.ok) {
         let detail = '';
@@ -97,19 +106,40 @@ export async function pluginHealth() {
  */
 export async function applyCompiledToSlot(compiled) {
     const pm = ctx().getPresetManager('openai');
-    // LIVENESS BOUND (15 s): savePreset() returns a promise ST resolves via
-    // its own save/list-refresh chain — in a wedged tab it never settles,
-    // and reconcileOp holds the apply overlay (input blocked) until this
-    // function settles. The deadline turns a hung save into a rejection:
-    // the op rejects, reconcileOp's finally unmounts the overlay, the queue
-    // stays alive and the next reconcile retries the apply.
-    await Promise.race([
-        pm.savePreset(SLOT_NAME, compiled),
-        new Promise((/** @type {(v: never) => void} */ resolve, reject) => {
-            const t = setTimeout(() => reject(new Error('applyCompiledToSlot: pm.savePreset did not settle within 15s — the overlay must not be held open past this')), 15000);
-            t.unref?.();
-        }),
-    ]);
+    // LIVENESS BOUND (15 s): reproduce ST 1.19.0 PresetManager.savePreset()
+    // (public/scripts/preset-manager.js:473-505, ~/tools/ST-dev read-only)
+    // inline instead of calling it, with an AbortSignal.timeout deadline on
+    // the POST. In the 'openai' branch of savePreset (the novel/instruct
+    // conversions at :474-480 do not apply — this.apiId is 'openai') the
+    // whole method is exactly: POST /api/presets/save with
+    // {preset, name, apiId} and getRequestHeaders() (:484-488), throw on
+    // !ok (:490-494), take data.name (:496-497), then the synchronous
+    // updateList(name, preset) (:504) that selects the option and fires the
+    // change event. Calling pm.savePreset() behind a Promise.race could not
+    // deliver this: the race rejects at 15 s but the save chain keeps
+    // running, so a later-settling save would still run updateList() and
+    // select/apply the slot AFTER reconcileOp removed the overlay and moved
+    // on — an out-of-queue apply overwriting a user edit. An aborted fetch
+    // cannot complete later, so the deadline here is a real cancellation.
+    let response;
+    try {
+        response = await fetch('/api/presets/save', {
+            method: 'POST',
+            headers: ctx().getRequestHeaders(),
+            body: JSON.stringify({ preset: compiled, name: SLOT_NAME, apiId: 'openai' }),
+            signal: AbortSignal.timeout(15000),
+        });
+    } catch (err) {
+        throw new Error(`applyCompiledToSlot: preset save did not settle within 15s (or failed to start) — ${/** @type {Error} */ (err).message ?? err}`);
+    }
+    if (!response.ok) {
+        let detail = '';
+        try { detail = JSON.stringify(await response.json()); } catch { detail = response.statusText; }
+        throw new Error(`applyCompiledToSlot: /api/presets/save -> ${response.status}: ${detail}`);
+    }
+    const data = await response.json();
+    // ST 1.19.0 preset-manager.js:497,504 — data.name then updateList.
+    pm.updateList(data.name, compiled);
     // savePreset POSTs /api/presets/save and updateList() selects it;
     // onSettingsPresetChange runs via the select's change event. ST exports
     // getPresetApplicationPromise from openai.js:5015 covering the listener
