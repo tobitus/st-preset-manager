@@ -167,10 +167,22 @@ export class Bridge {
         if (!force && this.appliedPanelHash && this.hashOf(snapshot) === this.appliedPanelHash) return;
         if (currentPresetName() !== SLOT_NAME) return; // detached: never write a foreign preset
         // serialize concurrent panel events; only the last one matters
+        const revBefore = this.appliedRev;
         const run = this.lastPanelPost.then(async () => {
             try {
                 this.panelInFlight = true;
                 const res = await api('POST', '/slot/panel', { clientId: clientId(), snapshot });
+                // Stale-response guard (race finding 3): while this POST was
+                // in flight a newer desired may have been applied (slot/load
+                // → reconcile → apply advanced appliedRev). Re-applying the
+                // panel response's compiled output would UNDO that newer
+                // state, and the slot event it also emitted is then eaten by
+                // echo suppression (rev <= appliedRev) — the tab sticks on
+                // the old preset. Detect and reconcile to the latest instead.
+                if (res.rev < this.appliedRev || (this.appliedRev > revBefore && this.appliedHash !== res.hash)) {
+                    void this.reconcile();
+                    return;
+                }
                 this.appliedHash = res.hash;
                 this.appliedRev = res.rev;
                 this.appliedPanelHash = this.hashOf(snapshot);
