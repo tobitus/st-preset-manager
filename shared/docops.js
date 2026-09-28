@@ -54,18 +54,6 @@ function defaultFields() {
     };
 }
 
-/** True when `rows` is (identity-wise) one of the arrays inside `haystack`
- * tree — used to find the sequence owning a located row. */
-function containsRows(/** @type {any[]} */ haystack, /** @type {any[]} */ rows) {
-    if (haystack === rows) return true;
-    for (const row of haystack) {
-        for (const f of ['rows', 'options']) {
-            if (Array.isArray(row[f]) && containsRows(row[f], rows)) return true;
-        }
-    }
-    return false;
-}
-
 function activeLoadout(/** @type {any} */ doc) {
     const l = doc.loadouts?.[doc.activeLoadoutId];
     if (!l) throw new OpError('preset has no active loadout', 409);
@@ -233,23 +221,36 @@ function opSetCardinality(doc, a) {
  * @param {{ keys?: string[], headerKey?: string|null, name?: string, cardinality?: string, before?: string|null }} a
  */
 function opCreateGroup(doc, a) {
-    const keys = new Set(/** @type {string[]} */ (a?.keys ?? []));
+    if (!Array.isArray(a?.keys) || !a.keys.every((/** @type {any} */ k) => typeof k === 'string')) {
+        throw new OpError('createGroup keys must be an array of strings');
+    }
+    if (a.headerKey !== undefined && a.headerKey !== null && typeof a.headerKey !== 'string') {
+        throw new OpError('createGroup headerKey must be a string');
+    }
+    const keys = new Set(/** @type {string[]} */ (a.keys));
     if (a?.headerKey) keys.add(a.headerKey);
     if (keys.size === 0) throw new OpError('createGroup needs keys (and optionally headerKey)');
     if (a?.cardinality !== undefined && a.cardinality !== 'pick-one' && a.cardinality !== 'pick-one-or-more') {
         throw new OpError(`bad cardinality ${JSON.stringify(a.cardinality)}`);
     }
-    // all members must live in one sequence
+    // all members must live in one sequence, and every key (incl. headerKey)
+    // must exist in it: any throw below happens BEFORE the doc is mutated
     /** @type {{ seq: any, flat: any[] }|null} */
     let host = null;
+    /** @type {Set<string>|null} */
+    let found = null;
     for (const seq of doc.sequences ?? []) {
         const flat = flattenSeq(seq.rows ?? []);
-        if (flat.some((e) => keys.has(e.leaf.key))) {
+        const present = flat.filter((/** @type {any} */ e) => keys.has(e.leaf.key)).map((/** @type {any} */ e) => e.leaf.key);
+        if (present.length) {
             if (host) throw new OpError('createGroup keys span multiple sequences');
             host = { seq, flat };
+            found = new Set(present);
         }
     }
     if (!host) throw new OpError('no row with any of the given keys', 404);
+    const missing = [...keys].filter((/** @type {string} */ k) => !found.has(k));
+    if (missing.length) throw new OpError(`no row with key ${JSON.stringify(missing[0])}`, 404);
 
     const members = host.flat.filter((e) => keys.has(e.leaf.key));
     for (const e of members) {
@@ -314,7 +315,7 @@ function opAddOption(doc, a) {
             : defaultFields(),
         notes: '',
     };
-    const row = { kind: 'block', ref: identifier, enabled: false, key: newKey('row') };
+    const row = { kind: 'block', ref: identifier, key: newKey('row') };
     grp.options.push(row); // list end = after the last sibling (v1)
     grp.guessed = false;
     for (const loadout of Object.values(doc.loadouts ?? {})) {
@@ -412,8 +413,35 @@ function opEditBlock(doc, a) {
  */
 function opAddBlock(doc, a) {
     if (typeof a?.name !== 'string' || !a.name.trim()) throw new OpError('addBlock needs {name}');
+    if (a.before != null && typeof a.before !== 'string') {
+        throw new OpError('addBlock before must be a leaf key');
+    }
     const identifier = typeof a.identifier === 'string' && a.identifier ? a.identifier : newId();
     if (doc.blocks?.[identifier]) throw new OpError(`block ${identifier} already exists`, 409);
+    const row = { kind: 'block', ref: identifier, key: newKey('row') };
+    const entry = { leaf: row, rank: 'item', gmeta: null, sname: null };
+    // anchor lookup BEFORE any mutation: a 404 must leave the doc untouched.
+    // The flat scan also finds group/section heading leaves, which live in no
+    // rows array (that is why the nested requireRow lookup failed on them).
+    /** @type {{ seq: any, flat: any[], idx: number }|null} */
+    let anchor = null;
+    if (a.before != null) {
+        for (const seq of doc.sequences ?? []) {
+            const flat = flattenSeq(seq.rows ?? []);
+            const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === a.before);
+            if (idx !== -1) {
+                anchor = { seq, flat, idx };
+                break;
+            }
+        }
+        if (!anchor) throw new OpError(`no row with key ${JSON.stringify(a.before)}`, 404);
+        // keep the anchor's section (same sname) so the row lands beside it;
+        // above a SECTION heading the item lands OUTSIDE the section, so it
+        // takes the sname of the entry before the heading instead
+        entry.sname = anchor.flat[anchor.idx].rank === 'section'
+            ? (anchor.flat[anchor.idx - 1]?.sname ?? null)
+            : (anchor.flat[anchor.idx].sname ?? null);
+    }
     doc.blocks ??= {};
     doc.blocks[identifier] = {
         identifier,
@@ -423,19 +451,9 @@ function opAddBlock(doc, a) {
         fields: a.fields ? { ...a.fields } : defaultFields(),
         notes: '',
     };
-    const row = { kind: 'block', ref: identifier, enabled: false, key: newKey('row') };
-    const entry = { leaf: row, rank: 'item', gmeta: null, sname: null };
-    if (a.before != null) {
-        const [rows] = requireRow(doc, a.before); // [parentRows, idx, row]
-        // the anchor's sequence is the one holding its parent rows
-        const seq = doc.sequences.find((/** @type {any} */ s) => containsRows(s.rows ?? [], rows));
-        if (!seq) throw new OpError(`no sequence holds anchor ${JSON.stringify(a.before)}`, 404);
-        const flat = flattenSeq(seq.rows ?? []);
-        const idx = flat.findIndex((e) => e.leaf.key === a.before);
-        // keep the anchor's section (same sname) so the row lands beside it
-        entry.sname = flat[idx]?.sname ?? null;
-        flat.splice(idx, 0, entry);
-        seq.rows = rebuildSeq(flat);
+    if (anchor) {
+        anchor.flat.splice(anchor.idx, 0, entry);
+        anchor.seq.rows = rebuildSeq(anchor.flat);
     } else {
         const seq = (doc.sequences ?? [])[0];
         if (!seq) throw new OpError('document has no sequences', 409);
@@ -458,24 +476,37 @@ function opDeleteBlock(doc, a) {
     if (typeof identifier !== 'string') throw new OpError('deleteBlock needs {identifier}');
     if (doc.blocks?.[identifier] === undefined) throw new OpError(`no block ${JSON.stringify(identifier)}`, 404);
     delete doc.blocks[identifier];
-    const strip = (/** @type {any[]} */ rows) => rows.filter((row) => {
-        if (['marker', 'block', 'ghost'].includes(row.kind)) return identOf(row) !== identifier;
-        if (row.kind === 'section') {
-            if (row.header && identOf(row.header) === identifier) return false;
-            row.rows = strip(row.rows ?? []);
-            return true;
-        }
-        if (row.kind === 'group') {
-            if (row.header && identOf(row.header) === identifier) {
-                rows.push(...(row.options ?? [])); // promote options to the parent position
-                return false;
+    // flatten -> drop the identifier -> rebuild, per sequence: dropping a
+    // group/section heading must NOT destroy its children, and the orphaned
+    // option run must not merge into a neighbouring group (rebuildSeq always
+    // joins consecutive options onto the currently open group)
+    for (const seq of doc.sequences ?? []) {
+        const entries = flattenSeq(seq.rows ?? []);
+        let touched = false;
+        /** @type {any[]} */
+        const out = [];
+        for (let i = 0; i < entries.length; i++) {
+            const e = entries[i];
+            if (identOf(e.leaf) !== identifier) {
+                out.push(e);
+                continue;
             }
-            row.options = strip(row.options ?? []);
-            return true;
+            touched = true;
+            // e is removed. Options that followed it would re-join the group
+            // above (or the previous group across the section) on rebuild —
+            // demote the contiguous option run to plain items.
+            if (e.rank === 'group'
+                || (e.rank === 'section'
+                    && (out.at(-1)?.rank === 'option' || out.at(-1)?.rank === 'group')
+                    && entries[i + 1]?.rank === 'option'))
+            {
+                for (let j = i + 1; j < entries.length && entries[j].rank === 'option'; j++) {
+                    entries[j] = { ...entries[j], rank: 'item', gmeta: null };
+                }
+            }
         }
-        return true;
-    });
-    for (const seq of doc.sequences ?? []) seq.rows = strip(seq.rows ?? []);
+        if (touched) seq.rows = rebuildSeq(out);
+    }
     for (const loadout of Object.values(doc.loadouts ?? {})) {
         delete loadout.enabled[identifier];
         for (const ov of Object.values(loadout.overrides ?? {})) delete ov.enabled?.[identifier];

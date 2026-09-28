@@ -194,6 +194,7 @@ export class Store {
                 // rank ops are byte-exact invertible and hand-edited files
                 // normalize too (no-op for docs the store wrote itself).
                 deriveStructure(doc);
+                stripLeafEnabled(doc); // legacy files: bits belong to loadouts only
                 next.set(doc.id, {
                     id: doc.id,
                     path: full,
@@ -300,6 +301,7 @@ export class Store {
                 if (!doc.loadouts || Object.keys(doc.loadouts).length === 0) {
                     ensureDefaultLoadout(doc);
                 }
+                stripLeafEnabled(doc); // native uploads may still carry leaf bits
                 const errs = validateDoc(doc);
                 if (errs.length) throw new StoreError(`invalid native document: ${errs.join(', ')}`);
             } else if (body.st) {
@@ -577,6 +579,32 @@ export class Store {
 }
 
 /**
+ * Delete the legacy per-leaf `enabled` bits from every leaf row in every
+ * sequence (leaves of kind marker/block/ghost at any depth, plus `row.header`
+ * of groups and sections). Enabled bits live ONLY in loadouts (PLAN Phase 2
+ * Must NOT); the import recognizers still set them for cardinality guessing,
+ * so the store strips them after the loadout has been built from them.
+ * @param {any} doc
+ */
+export function stripLeafEnabled(doc) {
+    const walk = (/** @type {any[]} */ rows) => {
+        for (const row of rows) {
+            if (['marker', 'block', 'ghost'].includes(row.kind)) {
+                delete row.enabled;
+            } else if (row.kind === 'section') {
+                if (row.header) delete row.header.enabled;
+                walk(row.rows ?? []);
+            } else if (row.kind === 'group') {
+                if (row.header) delete row.header.enabled;
+                walk(row.options ?? []);
+            }
+        }
+    };
+    for (const seq of doc.sequences ?? []) walk(seq.rows ?? []);
+    return doc;
+}
+
+/**
  * Build the default loadout from a fresh import: "Current" = every leaf's
  * enabled bit as imported (which mirrors the source's prompt_order bits).
  * @param {any} doc
@@ -603,6 +631,7 @@ export function ensureDefaultLoadout(doc) {
     };
     doc.activeLoadoutId = lid;
     ensureAllLeaves(doc, doc.loadouts[lid].enabled);
+    stripLeafEnabled(doc); // bits live in the loadout now, never on leaf rows
     return doc;
 }
 
