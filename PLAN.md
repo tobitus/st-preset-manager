@@ -178,28 +178,55 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 - **Desired state + revision counter.** `state.json` (§1.2) is what the slot *should* hold.
   Every mutation bumps `rev`, is applied unconditionally (**most-recent-wins = server receipt
   order**; no client timestamps, no optimistic-lock rejects — item 5), and is broadcast.
+  `state.slotChangedRev` records the global rev of the last change to the *desired* slot
+  (preset or loadout swap); `/slot/panel` uses it to reject stale panel bases (below).
 - **Tab connect reconciliation.** On extension init: `GET /slot` → `{rev, desired, compiled,
   hash}`. If `desired.presetId` is set, the tab **always applies** `compiled` (acceptance 4:
   API state beats `settings.json`), then opens the SSE stream. Every panel edit was already
   pushed to the plugin at save time (below), so nothing a closed tab did is lost.
+- **One serial op queue (bridge core).** Every op that reads or writes ST's preset state —
+  `reconcile` ops and `panel` ops — runs on a single promise chain, in enqueue order. No op
+  ever calls another op directly: ops only ENQUEUE follow-ups (`enqueueReconcile()` /
+  `enqueuePanel()`), so an op can never observe a half-applied preset and no apply/write-back
+  re-entrancy is possible. Requests are coalesced per kind: while a reconcile (or panel) op is
+  queued but NOT yet started, further requests set a flag instead of stacking another op — the
+  queued run re-fetches fresh state, so repeated events collapse into one re-read.
+  - **reconcile op** = `GET /slot`; if `slot.hash !== appliedHash`, apply it (below) and set
+    `appliedHash`/`appliedRev`; the apply re-snapshots the panel into `baseSnapshot` (the
+    projection ST actually shows, right after apply — the honest baseline for the
+    panel-unchanged gate). If the hashes are equal, the op is a no-op. Idempotent: running it
+    any number of times converges on the latest server state.
+  - **panel op** (enqueued from `SETTINGS_UPDATED` while the slot is selected, coalesced the
+    same way) = snapshot `S`; if `hash(S) === hash(baseSnapshot)`, nothing happened — return
+    (this also absorbs the `SETTINGS_UPDATED` that our own apply triggers). Otherwise
+    `POST /slot/panel {clientId, baseRev: appliedRev, base: baseSnapshot, snapshot: S}`.
+    On 200: set `appliedHash`/`appliedRev` from the response and `baseSnapshot = S`; if the
+    response's compiled panel projection differs from `S` (e.g. a pick-one collapse), enqueue
+    a reconcile — never apply inline. On 409 (stale): enqueue a reconcile, drop the snapshot.
+- **SSE handling.** `hello`, `slot` and `preset` events with `msg.rev > appliedRev` enqueue a
+  (coalesced) reconcile; there are **no origin checks** — our own echo just re-reads and finds
+  the hash already applied (a cheap no-op).
 - **Applying** = `getPresetManager('openai').savePreset(SLOT, compiled)` (exposed on
   `SillyTavern.getContext()`, `st-context.js:288`; `preset-manager.js:473-509` POSTs
   `/api/presets/save` then `updateList` triggers `change` → `onSettingsPresetChange`,
   `openai.js:5020-5081`, which re-renders the prompt manager via `OAI_PRESET_CHANGED_AFTER`,
   `PromptManager.js:818`). The tab then `await getPresetApplicationPromise()` (import from
-  `/scripts/openai.js`, exported at `:5015`) and records `appliedHash = hash`,
-  `appliedRev = rev`. Slot name: `⟨PM⟩ working`; the tab uses the name ST returns from
-  `/api/presets/save` (sanitized) as the canonical slot name from then on.
-- **Echo suppression.** Each tab has a `clientId`; events whose `origin === clientId` and
-  whose `rev <= appliedRev` are ignored. Any other `slot` event → `GET /slot` → apply if
-  `hash !== appliedHash`.
+  `/scripts/openai.js`, exported at `:5015`), records `appliedHash = hash`,
+  `appliedRev = rev`, and re-snapshots the panel into `baseSnapshot`. Slot name: `⟨PM⟩
+  working`; the tab uses the name ST returns from `/api/presets/save` (sanitized) as the
+  canonical slot name from then on.
 - **Write-back of ST panel edits (item 3, acceptance 2).** Every prompt-manager and sampler
   change funnels into `saveSettingsDebounced` → `/api/settings/save` → `SETTINGS_UPDATED`
   (`PromptManager.js:443-451/1919-1935`, `openai.js:6776-6780`, `script.js:8109-8110`). On
-  `SETTINGS_UPDATED`, if `oai_settings.preset_settings_openai === SLOT`: snapshot
-  `S = getChatCompletionPreset(oai_settings)` (`openai.js:4582`), drop connection keys,
-  hash; if `hash !== appliedHash` → `POST /slot/panel {clientId, snapshot: S}`. The **plugin**
-  diffs `S` against its last compiled output and routes each difference:
+  `SETTINGS_UPDATED` with `oai_settings.preset_settings_openai === SLOT`, the bridge enqueues
+  a panel op (above). The op POSTs `{clientId, baseRev, base: baseSnapshot, snapshot: S}`;
+  the **plugin** diffs `S` against `base` — DELTA = what the user changed in the panel, not
+  what the panel shows against the current compile — and routes only that delta onto the
+  CURRENT document (concurrent API writes to untouched fields survive: most recent wins per
+  field). A `prompts`/`prompt_order` change carries the full arrays so the field-level
+  routing below sees exactly the user's edit; absent sections mean "unchanged". If the
+  desired preset or loadout changed after `baseRev` (`state.slotChangedRev > baseRev`), or
+  `base` is missing, the route answers **409** and the tab re-reconciles. Delta routing:
   - `prompt_order[].enabled` changed for identifier `i` → `L.overrides[M].enabled[i]` if that
     override lists `i`, else `L.enabled[i]` (item 21). If `i` is a pick-one option turned on,
     its siblings are turned off (acceptance 9).
@@ -211,9 +238,11 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
     panel has an explicit "override for this preset" switch so intent is visible). With no
     Model resolved, → `D.settings` and a warning event.
   - anything else → `D.settings`.
-  Response `{rev, compiled, hash}`; the tab re-applies iff `hash !== hash(S)` (this is how
-  a pick-one conflict made in ST's panel collapses back to one option). Other tabs get the
-  broadcast.
+  Response `{rev, compiled, hash}`. A routed-nothing observation is NOT a revision (no save,
+  no broadcast). The tab sets `appliedHash`/`appliedRev`/`baseSnapshot = S` from the 200; if
+  the response's compiled projection differs from `S` (a pick-one conflict made in ST's panel
+  collapsed back to one option), it enqueues a reconcile — the re-apply goes through the
+  queue, never inline. Other tabs get the broadcast.
 - **Detached mode.** `PRESET_CHANGED` (`events.js:92`) with a name ≠ SLOT means ST moved off
   the slot (user picked another preset, ST's chat-name auto-select, or a profile — §1.5).
   The bridge stops write-back (never writes a foreign preset into the library) and shows a
@@ -269,7 +298,7 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 | GET | `/slot` | `{rev, desired:{presetId,loadoutId,modelId}, compiled, hash}` |
 | POST | `/slot/load` | `{presetId, loadoutId?}` → bumps rev, broadcasts `slot` |
 | POST | `/slot/model` | `{modelId, raw}` |
-| POST | `/slot/panel` | `{clientId, snapshot}` → `{rev, compiled, hash, routed:[{key,layer}]}` |
+| POST | `/slot/panel` | `{clientId, baseRev, base, snapshot}` — routes DELTA = diff(base, snapshot) onto the current doc; 409 when the desired preset/loadout changed after `baseRev` (`slotChangedRev`) or `base` is missing → `{rev, compiled, hash, routed:[{key,layer}]}` |
 | GET | `/events` | SSE (§1.4); `?since=N` replays nothing but sets the initial `hello.rev` comparison |
 | POST | `/diff` | `{a:{presetId, rev?}, b:{presetId, rev?}}` → `{rows:[{status: same|changed|moved|only-left|only-right, left?, right?, fields:[…]}], settings:[{key,a,b}]}` (v1 `compare.py` matching: identifier, then normalized name) |
 | POST | `/diff/blocks` | `{a:{presetId, identifier, rev?}|{text}, b:{…}}` → `{hunks}` line diff (shared/diff.js, LCS) |
@@ -622,11 +651,12 @@ K3" (they only need to be two ids under one Model); the merge of the three real 
    skips connection keys and leaves absent keys alone** → a stale value from the previous
    preset survives. Detected in Phase 1 check 6 (load Sola after FF; compare *every*
    compiled key with `oai`). Mitigation is the Default.json base (§1.3).
-2. **Write-back echo loop**: apply → `SETTINGS_UPDATED` → snapshot ≠ compiled (ST
-   normalises something, e.g. `migrateChatCompletionSettings`, `sanitizeServiceSettings`
-   adding identifiers) → `/slot/panel` → recompile → apply → … Detected in Phase 1 check 4:
-   `/health.rev` must stop moving within 2 s of a load. Fix = compare after the same
-   normalisation, not by widening the ignore list.
+2. **Write-back echo loop**: apply → `SETTINGS_UPDATED` → snapshot ≠ baseline →
+   `/slot/panel` → recompile → apply → … Detected in Phase 1 check 4:
+   `/health.rev` must stop moving within 2 s of a load. Fix = the panel op's equality gate
+   against `baseSnapshot` (the projection re-snapshotted right after the apply, so ST's
+   normalisation is already inside the baseline), not a wider ignore list; a panel response
+   whose compiled projection differs from the snapshot re-bases via a queued reconcile.
 3. **SSE buffered by `compression()`** — Phase 1 check 3, before any UI exists.
 4. **`--hostname` with `--network host` refused by podman** — `dev/up.sh` step 4; fallback stated.
 5. **ST's chat-name auto-select (`preset-manager.js:992`) moves ST off the slot** when a

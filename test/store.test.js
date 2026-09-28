@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Store, ensureDefaultLoadout } from '../plugin/store.js';
 import { validateDoc, validateRegistry, splitSnapshot } from '../shared/schema.js';
-import { routePanelDiff, applyOrderToSequences, deleteBlockFromDoc } from '../plugin/slot.js';
+import { routePanelDiff, applyOrderToSequences, deleteBlockFromDoc, panelDelta } from '../plugin/slot.js';
 import { compile } from '../shared/compile.js';
 import { importStPreset } from '../shared/recognizers.js';
 import fs from 'node:fs';
@@ -283,4 +283,81 @@ test('store: shelf add/list/remove', async () => {
     await store.shelfRemove(entry.id);
     assert.equal(store.shelfList().length, 0);
     await assert.rejects(() => store.shelfAdd({ fromPresetId: doc.id, identifier: 'nope' }), (/** @type {{status?: number}} */ e) => e.status === 404);
+});
+
+test('slot routing: panel DELTA preserves concurrent API writes (temperature survives an older panel toggle)', () => {
+    // The tab based its edit on `base` (temperature 0.66 as compiled then).
+    // A concurrent API write then changed the document's temperature to 0.9.
+    // The user's panel edit toggles block b off and nothing else — the
+    // routed delta must carry the toggle but NOT the stale temperature.
+    const st = sampleSt();
+    const doc = importStPreset(st, 'delta');
+    ensureDefaultLoadout(doc);
+    const { compiled: base } = compile(doc, null, {});
+    const baseRevSnapshot = structuredClone(base);
+
+    // concurrent API write lands AFTER the tab snapshotted its base
+    doc.settings.temperature = 0.9;
+    const { compiled: current } = compile(doc, null, {});
+    assert.equal(current.temperature, 0.9);
+
+    // user toggles b off in the panel; their snapshot still shows 0.66
+    const snapshot = structuredClone(baseRevSnapshot);
+    snapshot.temperature = 0.66; // tab shows the old value it applied
+    const baseWith066 = structuredClone(baseRevSnapshot);
+    baseWith066.temperature = 0.66; // ...and its base carried 0.66 too
+    snapshot.prompt_order[0].order.find((/** @type {any} */ o) => o.identifier === 'b').enabled = false;
+    snapshot.prompts.find((/** @type {any} */ p) => p.identifier === 'b').enabled = false;
+
+    const delta = panelDelta(baseWith066, snapshot);
+    assert.equal(delta.temperature, undefined); // untouched by the user
+    assert.ok(delta.prompt_order.length > 0); // toggle rides in the order section
+
+    const { routed } = routePanelDiff(doc, current, delta, null);
+    assert.ok(routed.some((r) => r.key === 'b' && r.layer === 'loadout'));
+    assert.equal(doc.loadouts[doc.activeLoadoutId].enabled.b, false);
+    // the API write SURVIVED: no stale temperature routed over it
+    assert.equal(doc.settings.temperature, 0.9);
+    assert.ok(!routed.some((r) => r.key === 'temperature'));
+});
+
+test('slot routing: unchanged panel sections collapse to empty in the delta (no wholesale rewrite)', () => {
+    const st = sampleSt();
+    const doc = importStPreset(st, 'same');
+    ensureDefaultLoadout(doc);
+    const { compiled: base } = compile(doc, null, {});
+    const snapshot = structuredClone(base);
+    snapshot.wi_format = 'user edited this'; // only a settings key changes
+    const delta = panelDelta(base, snapshot);
+    assert.deepEqual(delta.prompt_order, []); // sections untouched -> absent
+    assert.deepEqual(delta.prompts, []);
+    assert.equal(delta.wi_format, 'user edited this');
+    // rerouted against the CURRENT compiled output: enabled bits are not
+    // clobbered by an empty section, and only wi_format routes
+    const doc2 = importStPreset(st, 'same2');
+    ensureDefaultLoadout(doc2);
+    doc2.loadouts[doc2.activeLoadoutId].enabled.c = true; // API changed a bit meanwhile
+    const { compiled: current } = compile(doc2, null, {});
+    const { routed } = routePanelDiff(doc2, current, delta, null);
+    assert.deepEqual(routed.map((r) => r.key), ['wi_format']);
+    assert.equal(doc2.loadouts[doc2.activeLoadoutId].enabled.c, true); // survived
+});
+
+test('store: /slot/panel state guard — slotChangedRev rejects pre-load panel posts', async () => {
+    // Mirrors the route's 409 rule: baseRev older than the last desired-slot
+    // change must be rejected, else an old preset's panel delta would be
+    // poured into the newly loaded document.
+    const { store, doc } = await storeWithDoc();
+    const revAtBase = store.rev;
+    await store.mutateState((st) => {
+        store._markSlotChanged();
+        st.presetId = doc.id; // /slot/load equivalent
+    });
+    assert.equal(store.slotChangedRev, revAtBase + 1);
+    // the guard expression the route evaluates:
+    const stale = (store.slotChangedRev ?? 0) > revAtBase;
+    assert.equal(stale, true); // -> 409, tab re-reconciles and re-bases
+    // a base taken AFTER the load is fine
+    const fresh = (store.slotChangedRev ?? 0) > store.rev;
+    assert.equal(fresh, false); // -> proceed with delta routing
 });

@@ -11,6 +11,8 @@ interface PmHandle {
     store: {
         root: string;
         rev: number;
+        /** Global rev at the last desired-slot change (preset/loadout swap) */
+        slotChangedRev: number;
         state: Record<string, unknown>;
         models: Record<string, unknown>;
         index: Map<string, unknown>;
@@ -29,6 +31,8 @@ interface PmHandle {
         shelfRemove(id: string): Promise<void>;
         rescan(): Promise<void>;
         enqueue(fn: () => unknown): Promise<unknown>;
+        /** mark the desired slot changed at rev+1 (call inside mutateState) */
+        _markSlotChanged(): void;
     };
     hub: {
         clientCount: number;

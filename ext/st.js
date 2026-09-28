@@ -62,7 +62,10 @@ export async function api(method, path, body = undefined) {
     if (!res.ok) {
         let detail = '';
         try { detail = JSON.stringify(await res.json()); } catch { detail = res.statusText; }
-        throw new Error(`${method} ${path} -> ${res.status}: ${detail}`);
+        const err = /** @type {Error & {status?: number}} */ (new Error(`${method} ${path} -> ${res.status}: ${detail}`));
+        // structured status: the bridge branches on 409 (stale panel base)
+        err.status = res.status;
+        throw err;
     }
     return res.json();
 }

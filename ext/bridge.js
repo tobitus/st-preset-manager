@@ -1,12 +1,20 @@
 /**
  * Live bridge (PLAN §1.4): SSE push + tab reconciliation + panel write-back.
  *
- * On extension init: GET /slot -> if desired.presetId is set the tab ALWAYS
- * applies `compiled` (acceptance 4: API state beats settings.json), then
- * opens the SSE stream. Echo suppression: events whose origin === clientId
- * and whose rev <= appliedRev are ignored. Panel edits: on SETTINGS_UPDATED
- * while the slot is selected, snapshot -> POST /slot/panel -> re-apply iff
- * the plugin's collapsed hash differs from the snapshot's.
+ * One serial op queue (a promise chain) carries EVERYTHING that reads or
+ * writes ST's preset state: `reconcile` ops and `panel` ops. No op ever
+ * calls another op directly — ops only ENQUEUE follow-ups — so an op can
+ * never observe a half-applied preset, and a queued follow-up always
+ * re-reads the latest state instead of replaying a stale view.
+ *
+ * reconcile op: GET /slot; if slot.hash !== appliedHash, apply it, then
+ * re-snapshot the panel as the new write-back baseline. Idempotent: running
+ * it any number of times converges on the latest server state.
+ *
+ * panel op: snapshot ST; if it is unchanged from the baseline, nothing
+ * happened (this also absorbs the SETTINGS_UPDATED our own apply fires);
+ * otherwise POST /slot/panel {baseRev, base, snapshot} — the server routes
+ * only the user's delta, so concurrent API writes to other fields survive.
  */
 import { api, ctx, clientId, applyCompiledToSlot, snapshotPanel, currentPresetName, SLOT_NAME, PLUGIN_BASE } from './st.js';
 
@@ -14,24 +22,50 @@ export class Bridge {
     constructor() {
         this.appliedHash = null;
         this.appliedRev = 0;
-        /** Panel-visible projection of the last applied compiled output:
-         * getChatCompletionPreset can only echo settingsToUpdate keys, so
-         * hash(compiled) != hash(snapshot) whenever compiled carries keys
-         * beyond that set (base-injected group/sort keys). Comparing
-         * snapshots against hash(compiled) made postPanel post on every
-         * SETTINGS_UPDATED and loop apply<->panel forever (doc rev +1/s). */
-        this.appliedPanelHash = null;
+        /** Panel projection of the last applied state: the write-back
+         * baseline. panel ops POST only when the snapshot differs from it. */
+        this.baseSnapshot = null;
         this.attached = false;
         this.es = null;
         /** @type {Set<(state: any) => void>} */
         this.listeners = new Set();
-        this.reconciling = false;
-        this.pendingReconcile = false;
-        /** @type {Promise<any>|null} in-flight reconcile (awaited by coalesced callers) */
-        this.reconcilePromise = null;
-        /** @type {boolean} true while our own /slot/panel POST is in flight */
-        this.panelInFlight = false;
-        this.lastPanelPost = Promise.resolve();
+        /** @type {Promise<any>} tail of the serial op queue */
+        this._queue = Promise.resolve();
+        /** @type {boolean} a reconcile op is queued but NOT yet started */
+        this._reconcileQueued = false;
+        /** @type {boolean} a panel op is queued but NOT yet started */
+        this._panelQueued = false;
+    }
+
+    /**
+     * Enqueue `op` on the serial queue. Coalescing: callers that only want
+     * "this kind of op happens next" pass `key`; while a same-keyed op is
+     * queued but not yet started, a new enqueue replaces the flag instead of
+     * stacking another op (repeated SSE events collapse into one re-read).
+     * @template T
+     * @param {() => Promise<T>} op
+     * @param {{key?: 'reconcile'|'panel'}} [opts]
+     * @returns {Promise<T>} this op's completion (a coalesced-away caller
+     *   gets the queued op's completion instead — same converged state)
+     */
+    _enqueue(op, { key } = {}) {
+        const coalescing = key === 'reconcile' ? this._reconcileQueued : key === 'panel' ? this._panelQueued : false;
+        if (coalescing) return this._queue;
+        if (key === 'reconcile') this._reconcileQueued = true;
+        if (key === 'panel') this._panelQueued = true;
+        const run = this._queue.then(async () => {
+            if (key === 'reconcile') this._reconcileQueued = false;
+            if (key === 'panel') this._panelQueued = false;
+            try {
+                return await op();
+            } finally {
+                // a request that arrived while this op ran already set the
+                // flag: it rides the next link instead of being lost
+            }
+        });
+        // keep the chain alive after rejections
+        this._queue = run.then(() => undefined, () => undefined);
+        return run;
     }
 
     /** @param {(state: any) => void} fn */
@@ -48,75 +82,51 @@ export class Bridge {
 
     /** Extension init: reconcile then stream. */
     async start() {
-        await this.reconcile();
+        await this.enqueueReconcile();
         this.openStream();
         this.watchPanel();
     }
 
-    /** GET /slot and apply desired if one is set (acceptance 4). */
-    async reconcile() {
-        // Serialize applies: dropping a reconcile while another apply is in
-        // flight lost that revision forever (its event was already consumed,
-        // nothing retried it) and left the tab stale. Queue instead — the
-        // queued run re-fetches /slot, so it applies the LATEST state, not
-        // the stale one that triggered it.
-        if (this.reconciling) {
-            this.pendingReconcile = true;
-            return this.reconcilePromise ?? Promise.resolve();
-        }
-        this.reconciling = true;
-        this.pendingReconcile = false;
-        this.reconcilePromise = (async () => {
-            let slot;
-            try {
-                do {
-                    this.pendingReconcile = false;
-                    slot = await api('GET', '/slot');
-                    if (slot.desired?.presetId && slot.compiled) {
-                        await this.apply(slot);
-                    } else {
-                        this.attached = currentPresetName() === SLOT_NAME;
-                    }
-                    this.emit({ slot, attached: this.attached });
-                } while (this.pendingReconcile);
-            } finally {
-                this.reconciling = false;
-                this.reconcilePromise = null;
-            }
-            return slot;
-        })();
-        return this.reconcilePromise;
+    /** Queue a reconcile op (coalesced with any not-yet-started one). */
+    enqueueReconcile() {
+        return this._enqueue(() => this.reconcileOp(), { key: 'reconcile' });
+    }
+
+    /** Queue a panel op (coalesced with any not-yet-started one). */
+    enqueuePanel() {
+        return this._enqueue(() => this.panelOp(), { key: 'panel' });
     }
 
     /**
-     * Apply a slot view into ST. Returns true when the page state changed.
-     * Serialization: reconcile() holds `this.reconciling` across its whole
-     * run and apply() no longer drops when it is set — a dropped apply was
-     * the stale-tab bug (the triggering event was already consumed).
-     * External callers (window actions) go through the reconcile chain.
-     * @param {{ compiled: any, hash: string, rev: number }} slot
-     * @param {{ repost?: boolean }} [opts] repost=false when called FROM
-     *   postPanel: the panel state is already persisted server-side by that
-     *   very call, and re-entering postPanel would queue behind the
-     *   lastPanelPost chain that is waiting on this apply — a deadlock that
-     *   wedged the bridge for good (reconciling stuck true).
+     * reconcile op: GET /slot; apply desired if the tab does not already
+     * show that exact compiled state. Idempotent — always fetches fresh, so
+     * any number of queued runs converge on the latest server state.
      */
-    async apply(slot, { repost = true } = {}) {
-        const before = await snapshotPanel();
+    async reconcileOp() {
+        const slot = await api('GET', '/slot');
+        if (slot.desired?.presetId && slot.compiled && slot.hash !== this.appliedHash) {
+            await this.apply(slot);
+        } else if (!slot.desired?.presetId) {
+            this.attached = currentPresetName() === SLOT_NAME;
+        }
+        this.emit({ slot, attached: this.attached });
+        return slot;
+    }
+
+    /**
+     * Apply a slot view into ST, then re-baseline the panel projection.
+     * Only ever called from reconcileOp — the queue serializes applies, so
+     * an op can never snapshot a half-applied preset.
+     * @param {{ compiled: any, hash: string, rev: number }} slot
+     */
+    async apply(slot) {
         await applyCompiledToSlot(slot.compiled);
         this.appliedHash = slot.hash;
-        this.appliedRev = slot.rev;
+        this.appliedRev = Math.max(this.appliedRev, slot.rev);
         this.attached = true;
-        const after = await snapshotPanel();
-        // the projection ST actually shows — the honest baseline for the
-        // panel-unchanged gate in postPanel
-        this.appliedPanelHash = this.hashOf(after);
-        // If ST normalised something (it does for a few keys), report the
-        // normalisation to the plugin once via the panel path, but do not
-        // loop: the plugin stores what ST reports.
-        if (repost && JSON.stringify(before) !== JSON.stringify(after)) {
-            await this.postPanel(true);
-        }
+        // the projection ST actually shows is the honest write-back baseline:
+        // the SETTINGS_UPDATED our apply triggers must compare equal to it
+        this.baseSnapshot = await snapshotPanel();
         return true;
     }
 
@@ -128,20 +138,10 @@ export class Bridge {
         es.onmessage = (ev) => {
             let msg;
             try { msg = JSON.parse(ev.data); } catch { return; }
-            if (msg.kind === 'hello') {
-                if (msg.rev > this.appliedRev) {
-                    // a change happened before we connected: re-check desired
-                    void this.reconcile();
-                }
-                return;
-            }
-            // echo suppression (PLAN §1.4). The panel POST response (which
-            // advances appliedRev) and the SSE echo race each other — the
-            // server broadcasts before it answers — so also suppress while
-            // our own panel post is in flight.
-            if (msg.origin === clientId() && (this.panelInFlight || msg.rev <= this.appliedRev)) return;
-            if (msg.kind === 'slot' || msg.kind === 'preset') {
-                void this.reconcile();
+            if (msg.kind === 'hello' || msg.kind === 'slot' || msg.kind === 'preset') {
+                // no origin checks: the queue + hash gate make our own echo a
+                // cheap no-op (re-GET returns the hash we already applied)
+                if (msg.rev > this.appliedRev) this.enqueueReconcile();
             } else {
                 this.emit({ event: msg });
             }
@@ -152,52 +152,42 @@ export class Bridge {
     }
 
     /**
-     * Panel write-back: snapshot ST, POST /slot/panel, re-apply if the
-     * plugin's normalized output differs from the snapshot (this is how a
-     * pick-one conflict collapses back to one option).
-     * @param {boolean} [force] skip the unchanged check (used right after apply)
+     * panel op: snapshot ST; if it differs from the baseline, POST the delta
+     * (base + snapshot) and let the plugin route only what the user changed.
      */
-    async postPanel(force = false) {
+    async panelOp() {
+        if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
         const snapshot = await snapshotPanel();
-        if (!snapshot) return;
-        // unchanged gate on the panel-visible projection only: compiled may
-        // carry keys getChatCompletionPreset can never echo (see
-        // appliedPanelHash note); comparing against hash(compiled) here
-        // spammed /slot/panel on every SETTINGS_UPDATED.
-        if (!force && this.appliedPanelHash && this.hashOf(snapshot) === this.appliedPanelHash) return;
-        if (currentPresetName() !== SLOT_NAME) return; // detached: never write a foreign preset
-        // serialize concurrent panel events; only the last one matters
-        const revBefore = this.appliedRev;
-        const run = this.lastPanelPost.then(async () => {
-            try {
-                this.panelInFlight = true;
-                const res = await api('POST', '/slot/panel', { clientId: clientId(), snapshot });
-                // Stale-response guard (race finding 3): while this POST was
-                // in flight a newer desired may have been applied (slot/load
-                // → reconcile → apply advanced appliedRev). Re-applying the
-                // panel response's compiled output would UNDO that newer
-                // state, and the slot event it also emitted is then eaten by
-                // echo suppression (rev <= appliedRev) — the tab sticks on
-                // the old preset. Detect and reconcile to the latest instead.
-                if (res.rev < this.appliedRev || (this.appliedRev > revBefore && this.appliedHash !== res.hash)) {
-                    void this.reconcile();
-                    return;
-                }
-                this.appliedHash = res.hash;
-                this.appliedRev = res.rev;
-                this.appliedPanelHash = this.hashOf(snapshot);
-                if (this.hashOf(res.compiled) !== this.appliedPanelHash) {
-                    await this.apply({ compiled: res.compiled, hash: res.hash, rev: res.rev }, { repost: false });
-                }
-                this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
-            } catch (err) {
-                console.error('[preset-manager] panel write-back failed', err);
-            } finally {
-                this.panelInFlight = false;
+        if (!snapshot) return null;
+        if (this.baseSnapshot && this.hashOf(snapshot) === this.hashOf(this.baseSnapshot)) return null;
+        try {
+            const res = await api('POST', '/slot/panel', {
+                clientId: clientId(),
+                baseRev: this.appliedRev,
+                base: this.baseSnapshot,
+                snapshot,
+            });
+            this.appliedHash = res.hash;
+            this.appliedRev = Math.max(this.appliedRev, res.rev);
+            this.baseSnapshot = snapshot;
+            // pick-one collapse and friends: the stored projection differs
+            // from what the panel shows — converge via the queue, never by
+            // applying inline (an op does not call another op).
+            if (this.hashOf(res.compiled) !== this.hashOf(snapshot)) {
+                this.appliedHash = null;
+                this.enqueueReconcile();
             }
-        });
-        this.lastPanelPost = run;
-        await run;
+            this.emit({ slot: { rev: res.rev, desired: null, compiled: res.compiled, hash: res.hash }, attached: true });
+        } catch (err) {
+            if (err?.status === 409) {
+                // stale (desired changed under us, or no base): drop this
+                // snapshot, re-read the server state and re-base
+                this.enqueueReconcile();
+            } else {
+                console.error('[preset-manager] panel write-back failed', err);
+            }
+        }
+        return snapshot;
     }
 
     /** @param {any} obj */
@@ -218,7 +208,7 @@ export class Bridge {
     watchPanel() {
         const c = ctx();
         const handler = () => {
-            if (currentPresetName() === SLOT_NAME) void this.postPanel();
+            if (currentPresetName() === SLOT_NAME) this.enqueuePanel();
         };
         c.eventSource.on(c.eventTypes.SETTINGS_UPDATED, handler);
         // detached mode: ST moved off the slot

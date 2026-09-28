@@ -16,7 +16,7 @@
  *   - anything else -> D.settings.
  */
 import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
-import { diffKeys, stripConnectionKeys, compile } from '../shared/compile.js';
+import { stripConnectionKeys, compile } from '../shared/compile.js';
 import { normalize } from '../shared/groups.js';
 
 /**
@@ -31,6 +31,41 @@ import { normalize } from '../shared/groups.js';
  *   (defaults to doc.activeLoadoutId); enabled bits route there
  * @returns {{ routed: {key: string, layer: string}[], globalTuning: Record<string,any>|null, warnings: string[] }}
  */
+/** @param {any[]} order */
+function oldIdentsOf(order) {
+    return order.map((o) => o?.identifier);
+}
+
+/**
+ * Panel delta = what the user changed in ST's UI (base -> snapshot), as a
+ * snapshot-shaped subset. `prompts`/`prompt_order` are top-level array
+ * fields: a change anywhere inside them carries the full current arrays, so
+ * routePanelDiff's own field-level comparisons see exactly the user's edit.
+ * Keys whose values are equal — and keys the base never carried — are
+ * absent from the delta (== untouched); `undefined` values are never
+ * emitted, so a deletion cannot shadow a concurrently written value.
+ * @param {any} base panel projection the tab based its edit on
+ * @param {any} snapshot current panel projection
+ * @returns {any|null} delta object, or null when the structure cannot be
+ *   diffed (missing prompt_order/prompts on either side)
+ */
+export function panelDelta(base, snapshot) {
+    if (!base?.prompt_order || !base?.prompts || !snapshot?.prompt_order || !snapshot?.prompts) return null;
+    const delta = {};
+    for (const key of Object.keys(snapshot)) {
+        if (key === 'prompts' || key === 'prompt_order') continue;
+        if (!(key in base) || !canonicalEqual(base[key], snapshot[key])) delta[key] = snapshot[key];
+    }
+    delta.prompt_order = canonicalEqual(base.prompt_order, snapshot.prompt_order) ? [] : snapshot.prompt_order;
+    delta.prompts = canonicalEqual(base.prompts, snapshot.prompts) ? [] : snapshot.prompts;
+    return delta;
+}
+
+/** @param {any} a @param {any} b */
+function canonicalEqual(a, b) {
+    return JSON.stringify(a) === JSON.stringify(b);
+}
+
 export function routePanelDiff(doc, compiled, snapshot, model, loadoutId = undefined) {
     /** @type {{key: string, layer: string}[]} */
     const routed = [];
@@ -43,48 +78,53 @@ export function routePanelDiff(doc, compiled, snapshot, model, loadoutId = undef
     const overrideModel = model ? loadout.overrides?.[model.name] : undefined;
 
     // ---- prompt_order: order + enabled bits
+    // With delta routing an empty prompt_order section means "unchanged"
+    // (panelDelta omits untouched sections); skip, never treat as reorder.
     const oldOrder = compiled?.prompt_order?.[0]?.order ?? [];
     const newOrder = snapshot?.prompt_order?.[0]?.order ?? [];
-    const oldIdents = oldOrder.map((/** @type {any} */ o) => o.identifier);
-    const newIdents = newOrder.map((/** @type {any} */ o) => o.identifier);
-    const orderChanged = JSON.stringify(oldIdents) !== JSON.stringify(newIdents);
+    const orderChanged = !!snapshot?.prompt_order?.length
+        && JSON.stringify(oldIdentsOf(oldOrder)) !== JSON.stringify(oldIdentsOf(newOrder));
     if (orderChanged) {
         // blocks layer: reorder the doc's sequences to match the panel order.
         // Any panel identifier we don't know is ignored (ST-side prompt the
         // library never saw; Phase 2's addBlock covers real additions).
-        applyOrderToSequences(doc, newIdents);
+        applyOrderToSequences(doc, newOrder.map((/** @type {any} */ o) => o.identifier));
         routed.push({ key: 'prompt_order.order', layer: 'blocks' });
     }
-    for (let i = 0; i < Math.min(oldOrder.length, newOrder.length); i++) {
-        const before = oldOrder[i];
-        const after = newOrder[i];
-        if (before.identifier !== after.identifier) continue; // reorder, handled above
-        if (!!before.enabled !== !!after.enabled) {
-            const id = after.identifier;
-            if (overrideModel && id in (overrideModel.enabled ?? {})) {
-                overrideModel.enabled[id] = !!after.enabled;
-                routed.push({ key: id, layer: `override:${model?.name}` });
-            } else if (overrideModel && model) {
-                // the override exists for this model: route there (item 21) and list the identifier
-                overrideModel.enabled[id] = !!after.enabled;
-                routed.push({ key: id, layer: `override:${model?.name}` });
-            } else {
-                loadout.enabled[id] = !!after.enabled;
-                routed.push({ key: id, layer: 'loadout' });
-            }
-            // pick-one: the option just switched on turns its siblings off
-            const changed = [];
-            normalize(doc, loadout.enabled, changed, !!after.enabled ? id : null);
-            const norm = changed.filter((x) => x !== id);
-            if (norm.length > 0 && !overrideModel) {
-                routed.push({ key: norm.join(','), layer: 'group:pick-one' });
+    if (snapshot?.prompt_order?.length) {
+        for (let i = 0; i < Math.min(oldOrder.length, newOrder.length); i++) {
+            const before = oldOrder[i];
+            const after = newOrder[i];
+            if (before.identifier !== after.identifier) continue; // reorder, handled above
+            if (!!before.enabled !== !!after.enabled) {
+                const id = after.identifier;
+                if (overrideModel && id in (overrideModel.enabled ?? {})) {
+                    overrideModel.enabled[id] = !!after.enabled;
+                    routed.push({ key: id, layer: `override:${model?.name}` });
+                } else if (overrideModel && model) {
+                    // the override exists for this model: route there (item 21) and list the identifier
+                    overrideModel.enabled[id] = !!after.enabled;
+                    routed.push({ key: id, layer: `override:${model?.name}` });
+                } else {
+                    loadout.enabled[id] = !!after.enabled;
+                    routed.push({ key: id, layer: 'loadout' });
+                }
+                // pick-one: the option just switched on turns its siblings off
+                const changed = [];
+                normalize(doc, loadout.enabled, changed, !!after.enabled ? id : null);
+                const norm = changed.filter((x) => x !== id);
+                if (norm.length > 0 && !overrideModel) {
+                    routed.push({ key: norm.join(','), layer: 'group:pick-one' });
+                }
             }
         }
     }
 
     // ---- prompts: content/name/role/fields/added/deleted
+    // Empty prompts section = unchanged (delta routing); skip deletion
+    // detection, which would otherwise wipe every library block.
     const oldPrompts = new Map((compiled?.prompts ?? []).map((/** @type {any} */ p) => [p.identifier, p]));
-    const newPrompts = new Map((snapshot?.prompts ?? []).map((/** @type {any} */ p) => [p.identifier, p]));
+    const newPrompts = new Map((snapshot?.prompts?.length ? snapshot.prompts : []).map((/** @type {any} */ p) => [p.identifier, p]));
     for (const [id, np] of newPrompts) {
         if (doc.blocks?.[id] === undefined) continue; // not a library block (marker or unknown)
         const op = oldPrompts.get(id);
@@ -99,16 +139,24 @@ export function routePanelDiff(doc, compiled, snapshot, model, loadoutId = undef
             routed.push({ key: id, layer: 'blocks' });
         }
     }
-    for (const id of oldPrompts.keys()) {
-        if (!newPrompts.has(id) && doc.blocks?.[id] !== undefined) {
-            deleteBlockFromDoc(doc, id);
-            routed.push({ key: id, layer: 'blocks:deleted' });
+    if (snapshot?.prompts?.length) {
+        for (const id of oldPrompts.keys()) {
+            if (!newPrompts.has(id) && doc.blocks?.[id] !== undefined) {
+                deleteBlockFromDoc(doc, id);
+                routed.push({ key: id, layer: 'blocks:deleted' });
+            }
         }
     }
 
     // ---- sampler + settings keys
-    for (const key of diffKeys(compiled, snapshot)) {
-        if (['prompts', 'prompt_order', 'preset_settings_openai'].includes(key)) continue;
+    // Delta routing: the snapshot is a DELTA (panelDelta) — iterate its keys
+    // only. A union diff against `compiled` would route keys the user never
+    // touched (absent from the delta == undefined) over values a concurrent
+    // API write just stored.
+    for (const key of Object.keys(snapshot ?? {})) {
+        if (key === 'prompts' || key === 'prompt_order' || key === 'preset_settings_openai') continue;
+        if (!(key in (snapshot ?? {}))) continue;
+        if (compiled?.[key] !== undefined && JSON.stringify(compiled[key]) === JSON.stringify(snapshot[key])) continue;
         if (CONNECTION_KEYS.includes(key)) continue; // never stored
         if (TUNING_KEYS.includes(key)) {
             const docOverride = doc.tuningOverrides?.[model?.name ?? ''];
@@ -120,18 +168,16 @@ export function routePanelDiff(doc, compiled, snapshot, model, loadoutId = undef
                 globalTuning[key] = snapshot[key];
                 routed.push({ key, layer: `tuning:${model.name}` });
             } else {
-                doc.settings[key] = snapshot[key];
+                doc.settings ??= {};
+                if (snapshot[key] !== undefined) doc.settings[key] = snapshot[key];
                 routed.push({ key, layer: 'settings' });
                 warnings.push(`sampler key "${key}" changed with no Model resolved — routed to the document's settings`);
             }
         } else {
-            // Ordinary preset setting (names_behavior, send_if_empty,
-            // wi_format, assistant_prefill, …): after prompts/prompt_order
-            // and connection keys are excluded, everything the panel reports
-            // is library state — dropping keys that merely exist in the
-            // compiled output made /slot/panel return the old compile and
-            // the tab re-apply the old value.
-            doc.settings[key] = snapshot[key];
+            doc.settings ??= {};
+            // A delta never carries undefined (panelDelta), but guard anyway:
+            // an explicit undefined must not shadow a concurrent API write.
+            if (snapshot[key] !== undefined) doc.settings[key] = snapshot[key];
             routed.push({ key, layer: 'settings' });
         }
     }

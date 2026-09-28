@@ -8,7 +8,7 @@ import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { compile, stripConnectionKeys } from '../shared/compile.js';
-import { routePanelDiff } from './slot.js';
+import { routePanelDiff, panelDelta } from './slot.js';
 import { StoreError, rejectConnectionKeys } from './store.js';
 import { normalize } from '../shared/groups.js';
 import { resolveModel } from '../shared/models.js';
@@ -186,6 +186,7 @@ export function makeRouter() {
             const lid = loadoutId ?? doc.activeLoadoutId;
             if (!lid || !doc.loadouts?.[lid]) return res.status(400).json({ error: `no loadout ${lid}` });
             await req.pm.store.mutateState((/** @type {any} */ st) => {
+                req.pm.store._markSlotChanged();
                 st.presetId = presetId;
                 st.loadoutId = lid;
             });
@@ -199,6 +200,7 @@ export function makeRouter() {
         try {
             const { modelId, raw } = req.body ?? {};
             await req.pm.store.mutateState((/** @type {any} */ st) => {
+                req.pm.store._markSlotChanged();
                 st.modelId = modelId ?? null;
                 if (raw) st.raw = raw;
             });
@@ -210,19 +212,41 @@ export function makeRouter() {
 
     router.post('/slot/panel', async (req, res, next) => {
         try {
-            const { clientId, snapshot } = req.body ?? {};
+            const { clientId, baseRev, base, snapshot } = req.body ?? {};
             const store = req.pm.store;
             const doc = store.state.presetId
                 ? /** @type {any} */ (store.getPreset(/** @type {string} */ (store.state.presetId)))
                 : null;
             if (!doc) return res.status(409).json({ error: 'no preset in the slot' });
+            if (typeof baseRev !== 'number' || !base || typeof base !== 'object') {
+                return res.status(409).json({ error: 'missing baseRev or base panel projection' });
+            }
+            // Stale desired-state guard: if the desired preset or loadout
+            // changed after the client's base snapshot was taken, the panel
+            // delta was diffed against a different document — replaying it
+            // here would pour the OLD preset's fields into the NEW one. The
+            // client must re-reconcile and re-base instead (409).
+            if ((store.slotChangedRev ?? 0) > baseRev) {
+                return res.status(409).json({ error: 'stale: desired preset or loadout changed after baseRev' });
+            }
             const clean = stripConnectionKeys(snapshot ?? {});
+            const cleanBase = stripConnectionKeys(base);
             const model = resolveModel(store.models, rawOf(store));
             // route against the loadout the tab is actually showing (the
             // desired one), not the document's active default
             const desiredLoadout = /** @type {string|null} */ (store.state.loadoutId) ?? doc.activeLoadoutId;
-            const { compiled } = compile(doc, model, readBase(req), desiredLoadout);
-            const { routed, globalTuning, warnings } = routePanelDiff(doc, compiled, clean, model, desiredLoadout);
+            const { compiled: currentCompiled } = compile(doc, model, readBase(req), desiredLoadout);
+            // DELTA = what the USER changed in the panel (base -> snapshot),
+            // not what the panel shows against currentCompiled. Concurrent
+            // API writes to untouched fields therefore survive: most recent
+            // wins per field, never wholesale.
+            const delta = panelDelta(cleanBase, clean);
+            if (delta === null) {
+                // Panel section shape damage (missing prompt_order/prompts)
+                // cannot be diffed field-wise; reject rather than guess.
+                return res.status(409).json({ error: 'snapshot or base lost prompt_order/prompts structure' });
+            }
+            const { routed, globalTuning, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
             // A panel observation that routes nothing is not a revision:
             // saving unconditionally here turned every echo of our own apply
             // into doc.rev+1 and fed the apply<->panel loop.

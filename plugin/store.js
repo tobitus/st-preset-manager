@@ -71,6 +71,12 @@ export class Store {
         this._queue = Promise.resolve();
         /** @type {number} */
         this.rev = 0;
+        /** @type {number} Global rev at the last change of the DESIRED slot
+         * (preset or loadout). /slot/panel 409s when the client's baseRev
+         * predates it: the panel delta was diffed against a preset that is
+         * no longer the desired one, so replaying it onto the current
+         * document would pour the old preset's state into the new one. */
+        this.slotChangedRev = 0;
     }
 
     /** Serialize a mutation. @param {() => any} fn */
@@ -123,6 +129,7 @@ export class Store {
         this.state = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
         this.models = JSON.parse(fs.readFileSync(this.modelsFile, 'utf8'));
         this.rev = this.state.rev ?? 0;
+        this.slotChangedRev = this.state.slotChangedRev ?? 0;
         await this.rescan();
     }
 
@@ -131,6 +138,19 @@ export class Store {
         this.state.rev = this.rev;
         this.state.updatedAt = new Date().toISOString();
         await atomicWrite(this.stateFile, JSON.stringify(this.state, null, 2));
+    }
+
+    /**
+     * Mark the desired slot as changed (preset swapped or loadout switched):
+     * records the global rev the change happened at, so /slot/panel can
+     * reject stale panel deltas with 409. Call from inside mutateState
+     * callbacks (single-writer), BEFORE the fn's own mutations: the marker
+     * must name the rev where the change became visible, i.e. the rev this
+     * mutation will bump to.
+     */
+    _markSlotChanged() {
+        this.slotChangedRev = this.rev + 1;
+        this.state.slotChangedRev = this.slotChangedRev;
     }
 
     // ------------------------------------------------------------------ scan
