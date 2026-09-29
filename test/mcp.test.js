@@ -117,6 +117,12 @@ test('initialize negotiates only the supported protocol version', async () => {
     assert.equal(m.result.serverInfo.name, 'st-preset-manager');
     assert.equal(typeof m.result.serverInfo.version, 'string');
     assert.deepEqual(m.result.capabilities, { tools: {} });
+    for (const version of ['2025-03-26', '2024-11-05']) {
+        const compatible = harness();
+        compatible.server.feed(req(version, 'initialize', { protocolVersion: version, capabilities: {} }));
+        await compatible.server.idle();
+        assert.equal(compatible.msgs()[0].result.protocolVersion, version);
+    }
 
     const future = harness();
     future.server.feed(req('a', 'initialize', { protocolVersion: '2099-01-01', capabilities: {} }));
@@ -281,6 +287,8 @@ test('path params are URL-encoded and never sent in the body', async () => {
     assert.deepEqual(r.calls, [{ method: 'GET', path: '/presets/p%20x%2F1', body: undefined }]);
     r = await callTool('loadout_set_override', { presetId: 'p1', loadoutId: 'l1', modelId: 'or/claude 4', enabled: { a: true } });
     assert.deepEqual(r.calls, [{ method: 'PUT', path: '/presets/p1/loadouts/l1/overrides/or%2Fclaude%204', body: { enabled: { a: true } } }]);
+    r = await callTool('models_set_tuning', { modelId: '100% local', tuning: { temperature: 0.5 } });
+    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models/100%25%20local/tuning', body: { temperature: 0.5 } }]);
     r = await callTool('revision_get', { presetId: 'p1', rev: 4 });
     assert.deepEqual(r.calls, [{ method: 'GET', path: '/presets/p1/revisions/4', body: undefined }]);
     r = await callTool('shelf_remove', { shelfId: 's_1' });
@@ -621,4 +629,38 @@ test('main drains a large response from stdout after stdin EOF', async () => {
         assert.equal(result.blob.length, blob.length);
         assert.equal(result.blob, blob);
     } finally { await f.close(); }
+});
+
+test('main exits after draining initialize when startup authentication stalls', async () => {
+    const stalled = http.createServer(() => { /* deliberately never answer */ });
+    await new Promise((resolve) => stalled.listen(0, '127.0.0.1', () => resolve(null)));
+    const stUrl = `http://127.0.0.1:${/** @type {any} */ (stalled.address()).port}`;
+    try {
+        const child = spawn(process.execPath, ['mcp/server.js'], {
+            cwd: new URL('..', import.meta.url),
+            env: { ...process.env, ST_URL: stUrl, ST_USER: '', ST_PASSWORD: '' },
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        child.stdout.setEncoding('utf8');
+        child.stdout.on('data', (c) => (stdout += c));
+        child.stdin.end(req(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {} }));
+        const code = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => {
+                child.kill('SIGKILL');
+                reject(new Error('MCP child stayed alive on its stalled startup request'));
+            }, 1000);
+            child.on('error', reject);
+            child.on('close', (c) => { clearTimeout(timer); resolve(c); });
+        });
+        assert.equal(code, 0);
+        const lines = stdout.split('\n').filter(Boolean);
+        assert.equal(lines.length, 1);
+        const message = JSON.parse(lines[0]);
+        assert.equal(message.id, 1);
+        assert.equal(message.result.protocolVersion, '2025-06-18');
+    } finally {
+        stalled.closeAllConnections?.();
+        await new Promise((resolve) => stalled.close(() => resolve(null)));
+    }
 });

@@ -223,9 +223,9 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 
 `mcp/server.js` is a zero-dependency Node MCP server (stdio transport:
 newline-delimited JSON-RPC 2.0 — `initialize`, `notifications/initialized`,
-`ping`, `tools/list`, `tools/call`). It supports protocol `2025-06-18`;
-an unsupported version negotiates down to that version and malformed
-initialization parameters are rejected. Each tool is one REST row: the
+`ping`, `tools/list`, `tools/call`). It supports protocols `2025-06-18`,
+`2025-03-26` and `2024-11-05`; another version negotiates to the latest,
+and malformed initialization parameters are rejected. Each tool is one REST row: the
 arguments become the path parameters, the query string and the JSON body of
 one request, and the JSON response is the result (`content: [{type: 'text',
 text: <JSON>}]`). Empty and dot-segment path arguments are rejected before

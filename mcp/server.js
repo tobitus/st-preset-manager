@@ -15,6 +15,7 @@ import { pathToFileURL } from 'node:url';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const PROTOCOL_VERSION = '2025-06-18';
+const PROTOCOL_VERSIONS = new Set([PROTOCOL_VERSION, '2025-03-26', '2024-11-05']);
 const PLUGIN = '/api/plugins/st-preset-manager';
 const obj = (properties = {}, required = []) => ({ type: 'object', properties, ...(required.length ? { required } : {}) });
 const str = (description) => ({ type: 'string', description });
@@ -169,15 +170,16 @@ function plainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-/** Reject URL dot segments even when the caller encoded them one or more times. @param {any} value */
+/** Reject empty URL path arguments and dot segments, including successfully decoded forms. @param {any} value */
 function unsafePathArgument(value) {
     if (value === undefined || value === null || value === '') return true;
     let decoded = String(value);
     for (let i = 0; i < 4; i++) {
+        if (decoded === '.' || decoded === '..') return true;
         let next;
         try { next = decodeURIComponent(decoded); }
-        catch { return true; }
-        if (next === decoded) break;
+        catch { return false; }
+        if (next === decoded) return false;
         decoded = next;
     }
     return decoded === '.' || decoded === '..';
@@ -248,7 +250,7 @@ export function createMcpServer({ session, write, log }) {
                         error(id, -32602, 'Invalid initialize params');
                         break;
                     }
-                    emit({ id, result: { protocolVersion: message.params.protocolVersion === PROTOCOL_VERSION ? message.params.protocolVersion : PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'st-preset-manager', version: VERSION } } });
+                    emit({ id, result: { protocolVersion: PROTOCOL_VERSIONS.has(message.params.protocolVersion) ? message.params.protocolVersion : PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'st-preset-manager', version: VERSION } } });
                     break;
                 case 'ping': emit({ id, result: {} }); break;
                 case 'tools/list': emit({ id, result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } }); break;
@@ -317,7 +319,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.stdin.on('end', async () => {
         await server.idle();
         await writesIdle();
-        process.stdout.end();
+        // Every stdout callback has fired, so forced exit cannot truncate a
+        // response and cannot be held open by the best-effort startup fetch.
+        process.exit(0);
     });
     process.stdin.resume();
 }
