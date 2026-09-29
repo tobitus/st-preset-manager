@@ -688,6 +688,88 @@ async function main() {
         }
     });
 
+    // ------------------------------------------------------------------ 2h
+    await check('2h a profile that selects a preset while the transition baseline install is saving wins; the tab stays detached', async () => {
+        const V = 1.61;
+        try {
+            await closeGuard();
+            await loadViaLibrary(ids.ff);
+            await ensureModel(KIMI, HAP);
+            const linked = (await liveProfiles()).find((/** @type {any} */ x) => x.name === 'Mock links Default');
+            must(linked.preset === 'Default' && !(linked.exclude ?? []).includes('preset'), 'precondition: profile links Default');
+            try {
+                await holdFetch('/api/plugins/st-preset-manager/slot/model');
+                must(await pickStProfile('Mock'), 'dropdown pick failed');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'report for Mock held');
+                must(await setSlider('temp_openai', V), 'no #temp_openai');
+                await sleep(1500);
+                await probe.eval('(() => { window.__chkReleaseReport = window.__chkRelease; window.__chkRelease = undefined; return true; })()');
+                await holdFetch('/api/presets/save', 'working');
+                await probe.eval('(() => { window.__chkReleaseReport?.(); window.__chkReleaseReport = undefined; return true; })()');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'the baseline install\'s slot save held');
+                must(await pickStProfile('Mock links Default'), 'dropdown pick failed');
+                await until(() => exists('#pm-guard-dialog'), 10000, 'guard dialog');
+                await until(async () => (await st()).preset === 'Default', 8000, 'the profile selected Default');
+            } finally {
+                await unhold();
+            }
+            await sleep(3000);
+            const s1 = await st();
+            const detached = await probe.eval('window.__pmStarted.bridge.detached');
+            must(s1.preset === 'Default', `after the held install finished ST is on "${s1.preset}" (the install re-selected the slot)`);
+            must(detached === true, `bridge.detached=${detached}`);
+            must(!(await exists('.pm-apply-blocker')), 'the input blocker is still up on the foreign preset');
+            must(await exists('#pm-guard-dialog'), 'the guard dialog disappeared');
+            return `install save held while "Mock links Default" loaded Default: ST stayed on ${s1.preset}, detached=${detached}, guard open, no blocker`;
+        } finally {
+            await closeGuard();
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+            await loadViaLibrary(ids.ff);
+        }
+    });
+
+    // ------------------------------------------------------------------ 2i
+    await check('2i the transition baseline install fails and a picker switch back to A is queued: A\'s tuning is unchanged', async () => {
+        const V = 1.63;
+        try {
+            await loadViaLibrary(ids.ff);
+            await ensureModel(KIMI, HAP);
+            const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            const kimiG = (await getModels()).models[KIMI].tuning.temperature;
+            must(kimiOv !== V, 'precondition: fresh value');
+            try {
+                await holdFetch('/api/plugins/st-preset-manager/slot/model');
+                must(await pickStProfile('Mock'), 'dropdown pick failed');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'report for Mock held');
+                must(await setSlider('temp_openai', V), 'no #temp_openai');
+                await sleep(1500);
+                await probe.eval('(() => { window.__chkReleaseReport = window.__chkRelease; window.__chkRelease = undefined; return true; })()');
+                await holdFetch('/api/presets/save', 'working');
+                // the report fails: no reconcile is queued for B
+                await probe.eval('(() => { window.__chkFailHeld = true; window.__chkReleaseReport?.(); window.__chkReleaseReport = undefined; return true; })()');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'the baseline install\'s slot save held');
+                await toolbarPick(KIMI);
+                await sleep(500);
+                // the install's save fails
+                await probe.eval('(() => { window.__chkFailHeld = true; return true; })()');
+            } finally {
+                await unhold();
+            }
+            await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+            const c = await until(async () => { const x = await converged(); return x && x.s.model === HAP ? x : null; }, 20000, 'ST settled on A (hapuppy)');
+            await sleep(2000);
+            const ff = await getDoc(ids.ff);
+            const reg = await getModels();
+            const s2 = await st();
+            must(ff.tuningOverrides[KIMI].temperature === kimiOv, `A's override became ${ff.tuningOverrides[KIMI].temperature} (was ${kimiOv})`);
+            must(reg.models[KIMI].tuning.temperature === kimiG, `A's global became ${reg.models[KIMI].tuning.temperature} (was ${kimiG})`);
+            must(s2.temperature === kimiOv, `ST on A shows ${s2.temperature}, expected ${kimiOv}`);
+            return `B (mock) ${V} -> mock global; install save failed; queued picker switch -> ST on ${c.s.model} at ${s2.temperature}; A override ${kimiOv}, global ${kimiG} unchanged`;
+        } finally {
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+        }
+    });
+
     // ------------------------------------------------------------------ 3
     await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
         await loadViaLibrary(ids.ff);

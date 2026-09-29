@@ -397,7 +397,7 @@ export class Bridge {
         }
     }
 
-    async _reconcileInner(force) {
+    async _reconcileInner(force, { flush = true } = {}) {
         // Fix B: an in-flight apply must never stomp a preset another
         // actor (user click, connection profile) selected while it was
         // running. Capture the detach generation and preset name NOW, at
@@ -407,7 +407,7 @@ export class Bridge {
         const gen = this._detachGen;
         const startName = currentPresetName();
         const abort = () => this._detachGen !== gen || (currentPresetName() !== startName && currentPresetName() !== SLOT_NAME);
-        if (currentPresetName() === SLOT_NAME && this.baseSnapshot) {
+        if (flush && currentPresetName() === SLOT_NAME && this.baseSnapshot) {
             // A failed flush means unsent user edits would be overwritten by
             // the apply below — abort this op entirely (Finding: "Abort
             // reconciliation when flushing fails"). flushPanel re-throws
@@ -524,35 +524,46 @@ export class Bridge {
     }
 
     /**
-     * Atomically install a fresh write-back baseline for `raw`, called
-     * inline from flushPanel's transition-edit branch — from inside the
-     * SAME op that just posted the edit against it (flushPanel is only
-     * ever called from inside a queued op, so it still holds the queue
-     * slot and the overlay here). Re-fetches the slot and, if it names a
-     * real preset, applies it and performs the same bookkeeping
-     * `_reconcileInner` does after its own apply, so `baseSnapshot` /
-     * `baseRaw` name `raw`'s fresh compile before this op releases the
-     * queue slot. This closes the race a later, separately-enqueued
-     * reconcile left open: an op queued in between (e.g. a picker switch
-     * back to the old connection) would clear `_transition` and let that
-     * later reconcile's flush read the just-sent values on screen as an
-     * edit made under the OLD connection, reposting them there. Never
-     * calls flushPanel.
-     * @param {{source: string, model: string, profileId: string}} raw
-     * @returns {Promise<any>} the slot view fetched
+     * Atomically install a fresh write-back baseline for the live
+     * connection, called inline from flushPanel's transition-edit branch —
+     * from inside the SAME op that just posted the edit against it
+     * (flushPanel is only ever called from inside a queued op, so it still
+     * holds the queue slot and the overlay here). Delegates to
+     * `_reconcileInner(true, { flush: false })` so the abort predicate
+     * (detach generation / preset name), the apply-vs-same-hash decision
+     * and all of the appliedHash/appliedRev/appliedSlotChangedRev/baseRaw/
+     * detached/_transition bookkeeping stay in the one place that owns
+     * them — a profile that selects a foreign preset during the GET or the
+     * apply below must abort exactly like a normal reconcile would, not
+     * get overridden by updateList and marked attached. The flush is
+     * skipped: flushPanel's caller already holds the queue slot and the
+     * overlay for the whole op, and calling it again here would be
+     * redundant with (and race) the flush that got us here. This closes
+     * the race a later, separately-enqueued reconcile left open: an op
+     * queued in between (e.g. a picker switch back to the old connection)
+     * would clear `_transition` and let that later reconcile's flush read
+     * the just-sent values on screen as an edit made under the OLD
+     * connection, reposting them there.
+     * @returns {Promise<any>} the slot view fetched, or null if the
+     *   baseline install failed
      */
-    async _installBaseline(raw) {
-        const slot = /** @type {{rev: number, slotChangedRev?: number, desired: any, compiled: any, hash: string}} */ (await api('GET', slotPath(raw)));
-        if (slot.desired?.presetId && slot.compiled) {
-            await this.apply(slot);
-            this.appliedSlotChangedRev = slot.slotChangedRev ?? 0;
-            this.baseRaw = raw;
-            this.detached = false;
-            this._transition = null;
+    async _installBaseline() {
+        try {
+            const slot = await this._reconcileInner(true, { flush: false });
+            this._releaseTransitionHold();
+            return slot;
+        } catch (err) {
+            // the panel shows values sent for the new connection while the
+            // baseline still names the old one: nothing on screen may be read
+            // as an edit until a later apply succeeds
+            this._panelUnattributable = true;
+            if (/** @type {any} */ (err)?.aborted) this._releaseTransitionHold(); // ST is on a foreign preset: detached, don't block its panel
+            else this._armTransitionHold();
+            this.appliedHash = null;
+            this.enqueueReconcile();
+            console.error('[preset-manager] baseline install failed', err);
+            return null;
         }
-        this._releaseTransitionHold();
-        this.emit({ slot, attached: this.attached });
-        return slot;
     }
 
     /**
@@ -900,7 +911,7 @@ export class Bridge {
                 // existing reconcile path (forced by appliedHash = null
                 // above) installs the baseline instead.
                 if (currentPresetName() === SLOT_NAME && !this.detached) {
-                    await this._installBaseline(tr.raw);
+                    await this._installBaseline();
                 }
             } else {
                 // the connection changed again while the POST was in
