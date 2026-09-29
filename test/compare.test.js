@@ -181,3 +181,48 @@ test('fixture: FF 5.4 Internal States (2) vs Hapuppy Forced Reasoning (1) -> the
     assert.ok(self.rows.every((/** @type {any} */ r) => r.status === 'same'));
     assert.equal(self.identical, true);
 });
+
+// Phase 5 review 1 (finding 2): ST markers are fixed anchors. Moving a block
+// across one changes what the model sees, so it is a move even though the
+// block-only order is unchanged. Markers never render as rows.
+/** mkDoc whose sequence interleaves marker leaves: `order` items are block ids or `@marker` */
+function mkMarked(/** @type {string[]} */ order, /** @type {any[]} */ blocks) {
+    const doc = mkDoc(blocks);
+    doc.sequences[0].rows = order.map((x) => (x.startsWith('@')
+        ? { kind: 'marker', ref: x.slice(1), key: `k_${x.slice(1)}` }
+        : { kind: 'block', ref: x, key: `k_${x}` }));
+    doc.markers = order.filter((x) => x.startsWith('@')).map((x) => ({ identifier: x.slice(1), prompt: { identifier: x.slice(1), marker: true } }));
+    return doc;
+}
+
+test('markers anchor moves: [A, chatHistory] vs [chatHistory, A] marks A moved and the presets not identical', () => {
+    const res = comparePresets(mkMarked(['a', '@chatHistory'], [B('a')]), mkMarked(['@chatHistory', 'a'], [B('a')]));
+    assert.deepEqual(summary(res), ['moved:a>a']);
+    assert.equal(res.rows[0].movedFrom, 1);
+    assert.equal(res.identical, false);
+    // markers are anchors, not rows
+    assert.ok(res.rows.every((/** @type {any} */ r) => r.left?.identifier !== 'chatHistory' && r.right?.identifier !== 'chatHistory'));
+});
+
+test('markers anchor moves: the marker is never the one sacrificed to keep a block in order', () => {
+    // [A, B, @chat, C] vs [@chat, A, B, C]: by block order alone nothing moved;
+    // keeping A and B in order would need the marker to "move" — it may not
+    const l = mkMarked(['a', 'b', '@chatHistory', 'c'], [B('a'), B('b'), B('c')]);
+    const r = mkMarked(['@chatHistory', 'a', 'b', 'c'], [B('a'), B('b'), B('c')]);
+    assert.deepEqual(summary(comparePresets(l, r)), ['moved:a>a', 'moved:b>b', 'same:c>c']);
+    // a block that stays on its side of every marker is not moved
+    const l2 = mkMarked(['@main', 'a', 'b', '@chatHistory', 'c'], [B('a'), B('b'), B('c')]);
+    const r2 = mkMarked(['@main', 'b', 'a', '@chatHistory', 'c'], [B('a'), B('b'), B('c')]);
+    const res2 = comparePresets(l2, r2);
+    assert.equal(res2.rows.filter((/** @type {any} */ x) => x.status === 'moved').length, 1);
+    assert.equal(res2.rows.find((/** @type {any} */ x) => x.left.identifier === 'c').status, 'same');
+    // same sequence with markers: all same, identical
+    const same = comparePresets(l2, structuredClone(l2));
+    assert.deepEqual(summary(same), ['same:a>a', 'same:b>b', 'same:c>c']);
+    assert.equal(same.identical, true);
+});
+
+test('markers anchor moves: a marker present on one side only is not an anchor', () => {
+    const res = comparePresets(mkMarked(['a', '@worldInfoBefore', 'b'], [B('a'), B('b')]), mkMarked(['a', 'b'], [B('a'), B('b')]));
+    assert.deepEqual(summary(res), ['same:a>a', 'same:b>b']);
+});

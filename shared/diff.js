@@ -3,6 +3,18 @@
  * `diffLines` produces a minimal edit script (' '/'-'/'+') between two line
  * arrays; `lineHunks` groups a diff of two texts into unified-diff style
  * hunks with a configurable amount of surrounding context. No dependencies.
+ *
+ * `POST /diff/blocks` runs `lineHunks` synchronously inside SillyTavern's own
+ * server process, so a single request can stall it: two bounds keep a
+ * request's work small enough to not be felt. `MAX_CELLS` caps the
+ * `(n+1)*(m+1)` LCS table allocated over the *trimmed* middle (after common
+ * prefix/suffix removal) at 4,000,000 cells. `MAX_INPUT_CHARS` caps the total
+ * character count of *all* input lines (both texts, prefix/suffix included,
+ * since they are still split and scanned) at 2,000,000, so a small number of
+ * huge lines can't pass the cell bound and still make the DP compare
+ * multi-megabyte strings on every step. Before the DP runs, every distinct
+ * line in the trimmed middle is interned to a small integer id, so the table
+ * fill and backtrack compare integers, never strings.
  */
 
 /**
@@ -28,8 +40,11 @@ export class DiffError extends Error {
     }
 }
 
-/** Largest (n+1)*(m+1) LCS table we will allocate. */
-export const MAX_CELLS = 25_000_000;
+/** Largest (n+1)*(m+1) LCS table we will allocate, over the trimmed middle. */
+export const MAX_CELLS = 4_000_000;
+
+/** Largest total character count (all lines of both texts) we will diff. */
+export const MAX_INPUT_CHARS = 2_000_000;
 
 /**
  * Split text into lines on \n, \r\n or \r. Empty/nullish text has no lines.
@@ -51,6 +66,13 @@ export function splitLines(text) {
  * @returns {DiffLine[]}
  */
 export function diffLines(a, b) {
+    let chars = 0;
+    for (const line of a) chars += line.length + 1;
+    for (const line of b) chars += line.length + 1;
+    if (chars > MAX_INPUT_CHARS) {
+        throw new DiffError(`texts too large to diff (${chars} characters, limit ${MAX_INPUT_CHARS})`);
+    }
+
     let start = 0;
     const maxPrefix = Math.min(a.length, b.length);
     while (start < maxPrefix && a[start] === b[start]) start++;
@@ -71,14 +93,39 @@ export function diffLines(a, b) {
         throw new DiffError(`texts too large to diff (${n}×${m} lines)`);
     }
 
-    // Flat (n+1)x(m+1) DP table, row-major: table[i*(m+1)+j].
+    // Intern the middle's lines to small integer ids so the DP and backtrack
+    // below compare integers, never strings (string equality on long, mostly
+    // shared-prefix lines is the costly part of a worst-case table fill).
+    const ids = new Map();
+    const ia = new Int32Array(n);
+    const ib = new Int32Array(m);
+    for (let k = 0; k < n; k++) {
+        let id = ids.get(midA[k]);
+        if (id === undefined) {
+            id = ids.size;
+            ids.set(midA[k], id);
+        }
+        ia[k] = id;
+    }
+    for (let k = 0; k < m; k++) {
+        let id = ids.get(midB[k]);
+        if (id === undefined) {
+            id = ids.size;
+            ids.set(midB[k], id);
+        }
+        ib[k] = id;
+    }
+
+    // Flat (n+1)x(m+1) DP table, row-major: table[i*(m+1)+j]. The LCS length
+    // never exceeds min(n, m), so a 16-bit table suffices whenever that is
+    // small enough, halving memory traffic for the common lopsided case.
     const width = m + 1;
-    const table = new Uint32Array((n + 1) * width);
+    const table = Math.min(n, m) < 65535 ? new Uint16Array((n + 1) * width) : new Uint32Array((n + 1) * width);
     for (let i = 1; i <= n; i++) {
         const rowBase = i * width;
         const prevRowBase = (i - 1) * width;
         for (let j = 1; j <= m; j++) {
-            if (midA[i - 1] === midB[j - 1]) {
+            if (ia[i - 1] === ib[j - 1]) {
                 table[rowBase + j] = table[prevRowBase + j - 1] + 1;
             } else {
                 const up = table[prevRowBase + j];
@@ -103,7 +150,7 @@ export function diffLines(a, b) {
         pendingIns = [];
     };
     while (i > 0 || j > 0) {
-        if (i > 0 && j > 0 && midA[i - 1] === midB[j - 1]) {
+        if (i > 0 && j > 0 && ia[i - 1] === ib[j - 1]) {
             flushPending();
             middleScript.push({ op: ' ', text: midA[i - 1] });
             i--;

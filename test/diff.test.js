@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { splitLines, diffLines, lineHunks, DiffError, MAX_CELLS } from '../shared/diff.js';
+import { splitLines, diffLines, lineHunks, DiffError, MAX_CELLS, MAX_INPUT_CHARS } from '../shared/diff.js';
 
 /** reference LCS length (plain DP, test-only) */
 function lcsLen(/** @type {string[]} */ a, /** @type {string[]} */ b) {
@@ -85,6 +85,43 @@ test('diffLines: a middle that would exceed MAX_CELLS throws DiffError instead o
     const a = Array.from({ length: n }, (_, i) => `a${i}`);
     const b = Array.from({ length: n }, (_, i) => `b${i}`);
     assert.throws(() => diffLines(a, b), DiffError);
+});
+
+// Phase 5 review 1 (finding 1): /diff/blocks runs in ST's own process, so the
+// work a request may cause is bounded, not just the table size.
+test('work bounds: the review\'s 4,999 x 4,999 unequal lines are refused (413), and so is input over MAX_INPUT_CHARS', () => {
+    assert.ok(MAX_CELLS <= 4_000_000, `MAX_CELLS ${MAX_CELLS} allows a table the event loop feels`);
+    assert.ok(MAX_INPUT_CHARS <= 2_000_000, `MAX_INPUT_CHARS ${MAX_INPUT_CHARS}`);
+    const a = Array.from({ length: 4999 }, (_, i) => `a${i}`);
+    const b = Array.from({ length: 4999 }, (_, i) => `b${i}`);
+    assert.throws(() => diffLines(a, b), (/** @type {any} */ e) => e instanceof DiffError && e.status === 413);
+    // one line each, but together over the character budget (a trimmed
+    // middle of 1x1 cells: only the input bound can refuse it)
+    const big = 'x'.repeat(Math.ceil(MAX_INPUT_CHARS / 2) + 10);
+    assert.throws(() => lineHunks(`${big}1`, `${big}2`), (/** @type {any} */ e) => e instanceof DiffError && e.status === 413);
+    // the budget counts the common prefix/suffix too (they are still split and scanned)
+    const same = Array.from({ length: 50 }, () => 'y'.repeat(Math.ceil(MAX_INPUT_CHARS / 90))).join('\n');
+    assert.throws(() => lineHunks(same, `${same}\nz`), DiffError);
+});
+
+test('work bounds: the worst case the bounds allow (a full table of long, distinct lines sharing a long prefix) finishes fast', () => {
+    const side = Math.floor(Math.sqrt(MAX_CELLS)) - 2;
+    // lines of equal length sharing all but their tail: the costliest string
+    // comparisons, filling the character budget
+    const width = Math.floor(MAX_INPUT_CHARS / (2 * side)) - 12;
+    const pre = 'p'.repeat(Math.max(0, width));
+    const a = Array.from({ length: side }, (_, i) => `${pre}a${String(i).padStart(6, '0')}`);
+    const b = Array.from({ length: side }, (_, i) => `${pre}${i % 7 === 0 ? 'a' : 'b'}${String(i).padStart(6, '0')}`);
+    const chars = [...a, ...b].reduce((s, l) => s + l.length + 1, 0);
+    assert.ok(chars <= MAX_INPUT_CHARS && (side + 1) * (side + 1) <= MAX_CELLS, 'precondition: the case is within the bounds');
+    const t0 = performance.now();
+    const script = diffLines(a, b);
+    const ms = performance.now() - t0;
+    console.log(`# worst allowed case: ${side}x${side} lines, ${chars} chars -> ${ms.toFixed(1)} ms`);
+    assert.ok(ms < 400, `worst allowed case took ${ms.toFixed(0)} ms`);
+    assert.deepEqual(script.filter((l) => l.op !== '+').map((l) => l.text), a);
+    assert.deepEqual(script.filter((l) => l.op !== '-').map((l) => l.text), b);
+    assert.equal(script.filter((l) => l.op === ' ').length, a.filter((_, i) => i % 7 === 0).length);
 });
 
 test('lineHunks: identical texts give no hunks', () => {

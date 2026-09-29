@@ -148,11 +148,18 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   names pair in order, so a fork with re-minted identifiers still matches).
   `changed` = content, role, injection position/depth/order or the active
   loadout's on/off differ. `moved` = equal, but outside the longest run of
-  pairs that kept their relative order; only the block that actually moved
-  gets the `moved from #n` badge (v1 marked every shifted block).
-- **Line diff** (`shared/diff.js`): zero-dependency LCS with the common
-  prefix/suffix trimmed; unified-diff hunks with 3 lines of context. A middle
-  over 25 M table cells is refused with 413 instead of allocating.
+  pairs that kept their relative order, where ST markers present on both
+  sides (`chatHistory`, `main`, …) are fixed anchors: a block moved across
+  one is moved even if the block-only order is unchanged. Only the block that
+  actually moved gets the `moved from #n` badge (v1 marked every shifted
+  block). Markers are anchors only, never rows.
+- **Line diff** (`shared/diff.js`): zero-dependency LCS over lines interned
+  to integers, with the common prefix/suffix trimmed; unified-diff hunks with
+  3 lines of context. It runs inside ST's own process, so a request is
+  refused with 413 when the trimmed table exceeds 4 M cells or the input
+  exceeds 2 M characters; the worst allowed case takes ~25 ms.
+- **Diff tab races**: every picker change and every Compare invalidates
+  pending results; headers come from the request that rendered the rows.
 - **Revisions**: every mutation snapshots the pre-edit document, coalesced:
   while the newest snapshot is unlabelled and under 5 minutes old, later
   edits write none, so a burst of edits leaves ONE snapshot holding the state

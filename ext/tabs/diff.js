@@ -5,7 +5,14 @@
  * from the pickers when both sides chose a single block). Pickers let each
  * side choose any open or library preset, any revision of it, and
  * optionally a single block — comparing two whole presets or two single
- * blocks.
+ * blocks. One generation counter (`gen`) is invalidated by every picker
+ * change (preset, rev, or block, either side) and by every Compare; a
+ * pending row diff also has its own row generation (`rowGen`), so a row
+ * click cancels only a stale row request, never an in-flight Compare, while
+ * a new Compare or picker change cancels both. Headers are rendered from
+ * the exact selection captured when the request was issued, not from the
+ * live selects, so a picker change mid-flight can't relabel a result that
+ * belongs to the previous selection.
  */
 import { api } from '../st.js';
 import { blockOrder } from '../../shared/compare.js';
@@ -108,10 +115,16 @@ export function createDiffTab(pane, _bridge, { openIds }) {
     const sides = [sideA, sideB];
 
     let /** @type {{id: string, name: string}[]} */ libraryItems = [];
-    /** @type {{ aPresetId: string, aRev: string, bPresetId: string, bRev: string }|null} */
+    /** @typedef {{ presetId: string, rev: string, blockId: string, name: string }} SideSel */
+    /** @type {{ a: SideSel, b: SideSel }|null} */
     let lastCompare = null;
-    let compareSeq = 0;
-    let clickSeq = 0;
+    let gen = 0;
+    let rowGen = 0;
+
+    /** Bump the shared generation, invalidating any pending Compare and any pending row request. @returns {number} the new generation */
+    function invalidate() {
+        return ++gen;
+    }
 
     /** @param {string} text */
     function setError(text) {
@@ -232,27 +245,25 @@ export function createDiffTab(pane, _bridge, { openIds }) {
     }
 
     sideA.presetSelect.addEventListener('change', () => {
+        invalidate();
         sideA.loadedPresetId = sideA.presetSelect.value;
         void reloadSidePreset(sideA);
     });
     sideB.presetSelect.addEventListener('change', () => {
+        invalidate();
         sideB.loadedPresetId = sideB.presetSelect.value;
         void reloadSidePreset(sideB);
     });
-    sideA.revSelect.addEventListener('change', () => void reloadSideRev(sideA));
-    sideB.revSelect.addEventListener('change', () => void reloadSideRev(sideB));
+    sideA.revSelect.addEventListener('change', () => { invalidate(); void reloadSideRev(sideA); });
+    sideB.revSelect.addEventListener('change', () => { invalidate(); void reloadSideRev(sideB); });
+    sideA.blockSelect.addEventListener('change', () => invalidate());
+    sideB.blockSelect.addEventListener('change', () => invalidate());
 
-    /** @param {Side} side @returns {string} */
-    function presetHeaderText(side) {
-        const name = side.presetSelect.selectedOptions[0]?.textContent ?? '';
-        const rev = side.revSelect.value;
-        return rev ? `${name} @#${rev}` : name;
-    }
-
-    function updateHeaders() {
-        headLeft.textContent = presetHeaderText(sideA);
+    /** @param {{a: SideSel, b: SideSel}} sel */
+    function renderHeaders(sel) {
+        headLeft.textContent = sel.a.rev ? `${sel.a.name} @#${sel.a.rev}` : sel.a.name;
         headMid.textContent = 'status';
-        headRight.textContent = presetHeaderText(sideB);
+        headRight.textContent = sel.b.rev ? `${sel.b.name} @#${sel.b.rev}` : sel.b.name;
     }
 
     /** @param {Side} side @param {string} identifier @returns {{identifier: string, name: string, pos?: number}} */
@@ -344,16 +355,16 @@ export function createDiffTab(pane, _bridge, { openIds }) {
         return tr;
     }
 
-    /** @param {any} result full /diff response */
-    function renderTable(result) {
-        updateHeaders();
+    /** @param {any} result full /diff response @param {{a: SideSel, b: SideSel}} sel */
+    function renderTable(result, sel) {
+        renderHeaders(sel);
         rowsBody.replaceChildren(...result.rows.map((/** @type {any} */ row, /** @type {number} */ i) => buildRowEl(row, i)));
         settingsBody.replaceChildren(...result.settings.map((/** @type {any} */ s) => buildSettingRowEl(s)));
     }
 
-    /** @param {string} status @param {{identifier: string, name: string, pos?: number}} left @param {{identifier: string, name: string, pos?: number}} right */
-    function renderBlockPairTable(status, left, right) {
-        updateHeaders();
+    /** @param {string} status @param {{identifier: string, name: string, pos?: number}} left @param {{identifier: string, name: string, pos?: number}} right @param {{a: SideSel, b: SideSel}} sel */
+    function renderBlockPairTable(status, left, right, sel) {
+        renderHeaders(sel);
         const tr = buildRowEl({ status, left, right }, 0);
         tr.classList.add('pm-diff-selected');
         rowsBody.replaceChildren(tr);
@@ -397,42 +408,45 @@ export function createDiffTab(pane, _bridge, { openIds }) {
     }
 
     async function doCompare() {
-        const seq = ++compareSeq;
+        const my = invalidate();
         const aBlockId = sideA.blockSelect.value;
         const bBlockId = sideB.blockSelect.value;
         if (Boolean(aBlockId) !== Boolean(bBlockId)) {
             setError('Pick a block on both sides, or on neither.');
             return;
         }
-        const aPresetId = sideA.presetSelect.value;
-        const bPresetId = sideB.presetSelect.value;
-        const aRev = sideA.revSelect.value;
-        const bRev = sideB.revSelect.value;
+        /** @type {{a: SideSel, b: SideSel}} */
+        const sel = {
+            a: { presetId: sideA.presetSelect.value, rev: sideA.revSelect.value, blockId: aBlockId, name: sideA.presetSelect.selectedOptions[0]?.textContent ?? '' },
+            b: { presetId: sideB.presetSelect.value, rev: sideB.revSelect.value, blockId: bBlockId, name: sideB.presetSelect.selectedOptions[0]?.textContent ?? '' },
+        };
         try {
             if (aBlockId && bBlockId) {
-                const a = { presetId: aPresetId, identifier: aBlockId, ...(aRev ? { rev: Number(aRev) } : {}) };
-                const b = { presetId: bPresetId, identifier: bBlockId, ...(bRev ? { rev: Number(bRev) } : {}) };
+                const left = blockInfo(sideA, aBlockId);
+                const right = blockInfo(sideB, bBlockId);
+                const a = { presetId: sel.a.presetId, identifier: aBlockId, ...(sel.a.rev ? { rev: Number(sel.a.rev) } : {}) };
+                const b = { presetId: sel.b.presetId, identifier: bBlockId, ...(sel.b.rev ? { rev: Number(sel.b.rev) } : {}) };
                 const result = await api('POST', '/diff/blocks', { a, b });
-                if (destroyed || seq !== compareSeq) return;
+                if (destroyed || my !== gen) return;
                 const status = result.hunks.length ? 'changed' : 'same';
-                renderBlockPairTable(status, blockInfo(sideA, aBlockId), blockInfo(sideB, bBlockId));
+                renderBlockPairTable(status, left, right, sel);
                 renderBottom(result);
                 lastCompare = null;
                 setStatus('');
             } else {
-                const a = { presetId: aPresetId, ...(aRev ? { rev: Number(aRev) } : {}) };
-                const b = { presetId: bPresetId, ...(bRev ? { rev: Number(bRev) } : {}) };
+                const a = { presetId: sel.a.presetId, ...(sel.a.rev ? { rev: Number(sel.a.rev) } : {}) };
+                const b = { presetId: sel.b.presetId, ...(sel.b.rev ? { rev: Number(sel.b.rev) } : {}) };
                 const result = await api('POST', '/diff', { a, b });
-                if (destroyed || seq !== compareSeq) return;
-                renderTable(result);
+                if (destroyed || my !== gen) return;
+                renderTable(result, sel);
                 hunksEl.replaceChildren();
                 bottomHead.textContent = 'Click a row to see its line diff.';
-                lastCompare = { aPresetId, aRev, bPresetId, bRev };
+                lastCompare = sel;
                 const prefix = result.identical ? 'identical · ' : '';
                 setStatus(`${prefix}${result.rows.length} rows · ${result.counts.changed} changed · ${result.counts.moved} moved · ${result.counts['only-left']} only A · ${result.counts['only-right']} only B · ${result.settings.length} settings differ`);
             }
         } catch (err) {
-            if (destroyed || seq !== compareSeq) return;
+            if (destroyed || my !== gen) return;
             setError(errText(err));
         }
     }
@@ -441,21 +455,21 @@ export function createDiffTab(pane, _bridge, { openIds }) {
     /** @param {HTMLElement} tr */
     async function loadBottomForRow(tr) {
         if (!lastCompare) return;
-        const seq = ++clickSeq;
+        const my = { g: gen, r: ++rowGen };
         const leftId = tr.dataset.left ?? '';
         const rightId = tr.dataset.right ?? '';
         const a = leftId
-            ? { presetId: lastCompare.aPresetId, identifier: leftId, ...(lastCompare.aRev ? { rev: Number(lastCompare.aRev) } : {}) }
+            ? { presetId: lastCompare.a.presetId, identifier: leftId, ...(lastCompare.a.rev ? { rev: Number(lastCompare.a.rev) } : {}) }
             : { text: '' };
         const b = rightId
-            ? { presetId: lastCompare.bPresetId, identifier: rightId, ...(lastCompare.bRev ? { rev: Number(lastCompare.bRev) } : {}) }
+            ? { presetId: lastCompare.b.presetId, identifier: rightId, ...(lastCompare.b.rev ? { rev: Number(lastCompare.b.rev) } : {}) }
             : { text: '' };
         try {
             const result = await api('POST', '/diff/blocks', { a, b });
-            if (destroyed || seq !== clickSeq) return;
+            if (destroyed || my.g !== gen || my.r !== rowGen) return;
             renderBottom(result);
         } catch (err) {
-            if (destroyed || seq !== clickSeq) return;
+            if (destroyed || my.g !== gen || my.r !== rowGen) return;
             setError(errText(err));
         }
     }

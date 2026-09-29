@@ -13,17 +13,22 @@
  *   - name-match pass pairs duplicate names IN ORDER (FIFO queues per
  *     normalized name); v1 only ever paired the first right-hand candidate,
  *     leaving later duplicates unmatched.
- *   - "moved" is a longest-increasing-subsequence of matched rows' right
- *     positions (patience sort), not a raw index compare; v1 flagged every
- *     row shifted by an insertion/deletion as moved even though none of
- *     them actually changed position relative to each other.
+ *   - "moved" is a maximum-weight chain of strictly-increasing full
+ *     positions over matched block pairs AND markers present on both sides
+ *     (patience-sort-shaped DP with predecessor links), not a raw index
+ *     compare; v1 flagged every row shifted by an insertion/deletion as
+ *     moved even though none of them actually changed position relative to
+ *     each other. Markers — ST's fixed slots like `chatHistory` — are fixed
+ *     anchors: a block moved across one that exists on both sides is
+ *     "moved" even when block-only order is unchanged, and a marker is
+ *     never sacrificed to keep blocks in order. Markers are never rows.
  *
  * Row statuses:
  *   same        — identifier-or-name matched, nothing differs
  *   changed     — matched, but content / role / injection_position / depth /
  *                 order / enabled differ
- *   moved       — matched, all fields equal, but not part of the longest
- *                 in-order run of matched pairs
+ *   moved       — matched, all fields equal, but not part of the
+ *                 highest-weight anchored chain of matched pairs
  *   only-left / only-right — unmatched
  *
  * Only PLACED blocks — the flat leaf sequence of `sequences[0]` — become
@@ -108,37 +113,111 @@ function fieldDiffs(ra, rb) {
 }
 
 /**
- * Indices (into `matchedRows`) that form a longest strictly-increasing
- * subsequence of `right.pos`, computed by patience sort with predecessor
- * links. O(n log n).
- * @param {{right: {pos: number}}[]} matchedRows
- * @returns {Set<number>}
+ * Every leaf of a document's first sequence in flat (publish) order:
+ * placed blocks (same inclusion rule as `blockOrder`) and markers, each
+ * counted once at its first occurrence. The array index is the leaf's
+ * FULL position (blocks and markers interleaved), unlike `blockOrder`'s
+ * block-only `pos`.
+ * @param {any} doc
+ * @returns {{kind: 'block'|'marker', identifier: string}[]}
  */
-function longestIncreasingRun(matchedRows) {
-    const n = matchedRows.length;
-    const values = matchedRows.map((r) => r.right.pos);
-    /** @type {number[]} */
-    const tailsIdx = [];
-    /** @type {number[]} */
+function leafOrder(doc) {
+    const rows = doc.sequences?.[0]?.rows ?? [];
+    const entries = flattenSeq(rows);
+    const seenBlocks = new Set();
+    const seenMarkers = new Set();
+    /** @type {{kind: 'block'|'marker', identifier: string}[]} */
+    const out = [];
+    for (const entry of entries) {
+        const leaf = entry.leaf;
+        if (leaf?.kind === 'block') {
+            const ref = leaf.ref;
+            if (!ref || !doc.blocks?.[ref] || seenBlocks.has(ref)) continue;
+            seenBlocks.add(ref);
+            out.push({ kind: 'block', identifier: ref });
+        } else if (leaf?.kind === 'marker') {
+            const id = leaf.ref ?? leaf.identifier;
+            if (!id || seenMarkers.has(id)) continue;
+            seenMarkers.add(id);
+            out.push({ kind: 'marker', identifier: id });
+        }
+    }
+    return out;
+}
+
+/**
+ * Left block identifiers that belong to the maximum-weight chain of
+ * strictly-increasing full (right-side) positions over matched block pairs
+ * and markers present in both docs' `leafOrder`. A marker weighs
+ * `matchedPairCount + 1` so it always outweighs any all-blocks
+ * alternative — it is never dropped to keep blocks in order — while a
+ * block pair weighs 1, so among chains with the same markers the one
+ * keeping the most blocks wins. O(k^2) DP with predecessor links; ties
+ * broken by keeping the first (strictly-greater) predecessor found.
+ * @param {any} a
+ * @param {any} b
+ * @param {Map<string, {right: {pos: number, identifier: string}, matchedBy: 'id'|'name'}>} pairs
+ * @returns {Set<string>}
+ */
+function anchoredChain(a, b, pairs) {
+    const leftLeaves = leafOrder(a);
+    const rightLeaves = leafOrder(b);
+    /** @type {Map<string, number>} */
+    const rightBlockFullPos = new Map();
+    /** @type {Map<string, number>} */
+    const rightMarkerFullPos = new Map();
+    rightLeaves.forEach((leaf, i) => {
+        (leaf.kind === 'block' ? rightBlockFullPos : rightMarkerFullPos).set(leaf.identifier, i);
+    });
+
+    const markerWeight = pairs.size + 1;
+    /** @type {{leftIdentifier: string|null, value: number, weight: number}[]} */
+    const items = [];
+    for (const leaf of leftLeaves) {
+        if (leaf.kind === 'block') {
+            const pair = pairs.get(leaf.identifier);
+            if (!pair) continue;
+            const value = rightBlockFullPos.get(pair.right.identifier);
+            if (value === undefined) continue;
+            items.push({ leftIdentifier: leaf.identifier, value, weight: 1 });
+        } else {
+            const value = rightMarkerFullPos.get(leaf.identifier);
+            if (value === undefined) continue;
+            items.push({ leftIdentifier: null, value, weight: markerWeight });
+        }
+    }
+
+    const n = items.length;
+    const dp = new Array(n).fill(0);
     const pred = new Array(n).fill(-1);
     for (let i = 0; i < n; i++) {
-        const v = values[i];
-        let lo = 0, hi = tailsIdx.length;
-        while (lo < hi) {
-            const mid = (lo + hi) >> 1;
-            if (values[tailsIdx[mid]] < v) lo = mid + 1; else hi = mid;
+        let best = 0, bestJ = -1;
+        for (let j = 0; j < i; j++) {
+            if (items[j].value < items[i].value && dp[j] > best) {
+                best = dp[j];
+                bestJ = j;
+            }
         }
-        if (lo > 0) pred[i] = tailsIdx[lo - 1];
-        if (lo === tailsIdx.length) tailsIdx.push(i); else tailsIdx[lo] = i;
+        dp[i] = best + items[i].weight;
+        pred[i] = bestJ;
     }
-    /** @type {Set<number>} */
-    const inRun = new Set();
-    let k = tailsIdx.length ? tailsIdx[tailsIdx.length - 1] : -1;
+
+    let end = -1, bestDp = 0;
+    for (let i = 0; i < n; i++) {
+        if (dp[i] > bestDp) {
+            bestDp = dp[i];
+            end = i;
+        }
+    }
+
+    /** @type {Set<string>} */
+    const chosen = new Set();
+    let k = end;
     while (k !== -1) {
-        inRun.add(k);
+        if (items[k].leftIdentifier !== null) chosen.add(items[k].leftIdentifier);
         k = pred[k];
     }
-    return inRun;
+    return chosen;
 }
 
 /**
@@ -215,10 +294,10 @@ export function comparePresets(a, b) {
         }
     }
 
-    // moved detection: matched rows NOT on the longest in-order run
-    const inRun = longestIncreasingRun(matchedRows);
-    matchedRows.forEach((row, i) => {
-        if (!inRun.has(i)) row.movedFrom = row.left.pos;
+    // moved detection: matched pairs NOT on the highest-weight anchored chain
+    const chosen = anchoredChain(a, b, pairs);
+    matchedRows.forEach((row) => {
+        if (!chosen.has(row.left.identifier)) row.movedFrom = row.left.pos;
         row.status = row.fields.length ? 'changed' : (row.movedFrom !== undefined ? 'moved' : 'same');
     });
 

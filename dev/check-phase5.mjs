@@ -18,6 +18,7 @@
  *   2c clicking a changed row shows its line diff (.pm-diff-hunk) in the bottom row
  *   2d FF vs its own revision 3: the rows come from the snapshot
  *   2e DEM block vs Sola block, and two blocks of one preset: hunks render
+ *   2g stale async results are discarded (held /diff + picker change; held row diff + new Compare)
  *   3a 10 rapid toggles -> 1 snapshot holding the pre-burst state
  *   3b a labelled save -> its own snapshot
  *   3c restore writes a snapshot first, and ST's live prompts show the restored state
@@ -213,6 +214,29 @@ async function clickRow(/** @type {string} */ rowSel) {
         return !b.stale && !oldLeft && b.head ? b : null;
     }, 10000, 'bottom row rendered');
 }
+
+/**
+ * Hold the next page fetch whose URL contains `urlPart` and whose body
+ * contains `bodyPart` until window.__chkRelease(); __chkHeld turns true while
+ * held, __chkDone once its response has come back. Restored by unhold().
+ */
+const holdFetch = (/** @type {string} */ urlPart, /** @type {string} */ bodyPart) => probe.eval(`(() => {
+    window.__chkHeld = false; window.__chkDone = false;
+    window.__chkOrigFetch = window.__chkOrigFetch ?? window.fetch;
+    const orig = window.__chkOrigFetch;
+    let armed = true;
+    window.fetch = async (...args) => {
+        const url = String(args[0]?.url ?? args[0]);
+        const body = String(args[1]?.body ?? '');
+        const mine = armed && url.endsWith(${J(urlPart)}) && body.includes(${J(bodyPart)});
+        if (!mine) return orig(...args);
+        armed = false;
+        window.__chkHeld = true;
+        await new Promise((r) => { window.__chkRelease = r; });
+        try { return await orig(...args); } finally { setTimeout(() => { window.__chkDone = true; }, 0); }
+    };
+    return true; })()`);
+const unhold = () => probe.eval(`(() => { window.__chkRelease?.(); if (window.__chkOrigFetch) window.fetch = window.__chkOrigFetch; window.__chkOrigFetch = undefined; return true; })()`);
 
 async function shot(/** @type {string} */ file) {
     fs.mkdirSync(SHOTS, { recursive: true });
@@ -524,6 +548,60 @@ async function main() {
         must(qLine && l2.some((/** @type {string} */ l) => l.startsWith('+|') && l.includes(qLine)), `no "+" line from ${Q.name}`);
         return `DEM "${A.name}" vs Sola "${Bb.name}": ${b1.hunks.length} hunk(s); FF "${P.name}" vs FF "${Q.name}": ${b2.hunks.length} hunk(s)`;
     });
+
+    // ------------------------------------------------------------------ 2g
+    await check('2g a pending /diff whose pickers changed, and a pending row diff overtaken by a new Compare, are discarded', async () => {
+        const names = { ff: (await getDoc(ids.ff)).name, hap: hap0.name, dem: (await getDoc(ids.dem)).name };
+        // (i) baseline: FF vs FF rendered
+        await pick('a', ids.ff);
+        await pick('b', ids.ff);
+        const { status: st0 } = await compare();
+        must((await text('#pm-window .pm-diff-head-right')) === names.ff, 'precondition: FF | FF rendered');
+        // hold the FF-vs-Hapuppy /diff, change B to DEM meanwhile, release
+        await pick('b', ids.hap);
+        await probe.eval(`(() => { document.querySelectorAll('#pm-window .pm-diff-rows tr').forEach((el) => { el.dataset.chkOld = '1'; }); return true; })()`);
+        await holdFetch('/st-preset-manager/diff', ids.hap);
+        try {
+            must(await click('#pm-window .pm-diff-go'), 'no Compare button');
+            await until(() => probe.eval('window.__chkHeld === true'), 5000, 'the FF vs Hapuppy /diff is held');
+            await pick('b', ids.dem);
+        } finally {
+            await probe.eval('(() => { window.__chkRelease?.(); return true; })()');
+        }
+        await until(() => probe.eval('window.__chkDone === true'), 5000, 'the held /diff answered');
+        await sleep(600);
+        const after = await probe.eval(`({
+            rowsNew: [...document.querySelectorAll('#pm-window .pm-diff-rows tr.pm-diff-row')].filter((tr) => !tr.dataset.chkOld).length,
+            rowsOld: document.querySelectorAll('#pm-window .pm-diff-rows tr.pm-diff-row[data-chk-old]').length,
+            left: document.querySelector('#pm-window .pm-diff-head-left')?.textContent,
+            right: document.querySelector('#pm-window .pm-diff-head-right')?.textContent,
+            status: document.querySelector('#pm-window .pm-diff-status')?.textContent,
+        })`);
+        must(after.rowsNew === 0 && after.rowsOld > 0, `the stale FF vs Hapuppy rows rendered: ${J(after)}`);
+        must(after.left === names.ff && after.right === names.ff && after.status === st0, `headers/status no longer describe the rows: ${J(after)}`);
+        // a fresh Compare still works and renders the NEW selection
+        await compare();
+        must((await text('#pm-window .pm-diff-head-right')) === names.dem, 'Compare after the discard did not render FF vs DEM');
+        // (ii) a pending row diff overtaken by a new Compare
+        await pick('a', ids.ff);
+        await pick('b', ids.hap);
+        await compare();
+        await holdFetch('/st-preset-manager/diff/blocks', ids.kimi);
+        try {
+            must(await probe.eval(`(() => { const tr = document.querySelector('#pm-window .pm-diff-rows tr.pm-diff-row[data-left="${ids.kimi}"]'); if (!tr) return false; tr.querySelector('.pm-diff-mid').dispatchEvent(new MouseEvent('click', { bubbles: true })); return true; })()`), 'no Kimi row');
+            await until(() => probe.eval('window.__chkHeld === true'), 5000, 'the Kimi row diff is held');
+            await compare();
+        } finally {
+            await probe.eval('(() => { window.__chkRelease?.(); return true; })()');
+        }
+        await until(() => probe.eval('window.__chkDone === true'), 5000, 'the held row diff answered');
+        await sleep(600);
+        const b = await probe.eval(`({ head: document.querySelector('#pm-window .pm-diff-bottom-head')?.textContent, hunks: document.querySelectorAll('#pm-window .pm-diff-hunks .pm-diff-hunk').length })`);
+        must(b.hunks === 0 && /Click a row/.test(b.head ?? ''), `the stale Kimi hunk overwrote the new comparison's bottom row: ${J(b)}`);
+        await unhold();
+        return `held FF-vs-Hapuppy /diff discarded after B changed to DEM (rows/headers/status kept: "${after.right}"); a later Compare rendered FF vs DEM; a held Kimi row diff released after a new Compare left the bottom at "${b.head}"`;
+    });
+    await unhold();
 
     // ------------------------------------------------------------------ 3
     /** Sola bits before the burst, the ten toggled identifiers, the burst snapshot number */
