@@ -274,6 +274,11 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   connection's layer (review 2, finding 1). An edit made while ST is still applying the
   profile (before that event) is indistinguishable from ST's and is not kept. The v2
   picker flushes genuine unsent edits before it runs `/profile` (finding 2).
+  Input blocking closes the class (review 4): the apply overlay spans every panel write-back
+  (including the transition-edit POST) and every connection transition until the new
+  baseline is installed (15 s liveness bound). Values a write-back sent are acknowledged
+  only while the sending connection is still live; otherwise the panel is unattributable
+  and is re-applied, never read as an edit.
 - **An apply never undoes another actor's preset choice.** A reconcile's apply checks,
   just before ST selects the slot and while it waits for ST to show it, whether ST moved
   to a foreign preset since the reconcile started (e.g. a profile that loads a preset);

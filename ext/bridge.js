@@ -28,9 +28,16 @@
  * re-apply and lets the op continue to GET /slot — the tab converges on
  * the new desired state, discarding the stale edit.
  *
- * While an apply runs the bridge blocks panel input (transparent overlay on
- * the prompt manager + sampler panel), so user edits cannot interleave with
- * an apply and no timing-based sampling heuristic is needed.
+ * The apply overlay (transparent input blocker on the prompt manager +
+ * sampler panel) is ref-counted, not a single on/off flag: an op hold
+ * (`_opHolds`) spans every panel write-back, reconcile and edit op —
+ * including the write-back POST itself — and a transition hold
+ * (`_transitionHold`) spans every connection transition until the
+ * reconcile that installs the new baseline (or a 15s liveness backstop).
+ * `_syncOverlay()` mounts or removes the single physical blocker from
+ * whichever holds are active, so a user edit can never interleave with a
+ * write-back or a transition and no timing-based sampling heuristic is
+ * needed.
  *
  * model op (enqueueModelReport / modelReportOp): reports the tab's current
  * raw connection id (source/model/profileId) to the plugin so it can
@@ -70,12 +77,14 @@
  * flight). connection.js calls `noteTransition()` synchronously right
  * after ST applies a model/profile switch, capturing what the panel shows
  * then (`_transition`, including any transition mutation ST itself
- * performs, e.g. a temperature clamp — that is NOT a user edit either).
- * flushPanel diffs a later snapshot against `_transition.tuning`: a key
- * that changed since is a genuine edit and is POSTed on top of the old
- * baseline restore, addressed at the NEW connection's Model (raw =
- * currentRaw()) so it survives the reconcile that follows, instead of
- * being silently restored away.
+ * performs, e.g. a temperature clamp — that is NOT a user edit either)
+ * and taking a transition hold on the overlay. flushPanel diffs a later
+ * snapshot against `_transition.tuning`: a key that changed since is a
+ * genuine edit and is POSTed on top of the old baseline restore,
+ * addressed at the NEW connection's Model. Its values are acknowledged
+ * ONLY when that connection is still current when the response lands —
+ * otherwise the panel is marked unattributable until the next reconcile
+ * (see flushPanel below for the full rule).
  *
  * DETACH-RACE (Fix B): an in-flight apply (POST /api/presets/save) must
  * never stomp a preset another actor selected while it was running (e.g.
@@ -149,6 +158,26 @@ export class Bridge {
          * it steals the tab back from whatever the user/profile just
          * selected. */
         this._detachGen = 0;
+        /** @type {number} count of in-flight ops (panel/reconcile/edit)
+         * holding the apply overlay up for the duration of the op,
+         * including any write-back POST it makes. */
+        this._opHolds = 0;
+        /** @type {boolean} true from noteTransition() until the reconcile
+         * that installs the new baseline releases it, or a 15s liveness
+         * timer does (see _armTransitionHold). */
+        this._transitionHold = false;
+        /** @type {any} liveness backstop timer for _transitionHold */
+        this._transitionTimer = null;
+        /** @type {boolean} whether the overlay's physical DOM blocker is
+         * currently mounted (tracked so _syncOverlay never double-mounts
+         * or double-removes it). */
+        this._overlayMounted = false;
+        /** True when a write-back POST's values landed addressed at a
+         * connection that changed again before the response came back:
+         * nothing on screen is attributable to the current connection
+         * until the next reconcile installs a fresh baseline. flushPanel
+         * refuses to run at all while this is true. */
+        this._panelUnattributable = false;
         this.es = null;
         /** @type {Set<(state: any) => void>} */
         this.listeners = new Set();
@@ -261,6 +290,7 @@ export class Bridge {
         const raw = currentRaw();
         if (this.baseRaw && this.hashOf(raw) !== this.hashOf(this.baseRaw)) {
             this._transition = { raw, tuning: panelTuningNow() };
+            this._armTransitionHold();
         } else {
             this._transition = null;
         }
@@ -278,13 +308,20 @@ export class Bridge {
      */
     async modelReportOp() {
         const raw = currentRaw();
-        if (this._reportedRaw && this.hashOf(raw) === this.hashOf(this._reportedRaw)) return null;
+        if (this._reportedRaw && this.hashOf(raw) === this.hashOf(this._reportedRaw)) {
+            this._releaseTransitionHold();
+            return null;
+        }
         if (currentPresetName() === SLOT_NAME && this.baseSnapshot) await this.flushPanel();
         const view = await api('POST', '/slot/model', { raw });
         this._reportedRaw = raw;
         this.modelId = view?.desired?.modelId ?? null;
         this.emit({ model: { raw, modelId: this.modelId } });
-        if (!this.detached) this.enqueueReconcile();
+        if (!this.detached) {
+            this.enqueueReconcile();
+        } else {
+            this._releaseTransitionHold();
+        }
         return view;
     }
 
@@ -317,12 +354,12 @@ export class Bridge {
      */
     edit(fn) {
         return this._enqueue(async () => {
-            this._setApplyOverlay(true);
+            this._holdOp();
             try {
                 if (currentPresetName() === SLOT_NAME && this.baseSnapshot) await this.flushPanel();
                 return await fn();
             } finally {
-                this._setApplyOverlay(false);
+                this._releaseOp();
                 this.enqueueReconcile();
             }
         });
@@ -343,16 +380,20 @@ export class Bridge {
      *   (e.g. after reattach())
      */
     async reconcileOp(force = false) {
-        // The input blocker covers the WHOLE op, not just apply(): an edit
-        // made after the flush below but before apply (e.g. during GET /slot)
-        // would be neither flushed nor blocked, and the apply would overwrite
-        // it. Mounted synchronously first, so every earlier edit is caught by
-        // the flush and no later edit can land until the op finishes.
-        this._setApplyOverlay(true);
+        // The op hold covers the WHOLE op, not just apply(): an edit made
+        // after the flush below but before apply (e.g. during GET /slot)
+        // would be neither flushed nor blocked, and the apply would
+        // overwrite it. Taken synchronously first, so every earlier edit
+        // is caught by the flush and no later edit can land until the op
+        // finishes.
+        this._holdOp();
         try {
             return await this._reconcileInner(force);
         } finally {
-            this._setApplyOverlay(false);
+            this._releaseOp();
+            // a reconcile either installed the new baseline or decided not
+            // to (detached): either way there is nothing left to protect
+            this._releaseTransitionHold();
         }
     }
 
@@ -472,6 +513,10 @@ export class Bridge {
             // baseline: the SETTINGS_UPDATED our apply triggers must
             // compare equal to it
             this.baseSnapshot = await snapshotPanel();
+            // nothing on screen predates this fresh baseline: any stale
+            // unattributable mark from an earlier interrupted write-back
+            // no longer applies
+            this._panelUnattributable = false;
         } finally {
             this.applying = false;
         }
@@ -487,6 +532,8 @@ export class Bridge {
      * is up.
      * The overlay is inert (aria-hidden, transparent) and does not affect
      * elements OUTSIDE the surfaces covered by APPLY_OVERLAY_SELECTORS.
+     * PRIVATE: call only through `_syncOverlay()`, which tracks whether the
+     * blocker is mounted so on/off calls always alternate correctly.
      * @param {boolean} on
      */
     _setApplyOverlay(on) {
@@ -525,6 +572,63 @@ export class Bridge {
         }
     }
 
+    /**
+     * Ensure the physical DOM blocker matches the OR of the two overlay
+     * sources: an op hold (`_opHolds`) and a transition hold
+     * (`_transitionHold`). `_setApplyOverlay` is the only DOM mutator and
+     * is PRIVATE to this method: it mounts the blocker only when it is not
+     * already mounted, and removes it only when it should not be — so
+     * overlapping holds never double-mount or prematurely remove it.
+     */
+    _syncOverlay() {
+        const shouldBlock = this._opHolds > 0 || this._transitionHold;
+        if (shouldBlock && !this._overlayMounted) {
+            this._setApplyOverlay(true);
+            this._overlayMounted = true;
+        } else if (!shouldBlock && this._overlayMounted) {
+            this._setApplyOverlay(false);
+            this._overlayMounted = false;
+        }
+    }
+
+    /** Take an op hold on the overlay (panel/reconcile/edit op). */
+    _holdOp() {
+        this._opHolds++;
+        this._syncOverlay();
+    }
+
+    /** Release an op hold on the overlay; never goes below zero. */
+    _releaseOp() {
+        this._opHolds = Math.max(0, this._opHolds - 1);
+        this._syncOverlay();
+    }
+
+    /**
+     * Take (or re-arm) the transition hold: kept up until the reconcile
+     * that installs the new baseline releases it, or — as a liveness
+     * backstop against a reconcile that never comes — for at most 15s.
+     */
+    _armTransitionHold() {
+        this._transitionHold = true;
+        clearTimeout(this._transitionTimer);
+        this._transitionTimer = setTimeout(() => {
+            this._transitionTimer = null;
+            this._transitionHold = false;
+            this._syncOverlay();
+        }, 15000);
+        this._syncOverlay();
+    }
+
+    /** Release the transition hold and clear its liveness timer. */
+    _releaseTransitionHold() {
+        this._transitionHold = false;
+        if (this._transitionTimer) {
+            clearTimeout(this._transitionTimer);
+            this._transitionTimer = null;
+        }
+        this._syncOverlay();
+    }
+
     openStream() {
         if (this.es) this.es.close();
         const url = `${PLUGIN_BASE}/events?clientId=${encodeURIComponent(clientId())}`;
@@ -558,11 +662,13 @@ export class Bridge {
      * pending as the next delta.
      */
     async panelOp() {
+        this._holdOp();
         this._flushStale = false;
         try {
             await this.flushPanel();
         } finally {
             if (this.appliedHash === null || this._flushStale) this.enqueueReconcile();
+            this._releaseOp();
         }
         return null;
     }
@@ -589,16 +695,23 @@ export class Bridge {
      * ST's own transition mutation. Any such edits are POSTed in a SECOND
      * request, on top of the restore, addressed at the NEW connection
      * (raw = the raw the edit was diffed against) so they land on the new
-     * Model instead of being silently restored away, and are then folded
-     * into `_transition.tuning` — but only if `_transition` still IS that
-     * same object: `currentRaw()` and `this._transition` are read ONCE at
-     * flush start (`liveRaw`/`tr`) and reused for the whole flush, because
-     * either can change out from under an in-flight await (a second
-     * transition superseding the one this flush diffed against). Without
-     * this, the second POST could address the wrong raw, or the fold could
-     * write a stale genuine edit into an unrelated newer transition (and
-     * make its own untouched value look genuine later), or the fold could
-     * throw against a `_transition` the connection switch already nulled.
+     * Model instead of being silently restored away. Their acknowledgement
+     * depends on whether that connection is STILL current when the response
+     * lands: if `currentRaw()` still hashes to `raw`, they are folded into
+     * `_transition.tuning` — but only if `_transition` still IS that same
+     * object — so they are never resent; otherwise the connection changed
+     * again while the POST was in flight, the panel now shows values that
+     * belong to nobody's edit, and the bridge marks it unattributable
+     * (`_panelUnattributable`) and re-arms the transition hold on the overlay
+     * until the reconcile this forces installs a fresh baseline.
+     * `currentRaw()` and `this._transition` are read ONCE at flush start
+     * (`liveRaw`/`tr`) and reused for the whole flush, because either can
+     * change out from under an in-flight await (a second transition
+     * superseding the one this flush diffed against). Without this, the
+     * second POST could address the wrong raw, the fold could write a stale
+     * genuine edit into an unrelated newer transition (and make its own
+     * untouched value look genuine later), or the fold could throw against a
+     * `_transition` the connection switch already nulled.
      * @param {any} [given] a snapshot taken earlier; skips the fresh
      *   snapshot when provided
      * @returns {Promise<any>} the snapshot sent, or null if nothing was sent
@@ -612,6 +725,7 @@ export class Bridge {
      *   above).
      */
     async flushPanel(given = undefined) {
+        if (this._panelUnattributable) return null; // panel isn't attributable to any connection until the next reconcile installs a fresh baseline
         if (currentPresetName() !== SLOT_NAME) return null; // detached: never write a foreign preset
         let snapshot = given ?? await snapshotPanel();
         if (!snapshot) return null;
@@ -720,18 +834,25 @@ export class Bridge {
             // forces the reconcile that follows to re-apply the new Model's
             // compile instead of comparing a hash taken against the old one
             this.appliedHash = null;
-            // never resend: fold the sent edits into the transition tuning —
-            // unless a newer transition has since replaced this one (a
-            // replaced or cleared `_transition` is left alone, never thrown on)
-            if (this._transition === tr) {
-                for (const key of Object.keys(genuine)) tr.tuning[key] = genuine[key];
-            }
-            // the sent values are accounted for: if the tab returns to its
-            // baseline connection before the next apply, the panel still
-            // shows them, and they must not be re-read as an edit made under
-            // that connection (they belong to tr.raw's Model)
-            if (this.baseSnapshot) {
-                for (const key of Object.keys(genuine)) this.baseSnapshot[key] = genuine[key];
+            // acknowledged only if the connection that sent them is still
+            // live: otherwise the panel is unattributable until the
+            // reconcile below installs a fresh baseline (see flushPanel's
+            // doc comment)
+            if (this.hashOf(currentRaw()) === this.hashOf(tr.raw)) {
+                // the connection that sent this edit is still live: fold it
+                // into the transition tuning so it is never resent
+                if (this._transition === tr) {
+                    for (const key of Object.keys(genuine)) tr.tuning[key] = genuine[key];
+                }
+            } else {
+                // the connection changed again while the POST was in
+                // flight: the panel now shows values sent for a connection
+                // that is no longer current, and they must never be read
+                // back as an edit — hold the overlay (re-armed liveness
+                // backstop) until the reconcile this forces (appliedHash =
+                // null above) installs a fresh baseline
+                this._panelUnattributable = true;
+                this._armTransitionHold();
             }
             this.emit({ slot: { rev: res2.rev, desired: null, compiled: res2.compiled, hash: res2.hash }, attached: true });
         }

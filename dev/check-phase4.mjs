@@ -590,6 +590,59 @@ async function main() {
     await check('2d a transition edit in flight when another profile loads (ST clamps on that load) stays on its own Model', () => transitionRace('Kimi via nanogpt', NANO, true, 1.44));
     await check('2e a transition edit in flight when the tab switches back to its original connection lands without errors', () => transitionRace('Kimi via hapuppy', HAP, false, 1.47));
 
+    // ------------------------------------------------------------------ 2f
+    await check('2f return to A while B\'s write-back is held: ST\'s sampler panel is blocked, then an A edit to B\'s value lands on A and stays', async () => {
+        const V = 1.52;
+        try {
+            await loadViaLibrary(ids.ff);
+            await ensureModel(KIMI, HAP);
+            const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            must(kimiOv !== V, 'precondition: fresh value');
+            /** is ST's temperature slider covered by v2's blocker (a real click would hit the blocker)? */
+            const sliderBlocked = () => probe.eval(`(() => {
+                const el = document.getElementById('temp_openai');
+                const r = el.getBoundingClientRect();
+                if (!r.width) return { visible: false, blocked: !!document.querySelector('#ai_response_configuration .pm-apply-blocker') };
+                const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+                return { visible: true, blocked: !!hit?.closest?.('.pm-apply-blocker') || getComputedStyle(document.getElementById('ai_response_configuration')).pointerEvents === 'none' };
+            })()`);
+            let during;
+            try {
+                await holdFetch('/api/plugins/st-preset-manager/slot/model');
+                must(await pickStProfile('Mock'), 'dropdown pick failed');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'report for Mock held');
+                must(await setSlider('temp_openai', V), 'no #temp_openai');
+                await sleep(1500);
+                await probe.eval('(() => { const r = window.__chkRelease; window.__chkRelease = undefined; r?.(); return true; })()');
+                await holdFetch('/api/plugins/st-preset-manager/slot/panel', String(V));
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'B\'s edit POST held');
+                // back to A while B's write-back is in flight
+                must(await pickStProfile('Kimi via hapuppy'), 'dropdown pick failed');
+                await until(async () => (await st()).model === HAP, 8000, 'ST back on A (hapuppy)');
+                await sleep(300);
+                during = await sliderBlocked();
+            } finally {
+                await unhold();
+            }
+            must(during.blocked, `ST's sampler panel accepted input while B's write-back was in flight (${J(during)})`);
+            await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+            const c1 = await until(async () => { const x = await converged(); return x && x.s.model === HAP && x.s.temperature === kimiOv ? x : null; }, 15000, `A settled at its override ${kimiOv}`);
+            const ffMid = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            must(ffMid === kimiOv, `A's override became ${ffMid} (B's value leaked to A)`);
+            // now a genuine A edit to exactly B's value
+            must(!(await sliderBlocked()).blocked, 'the blocker stayed up after the new baseline');
+            must(await setSlider('temp_openai', V), 'no #temp_openai');
+            await until(async () => (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature === V, 8000, `A's edit ${V} reached the FF Kimi override`);
+            await sleep(2500);
+            const s2 = await st();
+            const ff2 = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            must(s2.temperature === V && ff2 === V, `A's edit reverted: ST ${s2.temperature}, override ${ff2}`);
+            return `during the hold ST's slider was blocked (${J(during)}); after release A at ${c1.s.temperature}, B's ${V} on mock; A edit ${V} -> FF Kimi override ${ff2}, ST ${s2.temperature} (kept)`;
+        } finally {
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+        }
+    });
+
     // ------------------------------------------------------------------ 3
     await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
         await loadViaLibrary(ids.ff);
