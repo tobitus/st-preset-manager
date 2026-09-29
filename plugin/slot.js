@@ -12,9 +12,10 @@
  *     (within the override when override-routed — completeOverride fills in
  *     and normalises the override's own pick-one groups — within the
  *     loadout otherwise). Bits the delta omits are untouched.
- *   - prompt_order SEQUENCE change -> blocks layer: the new order applied to
- *     the current doc, preserving identifiers the doc has that the snapshot
- *     sequence lacks (concurrent API reorder survives at its position).
+ *   - prompt_order SEQUENCE change -> blocks layer: the minimal set of
+ *     moved leaves (outside the heaviest in-order chain over ST's order) is
+ *     spliced onto the doc's current structure; a document unchanged by the
+ *     order routes nothing (`applyOrderToSequences` returns `false`).
  *   - prompt content/name/role/field changes, keyed by identifier+field ->
  *     blocks layer; identifiers absent from the delta are untouched, so a
  *     concurrent API edit to another block's content survives.
@@ -25,6 +26,8 @@
 import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
 import { stripConnectionKeys, compile } from '../shared/compile.js';
 import { normalize, completeOverride } from '../shared/groups.js';
+import { flattenSeq, rebuildSeq } from '../shared/outline.js';
+import { reorderEntries } from '../shared/reorder.js';
 
 /**
  * Route panel differences to layers. Mutates `doc` (and optionally the
@@ -166,13 +169,15 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
     // reorder or toggle in the CURRENT doc is never overwritten.
     const orderDelta = delta?.prompt_order ?? {};
     if (orderDelta.changed && Array.isArray(orderDelta.order)) {
-        // blocks layer: reorder the doc's sequences to match the panel order.
-        // Any panel identifier we don't know is ignored (ST-side prompt the
-        // library never saw; Phase 2's addBlock covers real additions).
-        // Identifiers the current doc has but the snapshot sequence lacks
-        // ride at their preserved relative positions (applyOrderToSequences).
-        applyOrderToSequences(doc, orderDelta.order.map((/** @type {any} */ o) => o.identifier));
-        routed.push({ key: 'prompt_order.order', layer: 'blocks' });
+        // blocks layer: reorder the doc's sequence to match the panel order,
+        // preserving structure (reorderEntries). Any panel identifier we
+        // don't know is ignored (ST-side prompt the library never saw;
+        // Phase 2's addBlock covers real additions). A document the reorder
+        // leaves unchanged (e.g. the panel's order is already a fixed
+        // point the library converged to) routes nothing, so no revision
+        // is saved.
+        const changed = applyOrderToSequences(doc, orderDelta.order.map((/** @type {any} */ o) => o.identifier));
+        if (changed) routed.push({ key: 'prompt_order.order', layer: 'blocks' });
     }
     for (const entry of orderDelta.order ?? (Array.isArray(orderDelta) ? orderDelta : [])) {
         const id = entry?.identifier;
@@ -272,73 +277,33 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
 }
 
 /**
- * Reorder the document's sequences so the flat leaf order matches
- * `newIdents`. Leaves the enabled bits as the panel reports (applied by the
- * caller). Identifiers the doc has but `newIdents` lacks (e.g. a suppressed
- * empty heading) keep their place: each absent leaf is glued right above
- * the next leaf that followed it in the OLD flat order and IS present in
- * `newIdents` (several consecutive absent leaves keep their relative
- * order); absent leaves after the last present one stay at the end in
- * their old order. Unknown identifiers in `newIdents` are ignored, and
- * each identifier is placed once.
+ * Reorder the document's first sequence so it reflects ST's panel `order`,
+ * preserving structure: identifiers `order` lacks (e.g. a suppressed empty
+ * section/group heading) never move; a moved row lands above such an
+ * absent run over its new following neighbour, unless it already belonged
+ * to that heading's section/group (PLAN §1.4). Among the present
+ * leaves, only the MINIMAL set that moved — the complement of the
+ * heaviest in-order chain, weighting a section/group heading 3 and every
+ * other row 2 so a heading only counts as moved when keeping it would move
+ * two or more rows — is spliced onto the structure: each moved row lands
+ * directly above its new following neighbour with v2's drop rules (a
+ * single item/option re-derives its rank from what it lands next to; a
+ * group or section heading moved alone takes its whole group/section with
+ * it). Any step that would change the rank, group or section of a row that
+ * did NOT move is rejected, so the next apply of the library's own order
+ * is a no-op. Unknown identifiers in `order` are ignored, and each
+ * identifier is placed once.
  * @param {any} doc
  * @param {string[]} newIdents
+ * @returns {boolean} true when the document changed
  */
 export function applyOrderToSequences(doc, newIdents) {
     const seq = doc.sequences?.[0];
-    if (!seq) return;
-    /** @type {any[]} */
-    const flat = [];
-    const collect = (/** @type {any[]} */ rows) => {
-        for (const row of rows) {
-            if (['marker', 'block', 'ghost'].includes(row.kind)) flat.push(row);
-            else if (row.kind === 'section') {
-                if (row.header) flat.push(row.header);
-                collect(row.rows ?? []);
-            } else if (row.kind === 'group') {
-                if (row.header) flat.push(row.header);
-                collect(row.options ?? []);
-            }
-        }
-    };
-    collect(seq.rows ?? []);
-    const byIdent = new Map(flat.map((leaf) => [leaf.ref ?? leaf.identifier, leaf]));
-    const newSet = new Set(newIdents);
-    // Anchor each run of absent leaves (old order) to the next leaf that
-    // IS present in newIdents; a run with no following present leaf trails
-    // at the end in its old order.
-    /** @type {Map<string, any[]>} */
-    const anchored = new Map();
-    /** @type {any[]} */
-    const trailing = [];
-    /** @type {any[]} */
-    let pending = [];
-    for (const leaf of flat) {
-        const id = leaf.ref ?? leaf.identifier;
-        if (newSet.has(id)) {
-            if (pending.length) {
-                anchored.set(id, pending);
-                pending = [];
-            }
-        } else {
-            pending.push(leaf);
-        }
-    }
-    trailing.push(...pending);
-    /** @type {any[]} */
-    const next = [];
-    const used = new Set();
-    for (const id of newIdents) {
-        if (used.has(id)) continue;
-        const leaf = byIdent.get(id);
-        if (!leaf) continue;
-        const before = anchored.get(id);
-        if (before) next.push(...before);
-        next.push(leaf);
-        used.add(id);
-    }
-    next.push(...trailing);
-    seq.rows = next.map((leaf) => ({ ...leaf }));
+    if (!seq) return false;
+    const next = reorderEntries(flattenSeq(seq.rows ?? []), newIdents);
+    if (!next) return false;
+    seq.rows = rebuildSeq(next);
+    return true;
 }
 
 /**

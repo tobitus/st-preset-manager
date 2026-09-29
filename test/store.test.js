@@ -261,7 +261,12 @@ test('slot routing: reorder in panel reorders sequences (blocks layer)', () => {
     assert.deepEqual(flat, ['b', 'a', 'c']);
 });
 
-test('slot routing: panel order moves leaves out of groups/sections verbatim', () => {
+test('slot routing: a panel order that moves rows above their section heading keeps the section (no flattening)', () => {
+    // Owner decision 2026-09-29 (option a): the write-back keeps structure.
+    // Section S(h1){a, b}; ST's order b, a, h1: the heading outweighs any
+    // one row, so it stays put and a, b are the moved rows. Each lands above
+    // its following neighbour as a plain item; the section keeps its name
+    // and heading (now with no rows).
     const doc = {
         sequences: [{ character_id: 1, rows: [
             { kind: 'section', key: 's', name: 'S', header: { kind: 'block', ref: 'h1', enabled: true, key: 'k1' }, rows: [
@@ -271,12 +276,16 @@ test('slot routing: panel order moves leaves out of groups/sections verbatim', (
         ] }],
         loadouts: {}, activeLoadoutId: null, blocks: {},
     };
-    applyOrderToSequences(doc, ['b', 'a', 'h1']);
-    const flat = doc.sequences[0].rows.map((r) => r.ref ?? r.identifier);
-    assert.deepEqual(flat, ['b', 'a', 'h1']);
+    assert.equal(applyOrderToSequences(doc, ['b', 'a', 'h1']), true);
+    const rows = doc.sequences[0].rows;
+    assert.deepEqual(rows.map((r) => r.kind), ['block', 'block', 'section']);
+    assert.deepEqual(rows.slice(0, 2).map((r) => r.ref), ['b', 'a']);
+    assert.equal(rows[2].name, 'S');
+    assert.equal(rows[2].header.ref, 'h1');
+    assert.deepEqual(rows[2].rows, []);
     deleteBlockFromDoc(doc, 'a');
-    const flat2 = doc.sequences[0].rows.map((r) => r.ref ?? r.identifier);
-    assert.deepEqual(flat2, ['b', 'h1']);
+    const rows2 = doc.sequences[0].rows;
+    assert.deepEqual(rows2.map((r) => r.ref ?? r.header?.ref), ['b', 'h1']);
     assert.equal(doc.blocks.a, undefined);
 });
 

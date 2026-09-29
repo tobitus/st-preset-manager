@@ -167,8 +167,9 @@ compile time (so missing keys track the running ST version, not a copy in this r
    and the empty rows cluttered ST's prompt list). Its loadout bit stays in the library only
    (ST's panel cannot toggle it). Headings WITH content still compile (the outline marks
    them ⓘ). The ST-format export (`exportSt`) does NOT suppress: it keeps every block. Panel
-   write-back: identifiers the panel order lacks keep their place (glued above the row that
-   followed them) when a panel reorder is applied.
+   write-back: identifiers the panel order lacks are never moved by a panel reorder; a row
+   moved in ST lands above them (they stay glued above the row that followed them) unless
+   the row already belonged to their container (§1.4, reorder rules).
 5. Strip every `CONNECTION_KEYS` key. Return `out` and `hash = sha256(canonical JSON)`.
 
 The compiled preset is exactly what `GET /slot` returns and what the tab writes to the
@@ -249,6 +250,42 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   - `prompt_order` order changed / prompt content, name, role, fields changed / prompt
     added or deleted → **blocks layer** (`sequences` reordered via outline ops, block fields
     updated, block appended/removed).
+  - **Panel reorder keeps the outline's structure** (owner decision 2026-09-29, option (a);
+    `shared/reorder.js`, called by `applyOrderToSequences`). ST's panel is flat, so the
+    write-back works out the MINIMAL set of moved rows against the library's current flat
+    order: every row outside the heaviest in-order chain (compare.js's chain DP; a section or
+    group heading weighs 3, any other row 2, so a heading only counts as moved when keeping
+    it would move two or more rows — ST cannot tell "heading dragged past one row" from "that
+    row dragged past the heading"). Moved rows are applied right to left in ST's order, each
+    landing directly above its new following neighbour with v2's drop rules; every row that
+    did not move keeps its rank, group, section and container metadata:
+    - landing strictly inside a group (between its heading and first option, or between two
+      options) makes the row an option of that group; at a group's edge (just after its last
+      option, or above the first option of a headerless group) the row stays in the group
+      only if it was already a member, else it is a plain item; next to plain items it is a
+      plain item. No phantom groups: a group is never split or merged. Markers and ghosts are
+      only ever items.
+    - rows ST does not show (suppressed empty headings, §1.3) never move; a moved row lands
+      above them unless it already belonged to their section/group (dragging an option to the
+      top of a group whose heading is invisible keeps it in the group; any other row lands
+      above the invisible heading).
+    - **a group heading moved alone takes its whole group** (heading + options), exactly like
+      a v2 heading drag: it lands above its new following neighbour, snapping above that
+      neighbour's group when the drop fell among another group's options; dropped inside its
+      own options it does not move. **A section heading moved alone takes its whole section**,
+      landing above the section the drop fell into (after the leading run when it fell there;
+      at the end when dropped last). The library order then differs from ST's; the response's
+      compiled projection differs from the snapshot, so the tab re-applies once and ST
+      converges on the library order (the re-sent order is a fixed point: no loop).
+    - any single step that would still change a non-moved row's rank, group or section (e.g.
+      an item leaving the spot between two headerless groups, which would merge them) is
+      dropped; the re-apply puts ST back.
+    - enabled bits are never written by a reorder; a pick-one group that gained an option is
+      normalised by the compile (as for a v2 drag). An order that changes nothing routes
+      nothing (no revision).
+    - bounded work: more than 5000 rows shown in ST or more than 200 moved rows in one
+      write-back is not a panel drag and is refused (document unchanged; the re-apply puts
+      ST back).
   - `TUNING_KEYS` changed → `D.tuningOverrides[M]` if that override exists, else
     `R.models[M].tuning` (mirrors item 21's override-if-it-controls rule; the UI's tuning
     panel has an explicit "override for this preset" switch so intent is visible). With no

@@ -325,3 +325,19 @@ Chromium on ST).
 
 Tests: `test/fix1-*.test.js`. Check: `node dev/check-fix1.mjs` (resets dev
 data; real headless Chromium on ST).
+
+## ST-panel reorder keeps the outline (owner decision 2026-09-29)
+
+A drag in SillyTavern's own prompt-manager panel is written back to the
+library without flattening it: only the rows that actually moved (the rows
+outside the heaviest in-order chain) are re-placed, each directly above its
+new neighbour with v2's drop rules. Rows that did not move keep their
+section, group, rank and group settings. Dropped strictly inside a group, a
+row becomes its option; at a group's edge it stays in only if it was already
+a member. A group or section heading dragged on its own takes its whole
+group or section with it (the library order then differs from ST's, and the
+tab re-applies once, so ST shows the library order). Invisible empty
+headings stay on the row they were above. Rules: PLAN §1.4.
+
+Tests: `test/reorder-writeback.test.js`. Check: `node dev/check-reorder.mjs`
+(resets dev data; real mouse drags in ST's panel on DEM).

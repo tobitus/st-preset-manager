@@ -119,18 +119,26 @@ test('panel write-back: a toggle in the (suppressed) slot routes only that bit; 
 test('panel reorder: an identifier the panel does not carry stays right above the row that followed it', () => {
     const doc = mkDoc();
     // panel order lacks the suppressed h, g, w; the user swaps a and b
-    applyOrderToSequences(doc, ['chatHistory', 'b', 'a', 'hc', 'c', 'o1', 'o2', 'e']);
-    const ids = flattenSeq(doc.sequences[0].rows).map((e) => identOf(e.leaf));
-    assert.deepEqual(ids, ['chatHistory', 'h', 'b', 'a', 'hc', 'c', 'g', 'o1', 'o2', 'w', 'e']);
+    // (b sits under the invisible heading h): a is the moved row and lands
+    // above hc, i.e. at the end of h's section; h stays above b
+    assert.equal(applyOrderToSequences(doc, ['chatHistory', 'b', 'a', 'hc', 'c', 'o1', 'o2', 'e']), true);
+    const entries = flattenSeq(doc.sequences[0].rows);
+    assert.deepEqual(entries.map((e) => identOf(e.leaf)), ['chatHistory', 'h', 'b', 'a', 'hc', 'c', 'g', 'o1', 'o2', 'w', 'e']);
+    // structure kept: sections h/hc/w, group g{o1, o2}
+    assert.deepEqual(entries.map((e) => e.rank), ['item', 'section', 'item', 'item', 'section', 'item', 'group', 'option', 'option', 'section', 'item']);
+    assert.deepEqual(doc.sequences[0].rows.filter((/** @type {any} */ r) => r.kind === 'section').map((/** @type {any} */ r) => r.name), ['H', 'HC', 'W']);
 });
 
-test('applyOrderToSequences: absent leaves keep their place (consecutive runs and the old tail)', () => {
+test('applyOrderToSequences: absent leaves keep their place (they are never carried along by a moved row)', () => {
     const mk = (/** @type {string[]} */ ids) => ({
         sequences: [{ character_id: 1, rows: ids.map((id, i) => ({ kind: 'block', ref: id, key: `k${i}` })) }],
     });
+    // a (the row h1, h2 sat above) is the moved row: h1, h2 stay where they
+    // were, above b now
     const d1 = mk(['h1', 'h2', 'a', 'b']);
     applyOrderToSequences(d1, ['b', 'a']);
-    assert.deepEqual(d1.sequences[0].rows.map((r) => r.ref), ['b', 'h1', 'h2', 'a']);
+    assert.deepEqual(d1.sequences[0].rows.map((r) => r.ref), ['h1', 'h2', 'b', 'a']);
+    // a row moved to the end lands above the absent tail
     const d2 = mk(['a', 'b', 'z']);
     applyOrderToSequences(d2, ['b', 'a']);
     assert.deepEqual(d2.sequences[0].rows.map((r) => r.ref), ['b', 'a', 'z']);
