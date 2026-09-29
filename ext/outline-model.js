@@ -2,7 +2,8 @@
  * ext/outline-model.js — the pure view model behind the Presets tab outline
  * (sub-phase 2b): doc -> render tree with switch types and pick-one conflict
  * flags, keyboard mapping, pick-one/none click -> ops, drag -> moveLeaf op,
- * leaf lookup for the editor.
+ * leaf lookup for the editor, search matches, and the duplicate-copy
+ * anchor.
  *
  * Pure module: no imports, no DOM, runs in node and browser.
  */
@@ -18,6 +19,7 @@
  * @property {string} name
  * @property {boolean} enabled
  * @property {'checkbox'|'radio'|'readonly'} switchType
+ * @property {boolean} hasContent true when a block leaf's content is non-blank
  */
 
 /**
@@ -62,6 +64,7 @@
  * @property {string} [key]
  * @property {string} [identifier]
  * @property {'block'|'marker'|'ghost'} [leafKind]
+ * @property {boolean} [hasContent]
  * @property {string} [name]
  * @property {boolean} [enabled]
  * @property {'checkbox'|'radio'|'readonly'} [switchType]
@@ -108,6 +111,7 @@ function leafNode(doc, enabled, leaf, pickOne) {
         name: leaf.kind === 'block' ? (doc.blocks?.[identifier]?.name || identifier) : identifier,
         enabled: !!enabled?.[identifier],
         switchType: switchType(leaf, pickOne),
+        hasContent: leaf.kind === 'block' && String(doc.blocks?.[identifier]?.content ?? '').trim() !== '',
     };
 }
 
@@ -340,4 +344,91 @@ export function sourceItems(doc) {
         for (const node of seq.nodes) visit(node, 0);
     }
     return items;
+}
+
+/**
+ * Flatten one loadout's outline into per-sequence lists of leaves in outline
+ * order, each tagged with the rank findLeaf would give it. Section/group
+ * headers precede their body; a marker is always ranked 'item' regardless of
+ * where it sits (findLeaf's rule).
+ *
+ * @param {any} doc
+ * @returns {Array<Array<{ leaf: any, rank: 'item'|'option'|'group'|'section' }>>}
+ */
+function flatLeaves(doc) {
+    /** @type {(leaf: any, rank: 'item'|'option'|'group'|'section') => { leaf: any, rank: 'item'|'option'|'group'|'section' }} */
+    const entry = (leaf, rank) => ({ leaf, rank: leaf.kind === 'marker' ? 'item' : rank });
+    const visit = (/** @type {any} */ row, /** @type {Array<{ leaf: any, rank: 'item'|'option'|'group'|'section' }>} */ list) => {
+        if (row.kind === 'group') {
+            if (row.header) list.push(entry(row.header, 'group'));
+            for (const o of row.options ?? []) list.push(entry(o, 'option'));
+            return;
+        }
+        if (row.kind === 'section') {
+            if (row.header) list.push(entry(row.header, 'section'));
+            for (const r of row.rows ?? []) visit(r, list);
+            return;
+        }
+        list.push(entry(row, 'item'));
+    };
+    return (doc.sequences ?? []).map((/** @type {any} */ seq) => {
+        /** @type {Array<{ leaf: any, rank: 'item'|'option'|'group'|'section' }>} */
+        const list = [];
+        for (const row of seq.rows ?? []) visit(row, list);
+        return list;
+    });
+}
+
+/**
+ * Leaf keys whose shown name or content contains `query`, case-insensitively,
+ * in outline order across all sequences (headers included). A block's shown
+ * name is its `blocks[id].name` (falling back to the id) and its content is
+ * `blocks[id].content`; a marker or ghost has no content and is matched by
+ * its identifier alone. A blank query matches nothing.
+ *
+ * @param {any} doc
+ * @param {string} query
+ * @returns {string[]}
+ */
+export function searchMatches(doc, query) {
+    const q = String(query ?? '').trim().toLowerCase();
+    if (q === '') return [];
+    /** @type {string[]} */
+    const matches = [];
+    for (const list of flatLeaves(doc)) {
+        for (const { leaf } of list) {
+            const identifier = leaf.ref ?? leaf.identifier;
+            const name = leaf.kind === 'block' ? (doc.blocks?.[identifier]?.name || identifier) : identifier;
+            const content = leaf.kind === 'block' ? String(doc.blocks?.[identifier]?.content ?? '') : '';
+            if (String(name).toLowerCase().includes(q) || content.toLowerCase().includes(q)) matches.push(leaf.key);
+        }
+    }
+    return matches;
+}
+
+/**
+ * The copyBlock anchor that lands a copy of row `key` directly below it: the
+ * key of the next row in the same sequence's outline order (null to append
+ * at the end), and whether that copy must land outside a group — true only
+ * when a plain row (not itself a group heading or option) is immediately
+ * followed by a headerless option run, since a bare `before` there would
+ * otherwise drop the copy inside that group.
+ *
+ * @param {any} doc
+ * @param {string} key
+ * @returns {{ before: string|null, outsideGroup: boolean }|null}
+ */
+export function duplicateAnchor(doc, key) {
+    for (const list of flatLeaves(doc)) {
+        const index = list.findIndex((e) => e.leaf.key === key);
+        if (index === -1) continue;
+        const sel = list[index];
+        const next = list[index + 1];
+        if (!next) return { before: null, outsideGroup: false };
+        return {
+            before: next.leaf.key,
+            outsideGroup: next.rank === 'option' && sel.rank !== 'option' && sel.rank !== 'group',
+        };
+    }
+    return null;
 }

@@ -24,9 +24,14 @@ import { canonicalHash } from './util.js';
  * @param {any} base ST Default.json content (or {} in tests)
  * @param {string|null} [loadoutId] compile THIS loadout (defaults to the
  *   document's activeLoadoutId); lets /slot/load serve a non-active loadout
+ * @param {{ suppressEmptyHeadings?: boolean }} [opts] a section/group heading
+ *   block with empty or whitespace-only content is omitted from the slot's
+ *   prompts and prompt_order (headings are informational; ST cannot toggle
+ *   it — its loadout bit is library-only); the ST export keeps it. Set
+ *   `suppressEmptyHeadings: false` to disable (used by exportSt).
  * @returns {{ compiled: any, hash: string, enabled: Record<string, boolean> }}
  */
-export function compile(doc, model, base = {}, loadoutId = undefined) {
+export function compile(doc, model, base = {}, loadoutId = undefined, opts = {}) {
     const out = {};
 
     // 1. Base: ST's Default.json, non-connection preset keys only.
@@ -63,7 +68,10 @@ export function compile(doc, model, base = {}, loadoutId = undefined) {
     }
     normalize(doc, enabled);
 
-    // 4. prompts + prompt_order.
+    // 4. prompts + prompt_order. A section/group heading block with empty
+    // or whitespace-only content is omitted from the slot's prompts and
+    // prompt_order (headings are informational; ST cannot toggle it — its
+    // loadout bit is library-only); the ST export keeps it.
     /** @type {any[]} */
     const prompts = [];
     const placed = new Set();
@@ -72,6 +80,9 @@ export function compile(doc, model, base = {}, loadoutId = undefined) {
         placed.add(m.identifier);
     }
     const byIdent = new Map(Object.entries(doc.blocks ?? {}));
+    const suppressEmptyHeadings = opts?.suppressEmptyHeadings !== false;
+    /** @type {Set<string>} */
+    const suppressed = new Set();
     /** @type {any[]} */
     const orderEntries = [];
     for (const seq of doc.sequences ?? []) {
@@ -81,6 +92,17 @@ export function compile(doc, model, base = {}, loadoutId = undefined) {
         for (const e of flat) {
             const leaf = e.leaf;
             const id = leaf.ref ?? leaf.identifier;
+            if (
+                suppressEmptyHeadings &&
+                (e.rank === 'section' || e.rank === 'group') &&
+                leaf.kind === 'block'
+            ) {
+                const block = byIdent.get(id);
+                if (block && String(block.content ?? '').trim() === '') {
+                    suppressed.add(id);
+                    continue;
+                }
+            }
             order.push({ identifier: id, enabled: !!enabled[id] });
             if (leaf.kind === 'block' && !placed.has(id)) {
                 const block = byIdent.get(id);
@@ -104,9 +126,10 @@ export function compile(doc, model, base = {}, loadoutId = undefined) {
         orderEntries.push({ character_id: seq.character_id, order });
     }
     // Blocks present in `blocks` but placed in no sequence keep existing as
-    // disabled prompts (the DEM orphan case; v1 parity).
+    // disabled prompts (the DEM orphan case; v1 parity). Suppressed empty
+    // headings must never come back as a disabled orphan prompt.
     for (const [id, block] of byIdent) {
-        if (!placed.has(id)) {
+        if (!placed.has(id) && !suppressed.has(id)) {
             /** @type {any} */
             const prompt = {};
             for (const [k, v] of Object.entries(block.fields ?? {})) {
@@ -137,12 +160,14 @@ export function compile(doc, model, base = {}, loadoutId = undefined) {
  * loadout, with no Model tuning and no per-Model override — Model is null so
  * step 2/3 of `compile` never apply a tuning or an override, and base is `{}`
  * so the export carries exactly the document's own settings, not ST's
- * running Default.json.
+ * running Default.json. Unlike the working-slot compile, a section/group
+ * heading block with empty or whitespace-only content is NOT omitted here:
+ * the ST export keeps every block exactly as authored.
  * @param {any} doc native library document
  * @returns {any} plain ST preset object
  */
 export function exportSt(doc) {
-    return compile(doc, null, {}, doc.activeLoadoutId).compiled;
+    return compile(doc, null, {}, doc.activeLoadoutId, { suppressEmptyHeadings: false }).compiled;
 }
 
 /**

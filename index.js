@@ -2,14 +2,17 @@
  * Preset Manager v2 — extension entry. ST loads this file as
  * <script type=module> (extensions.js:813-819).
  *
- * Surface: a floating wand-menu entry + icon opening the main window
- * (Library tab, Presets tab) and — when the plugin is missing — only the
- * install notice (acceptance 15).
+ * Surface: a wand-menu entry (#pm-menu-item) plus a draggable floating
+ * button (#pm-float-btn, position remembered in localStorage
+ * pm.floatBtn.pos) that both open the main window (Library tab, Presets
+ * tab) and — when the plugin is missing — the install notice instead
+ * (acceptance 15).
  */
 import { pluginHealth, ctx } from './ext/st.js';
 import { Bridge } from './ext/bridge.js';
 import { installConnectionHooks } from './ext/connection.js';
 import { openWindow, openMainWindow } from './ext/window.js';
+import { clampPoint } from './ext/layout.js';
 
 const NOTICE_HTML = `
 <div class="pm-install-notice" style="padding:16px;max-width:420px;line-height:1.5">
@@ -60,6 +63,110 @@ function registerMenu(/** @type {() => void} */ open) {
         item.addEventListener('click', open);
         menu.appendChild(item);
     }
+
+    // floating draggable button (fix round 1, item 10)
+    document.querySelector('#pm-float-btn')?.remove();
+    const btn = document.createElement('div');
+    btn.id = 'pm-float-btn';
+    btn.title = 'Preset Manager';
+    btn.setAttribute('role', 'button');
+    btn.innerHTML = '<i class="fa-solid fa-folder-tree"></i>';
+    document.body.appendChild(btn);
+
+    const SIZE = { width: 40, height: 40 };
+    /** @returns {{ width: number, height: number }} */
+    const viewportNow = () => ({ width: window.innerWidth, height: window.innerHeight });
+
+    /** @type {{ left: number, top: number }|null} */
+    let saved = null;
+    try {
+        saved = JSON.parse(/** @type {string} */ (localStorage.getItem('pm.floatBtn.pos')));
+    } catch {
+        saved = null;
+    }
+    const fallback = { left: window.innerWidth - 40 - 16, top: window.innerHeight - 40 - 140 };
+    let pos = clampPoint(saved, SIZE, viewportNow()) ?? clampPoint(fallback, SIZE, viewportNow());
+    if (pos) {
+        btn.style.left = `${pos.left}px`;
+        btn.style.top = `${pos.top}px`;
+    }
+
+    let dragging = false;
+    let suppressClick = false;
+    let pressed = false;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    btn.addEventListener('pointerdown', (/** @type {PointerEvent} */ ev) => {
+        if (ev.button !== 0) return;
+        pressed = true;
+        dragging = false;
+        startX = ev.clientX;
+        startY = ev.clientY;
+        startLeft = pos.left;
+        startTop = pos.top;
+        try {
+            btn.setPointerCapture(ev.pointerId);
+        } catch {
+            // ignore
+        }
+    });
+
+    btn.addEventListener('pointermove', (/** @type {PointerEvent} */ ev) => {
+        if (!pressed) return;
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        if (!dragging && Math.hypot(dx, dy) > 4) {
+            dragging = true;
+            btn.classList.add('pm-dragging');
+        }
+        if (dragging) {
+            const next = clampPoint({ left: startLeft + dx, top: startTop + dy }, SIZE, viewportNow());
+            if (next) {
+                pos = next;
+                btn.style.left = `${pos.left}px`;
+                btn.style.top = `${pos.top}px`;
+            }
+        }
+    });
+
+    const endPress = () => {
+        if (dragging) {
+            try {
+                localStorage.setItem('pm.floatBtn.pos', JSON.stringify({ left: pos.left, top: pos.top }));
+            } catch {
+                // ignore
+            }
+            btn.classList.remove('pm-dragging');
+            // swallow the click that follows this drag's pointerup, and only
+            // that one: a pointercancel (no click) must not eat the next click
+            suppressClick = true;
+            setTimeout(() => { suppressClick = false; }, 0);
+        }
+        pressed = false;
+        dragging = false;
+    };
+    btn.addEventListener('pointerup', endPress);
+    btn.addEventListener('pointercancel', endPress);
+
+    btn.addEventListener('click', () => {
+        if (suppressClick) {
+            suppressClick = false;
+            return;
+        }
+        open();
+    });
+
+    window.addEventListener('resize', () => {
+        const next = clampPoint(pos, SIZE, viewportNow());
+        if (next) {
+            pos = next;
+            btn.style.left = `${pos.left}px`;
+            btn.style.top = `${pos.top}px`;
+        }
+    });
 }
 
 export async function init() {

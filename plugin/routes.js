@@ -323,13 +323,14 @@ export function makeRouter() {
     // (toggle/setGroup — the only ops writing loadout bits; pick-one is
     // normalised here like every write path), group shape (createGroup/
     // renameGroup/setCardinality), options (addOption/removeOption), blocks
-    // (setContent/editBlock/setBlockNotes/renameBlock/addBlock/deleteBlock),
-    // and settings/notes (setSettings/setNotes — notes are library-only and
-    // never compiled).
+    // (setContent/editBlock/setBlockNotes/renameBlock/addBlock/addSection/
+    // deleteBlock — addSection inserts a new empty section heading, ON in
+    // the active loadout), and settings/notes (setSettings/setNotes — notes
+    // are library-only and never compiled).
     const OPS = /** @type {const} */ ([
         'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'moveLeaf',
         'createGroup', 'renameGroup', 'addOption', 'removeOption',
-        'setContent', 'editBlock', 'renameBlock', 'addBlock', 'deleteBlock',
+        'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'deleteBlock',
         'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock',
     ]);
     router.post('/presets/:id/ops', async (req, res, next) => {
@@ -344,14 +345,15 @@ export function makeRouter() {
                 res.json({ doc: out.doc, rev: store.rev, warnings: out.warnings, identifiers: out.identifiers, keys: out.keys, group: out.group });
                 return;
             }
+            let /** @type {any} */ result = null;
             const saved = await store.enqueue(async () => {
                 const doc = store.getDocNow(req.params.id);
                 if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                await applyDocOp(doc, op, req.body ?? {});
+                result = await applyDocOp(doc, op, req.body ?? {});
                 return store._savePresetNow(doc);
             });
             broadcast(req, 'preset', req.params.id);
-            res.json({ doc: saved, rev: store.rev });
+            res.json({ doc: saved, rev: store.rev, result: result ?? {} });
         } catch (err) { next(err); }
     });
 

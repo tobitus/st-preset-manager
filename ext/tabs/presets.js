@@ -1,21 +1,41 @@
 /**
  * Presets tab (sub-phase 2b, extended in Phase 6): a tab strip of open
- * presets plus the active preset's view (loadout bar, rank bar, status
- * line, outline/editor split, and a toggleable right-hand shelf panel for
- * cross-preset / shelf block copies).
+ * presets plus the active preset's view (loadout bar, rank bar, edit bar,
+ * status line, outline/editor split, and a toggleable right-hand shelf panel
+ * for cross-preset / shelf block copies).
+ *
+ * The edit bar (fix round 1) adds: an "Insert ▾" menu (empty section
+ * heading / empty block, inserted before the selected row or at the end),
+ * Duplicate (copies the selected block directly below itself) and Delete
+ * (two-click-armed, like the loadout delete button but keyed to the
+ * selected row so switching rows resets the arm) buttons, and a
+ * name+content search box (Enter/Shift+Enter cycle matches, an optional
+ * "Filter" checkbox hides non-matching rows in the outline). Markers and
+ * order-only "ghost" rows can't be duplicated or deleted; the buttons stay
+ * enabled but visually disabled and clicking them just toasts why.
+ *
+ * The outline's per-section collapse state persists per preset in
+ * localStorage (`pm.collapsed.<id>`); the set of open tabs and the active
+ * one persist across reloads in `pm.presets.open`, restored on creation
+ * (silently dropping presets that no longer exist). The tab strip also
+ * tracks SillyTavern's current working-slot preset (via `GET /slot`, re-read
+ * on every slot event) and marks its tab with a "slot" badge; on creation it
+ * auto-opens that preset and activates it only when no saved active tab
+ * remains.
  *
  * Re-render strategy: the view skeleton is built ONCE per activation, so the
  * outline/editor/notes state survives refreshes; afterwards only the loadout
- * picker options, the rank bar's disabled state, the notes textarea (when the
- * user has not typed into it) and the outline/editor renders are updated.
- * Every write goes through `bridge.edit`; reads (GET) may be direct.
+ * picker options, the rank/edit bars' disabled state, the notes textarea
+ * (when the user has not typed into it) and the outline/editor renders are
+ * updated. Every write goes through `bridge.edit`; reads (GET) may be
+ * direct.
  */
-import { api } from '../st.js';
+import { api, ctx, slotPath } from '../st.js';
 import { createOutline } from './outline.js';
 import { createEditor } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
-import { findLeaf } from '../outline-model.js';
+import { findLeaf, searchMatches, duplicateAnchor } from '../outline-model.js';
 import { createEditGuard } from '../dirty.js';
 
 /**
@@ -27,16 +47,27 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLElement} statusEl the `.pm-status` one-liner
  * @property {HTMLSelectElement} picker loadout picker
  * @property {HTMLInputElement} loadoutName typed loadout name
- * @property {HTMLButtonElement} deleteBtn two-click-armed delete
+ * @property {HTMLButtonElement} deleteBtn two-click-armed loadout delete
  * @property {HTMLButtonElement[]} rankButtons promote/demote/move up/down
  * @property {HTMLButtonElement} shelfSaveBtn 'Save to shelf' button
  * @property {HTMLTextAreaElement} notes preset notes textarea
- * @property {{ render(doc: any, selectedKey: string|null): void, destroy(): void }} outline
+ * @property {HTMLElement} insertMenu the `.pm-insert-menu` popup
+ * @property {HTMLButtonElement} dupBtn 'Duplicate' button
+ * @property {HTMLButtonElement} delBtn two-click-armed block delete button
+ * @property {HTMLInputElement} searchInput the `.pm-search-input` box
+ * @property {HTMLElement} searchCount the `.pm-search-count` match counter
+ * @property {HTMLInputElement} searchFilter the `.pm-search-filter` checkbox
+ * @property {{ query: string, filter: boolean, index: number }} search
+ * @property {Set<string>} collapsed section node keys collapsed in the outline
+ * @property {string|null} delArmedKey key the block delete confirmation is armed for
+ * @property {any} delTimer restore-'Delete' timer for delArmedKey
+ * @property {AbortController} ac aborts this view's document-level listeners
+ * @property {{ render(doc: any, selectedKey: string|null, opts?: any): void, destroy(): void }} outline
  * @property {{ render(): void, destroy(): void }} modelPanel
  * @property {{ show(doc: any, key: string|null): void }} editor
  * @property {import('../dirty.js').EditGuard} notesGuard tracks unsaved edits to the notes textarea
- * @property {boolean} deleteArmed first delete click happened
- * @property {any} deleteTimer restore-'Delete' timer
+ * @property {boolean} deleteArmed first loadout-delete click happened
+ * @property {any} deleteTimer restore-'Delete' timer for the loadout delete
  * @property {string|null} selectNextLid loadout to select after creation
  * @property {HTMLElement} shelfPanelEl the `.pm-shelf-panel` element
  * @property {{ render(): Promise<void>, destroy(): void }} shelfPanel
@@ -56,7 +87,12 @@ export function createPresetsTab(pane, bridge) {
     let /** @type {PresetView|null} */ view = null;
     let /** @type {any} */ refreshTimer = undefined;
     let shelfOpen = false;
+    /** true while restore() replays the saved tab set (saveOpenState waits for its end) */
+    let restoring = false;
+    /** set by destroy(): async work that resumes afterwards (restore, open) must not build a view */
+    let destroyed = false;
     let shelfSource = 'shelf';
+    let /** @type {string|null} */ slotPresetId = null;
 
     pane.innerHTML = `
         <div class="pm-preset-tabs"></div>
@@ -89,14 +125,32 @@ export function createPresetsTab(pane, bridge) {
         } catch { /* keep the last known doc */ }
     }
 
+    /** Persist the open tab set + active tab across reloads. */
+    function saveOpenState() {
+        if (restoring) return; // restore() saves once at its end: never a half-restored set
+        try {
+            localStorage.setItem('pm.presets.open', JSON.stringify({ ids: openIds, active }));
+        } catch { /* storage unavailable/full — best effort */ }
+    }
+
     function renderTabs() {
         tabsEl.replaceChildren(...openIds.map((id) => {
             const tab = document.createElement('div');
-            tab.className = 'pm-preset-tab' + (id === active ? ' pm-active' : '');
+            tab.className = 'pm-preset-tab'
+                + (id === active ? ' pm-active' : '')
+                + (id === slotPresetId ? ' pm-slot' : '');
             tab.dataset.presetId = id;
             const name = document.createElement('span');
             name.className = 'pm-preset-tab-name';
             name.textContent = docs.get(id)?.name ?? id;
+            tab.append(name);
+            if (id === slotPresetId) {
+                const badge = document.createElement('span');
+                badge.className = 'pm-slot-badge';
+                badge.title = "In SillyTavern's working slot";
+                badge.textContent = 'slot';
+                tab.append(badge);
+            }
             const close = document.createElement('span');
             close.className = 'pm-preset-tab-close';
             close.textContent = '×';
@@ -108,7 +162,7 @@ export function createPresetsTab(pane, bridge) {
             tab.addEventListener('click', () => {
                 if (active !== id) activate(id);
             });
-            tab.append(name, close);
+            tab.append(close);
             return tab;
         }));
         emptyEl.hidden = openIds.length > 0;
@@ -116,25 +170,43 @@ export function createPresetsTab(pane, bridge) {
 
     function activate(/** @type {string} */ presetId) {
         active = presetId;
+        saveOpenState();
         renderTabs();
         buildView();
     }
 
-    /** Contract `open(id)`: GET the doc if not open, add a tab, activate, render. */
-    async function openPreset(/** @type {string} */ presetId) {
-        if (!openIds.includes(presetId)) {
-            let doc;
-            try {
-                doc = await api('GET', `/presets/${presetId}`);
-            } catch (err) {
+    /**
+     * GET the doc and push a tab for `presetId` if it isn't open yet.
+     * `silent` drops a failed GET (e.g. a 404 for a preset deleted since
+     * the tab set was saved) without status text or a console error.
+     * @param {string} presetId
+     * @param {{ silent?: boolean }} [opts]
+     * @returns {Promise<boolean>} whether the preset ended up open
+     */
+    async function addTab(presetId, { silent = false } = {}) {
+        if (openIds.includes(presetId)) return true;
+        let doc;
+        try {
+            doc = await api('GET', `/presets/${presetId}`);
+        } catch (err) {
+            if (!silent) {
                 console.error('[preset-manager] open preset failed', err);
                 setStatus(errText(err), true);
-                return;
             }
-            docs.set(presetId, doc);
-            selected.set(presetId, null);
-            openIds.push(presetId);
+            return false;
         }
+        if (openIds.includes(presetId)) return true; // opened while we awaited
+        docs.set(presetId, doc);
+        selected.set(presetId, null);
+        openIds.push(presetId);
+        saveOpenState();
+        return true;
+    }
+
+    /** Contract `open(id)`: GET the doc if not open, add a tab, activate, render. */
+    async function openPreset(/** @type {string} */ presetId) {
+        const ok = await addTab(presetId);
+        if (!ok || destroyed) return;
         if (active !== presetId) activate(presetId);
         else { renderTabs(); refreshView(); if (view && shelfOpen) void view.shelfPanel.render(); }
     }
@@ -150,9 +222,10 @@ export function createPresetsTab(pane, bridge) {
             active = null;
             destroyView();
             const next = openIds[idx] ?? openIds[idx - 1] ?? null;
-            if (next) activate(next);
-            else renderTabs();
+            if (next) activate(next); // activate() saves the open state
+            else { saveOpenState(); renderTabs(); }
         } else {
+            saveOpenState();
             renderTabs();
             if (view && shelfOpen) void view.shelfPanel.render();
         }
@@ -161,6 +234,8 @@ export function createPresetsTab(pane, bridge) {
     function destroyView() {
         if (!view) return;
         if (view.deleteTimer) clearTimeout(view.deleteTimer);
+        if (view.delTimer) clearTimeout(view.delTimer);
+        view.ac.abort();
         view.outline.destroy();
         view.modelPanel.destroy();
         view.shelfPanel.destroy();
@@ -170,6 +245,7 @@ export function createPresetsTab(pane, bridge) {
 
     /** Build the view skeleton ONCE per activation (DOM contract selectors). */
     function buildView() {
+        if (destroyed) return; // a late async activation after the window closed/was replaced
         const id = /** @type {string} */ (active);
         destroyView();
         const root = document.createElement('div');
@@ -193,6 +269,22 @@ export function createPresetsTab(pane, bridge) {
                 <button class="pm-shelf-save menu_button" title="Save the selected block to the shelf">Save to shelf</button>
                 <button class="pm-shelf-toggle menu_button" title="Show the shelf list (drag blocks into this preset)">Shelf ▸</button>
             </div>
+            <div class="pm-edit-bar">
+                <span class="pm-insert">
+                    <button class="pm-insert-toggle menu_button" title="Insert at the selected row (or at the end)">Insert ▾</button>
+                    <span class="pm-insert-menu" hidden>
+                        <button class="pm-insert-section menu_button" title="An empty section heading: the rows below it, up to the next section heading, belong to it">Section heading</button>
+                        <button class="pm-insert-block menu_button" title="An empty block">Block</button>
+                    </span>
+                </span>
+                <button class="pm-block-duplicate menu_button" title="Copy the selected block directly below it">Duplicate</button>
+                <button class="pm-block-delete menu_button" title="Delete the selected block">Delete</button>
+                <span class="pm-search">
+                    <input class="pm-search-input text_pole" type="search" placeholder="Search names + content…">
+                    <span class="pm-search-count"></span>
+                    <label class="pm-search-filter-label" title="Show only matching rows (and their headings)"><input type="checkbox" class="pm-search-filter">Filter</label>
+                </span>
+            </div>
             <div class="pm-status"></div>
             <div class="pm-split">
                 <div class="pm-outline" tabindex="0"></div>
@@ -210,6 +302,11 @@ export function createPresetsTab(pane, bridge) {
         const q = (/** @type {string} */ sel) => /** @type {any} */ (root.querySelector(sel));
         const outlineEl = /** @type {HTMLElement} */ (q('.pm-outline'));
         const editorEl = /** @type {HTMLElement} */ (q('.pm-editor'));
+        let /** @type {Set<string>} */ collapsed;
+        try {
+            const raw = JSON.parse(localStorage.getItem('pm.collapsed.' + id) ?? '[]');
+            collapsed = new Set(Array.isArray(raw) ? raw.filter((/** @type {any} */ x) => typeof x === 'string') : []);
+        } catch { collapsed = new Set(); }
         /** @type {PresetView} */
         const nextView = {
             id,
@@ -223,12 +320,31 @@ export function createPresetsTab(pane, bridge) {
             rankButtons: [q('.pm-rank-promote'), q('.pm-rank-demote'), q('.pm-move-up'), q('.pm-move-down')],
             shelfSaveBtn: q('.pm-shelf-save'),
             notes: q('.pm-preset-notes'),
+            insertMenu: q('.pm-insert-menu'),
+            dupBtn: q('.pm-block-duplicate'),
+            delBtn: q('.pm-block-delete'),
+            searchInput: q('.pm-search-input'),
+            searchCount: q('.pm-search-count'),
+            searchFilter: q('.pm-search-filter'),
+            search: { query: '', filter: false, index: -1 },
+            collapsed,
+            delArmedKey: null,
+            delTimer: null,
+            ac: new AbortController(),
             outline: createOutline(outlineEl, {
                 onSelect: (/** @type {string|null} */ key) => {
                     selected.set(id, key);
                     refreshView();
                 },
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
+                onToggleCollapse: (/** @type {string} */ nodeKey) => {
+                    if (nextView.collapsed.has(nodeKey)) nextView.collapsed.delete(nodeKey);
+                    else nextView.collapsed.add(nodeKey);
+                    try {
+                        localStorage.setItem('pm.collapsed.' + id, JSON.stringify([...nextView.collapsed]));
+                    } catch { /* storage unavailable/full — best effort */ }
+                    refreshView();
+                },
             }),
             editor: createEditor(editorEl, {
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
@@ -269,6 +385,42 @@ export function createPresetsTab(pane, bridge) {
         q('.pm-shelf-toggle').addEventListener('click', () => {
             shelfOpen = !shelfOpen;
             applyShelfOpen(nextView);
+        });
+        q('.pm-insert-toggle').addEventListener('click', () => {
+            nextView.insertMenu.hidden = !nextView.insertMenu.hidden;
+        });
+        document.addEventListener('click', (ev) => {
+            if (!nextView.insertMenu.hidden && !(/** @type {Element} */ (ev.target))?.closest?.('.pm-insert')) {
+                nextView.insertMenu.hidden = true;
+            }
+        }, { signal: nextView.ac.signal });
+        q('.pm-insert-section').addEventListener('click', () => void insertSection(nextView));
+        q('.pm-insert-block').addEventListener('click', () => void insertBlock(nextView));
+        nextView.dupBtn.addEventListener('click', () => void duplicateBlock(nextView));
+        nextView.delBtn.addEventListener('click', () => void deleteSelectedBlock(nextView));
+        nextView.searchInput.addEventListener('input', () => {
+            nextView.search.query = nextView.searchInput.value;
+            nextView.search.index = -1;
+            refreshView();
+        });
+        nextView.searchInput.addEventListener('keydown', (ev) => {
+            if (ev.key !== 'Enter') return;
+            ev.preventDefault();
+            const doc = docs.get(id);
+            if (!doc) return;
+            const matches = searchMatches(doc, nextView.search.query);
+            if (!matches.length) return;
+            const n = matches.length;
+            nextView.search.index = ev.shiftKey
+                ? (nextView.search.index <= 0 ? n - 1 : nextView.search.index - 1)
+                : (nextView.search.index + 1) % n;
+            selected.set(id, matches[nextView.search.index]);
+            refreshView();
+            scrollToKey(matches[nextView.search.index]);
+        });
+        nextView.searchFilter.addEventListener('change', () => {
+            nextView.search.filter = nextView.searchFilter.checked;
+            refreshView();
         });
         nextView.notes.addEventListener('input', () => { nextView.notesGuard.edited(); });
         q('.pm-preset-notes-save').addEventListener('click', () => void saveNotes(nextView));
@@ -323,6 +475,163 @@ export function createPresetsTab(pane, bridge) {
         if (failedErr) throw failedErr;
     }
 
+    /** Scroll the outline row for `key` (in the active view) into view. */
+    function scrollToKey(/** @type {string} */ key) {
+        if (!view) return;
+        view.outlineEl.querySelector(`li.pm-node[data-key="${CSS.escape(key)}"] > .pm-row`)?.scrollIntoView({ block: 'nearest' });
+    }
+
+    /**
+     * Guard shared by Duplicate and Delete: no selection -> null; a marker
+     * or order-only ghost row -> toast why and null; otherwise the leaf.
+     * @returns {{ key: string, found: any } | null}
+     */
+    function guardEditableSelection(/** @type {string} */ id, /** @type {any} */ doc) {
+        const key = selected.get(id);
+        if (!key) return null;
+        const found = findLeaf(doc, key);
+        if (!found) return null;
+        if (found.marker || found.leaf.kind === 'ghost') {
+            toast('warning', found.marker
+                ? "Markers are fixed SillyTavern slots: they can't be deleted or duplicated"
+                : "Order-only entries have no block: they can't be deleted or duplicated");
+            return null;
+        }
+        return { key, found };
+    }
+
+    /** Add an empty section heading before the selected row (or at the end). */
+    async function insertSection(/** @type {PresetView} */ v) {
+        v.insertMenu.hidden = true;
+        const raw = await ctx().callGenericPopup('Section heading name', ctx().POPUP_TYPE.INPUT, 'New section');
+        if (typeof raw !== 'string' || !raw.trim()) return;
+        const trimmed = raw.trim();
+        const name = trimmed.startsWith('=') ? trimmed : `== ${trimmed} ==`;
+        await runInsertOp(v, { op: 'addSection', name, before: selected.get(v.id) ?? null });
+    }
+
+    /** Add an empty block before the selected row (or at the end). */
+    async function insertBlock(/** @type {PresetView} */ v) {
+        v.insertMenu.hidden = true;
+        await runInsertOp(v, { op: 'addBlock', name: 'New block', before: selected.get(v.id) ?? null });
+    }
+
+    /** Shared addSection/addBlock runner: select + scroll to the new row. */
+    async function runInsertOp(/** @type {PresetView} */ v, /** @type {any} */ op) {
+        const id = v.id;
+        try {
+            const res = await bridge.edit(() => api('POST', `/presets/${id}/ops`, op));
+            setDoc(id, res.doc);
+            selected.set(id, res.result?.key ?? null);
+            setStatus('');
+            refreshView();
+            if (res.result?.key) scrollToKey(res.result.key);
+        } catch (err) {
+            setStatus(errText(err), true);
+            await regetDoc(id);
+            refreshView();
+        }
+    }
+
+    /** Copy the selected block directly below itself. */
+    async function duplicateBlock(/** @type {PresetView} */ v) {
+        const id = v.id;
+        const doc = docs.get(id);
+        if (!doc) return;
+        const g = guardEditableSelection(id, doc);
+        if (!g) return;
+        const anchor = duplicateAnchor(doc, g.key);
+        if (!anchor) return;
+        try {
+            const res = await bridge.edit(() => api('POST', `/presets/${id}/ops`, {
+                op: 'copyBlock', fromPresetId: id, identifier: g.found.identifier, before: anchor.before, outsideGroup: anchor.outsideGroup,
+            }));
+            setDoc(id, res.doc);
+            const newKey = res.keys?.[0] ?? null;
+            selected.set(id, newKey);
+            const name = g.found.block?.name || g.found.identifier;
+            setStatus(`Duplicated "${name}"`);
+            refreshView();
+            if (newKey) scrollToKey(newKey);
+        } catch (err) {
+            const message = /** @type {any} */ (err).body?.error ?? /** @type {any} */ (err).message;
+            toast('error', message);
+            setStatus(message, true);
+            await regetDoc(id);
+            refreshView();
+        }
+    }
+
+    /** Disarm the block-delete confirmation (selecting another row, a timeout, or a successful delete). */
+    function disarmDelete() {
+        if (!view) return;
+        clearTimeout(view.delTimer);
+        view.delTimer = null;
+        view.delArmedKey = null;
+        view.delBtn.textContent = 'Delete';
+    }
+
+    /** First click on a row arms (4 s timer); a second click on the SAME row deletes it. */
+    async function deleteSelectedBlock(/** @type {PresetView} */ v) {
+        const id = v.id;
+        const doc = docs.get(id);
+        if (!doc) return;
+        const g = guardEditableSelection(id, doc);
+        if (!g) return;
+        if (v.delArmedKey !== g.key) {
+            v.delArmedKey = g.key;
+            v.delBtn.textContent = 'Confirm delete';
+            clearTimeout(v.delTimer);
+            v.delTimer = setTimeout(() => disarmDelete(), 4000);
+            return;
+        }
+        const name = g.found.block?.name || g.found.identifier;
+        disarmDelete(); // before the await: a third click cannot send a second op
+        try {
+            const res = await bridge.edit(() => api('POST', `/presets/${id}/ops`, { op: 'deleteBlock', identifier: g.found.identifier }));
+            setDoc(id, res.doc);
+            selected.set(id, null);
+            setStatus(`Deleted "${name}"`);
+            refreshView();
+        } catch (err) {
+            setStatus(errText(err), true);
+            await regetDoc(id);
+            refreshView();
+        }
+    }
+
+    /**
+     * Duplicate/Delete button state: no selection -> disabled; a marker or
+     * ghost selection -> visually disabled (but still clickable, so the
+     * click handler's toast explains why); otherwise fully enabled.
+     */
+    function updateBlockActionButtons(/** @type {PresetView} */ v, /** @type {any} */ doc, /** @type {string|null} */ key) {
+        const found = key ? findLeaf(doc, key) : null;
+        const fixed = !!found && (found.marker || found.leaf.kind === 'ghost');
+        const fixedTitle = "Markers are fixed SillyTavern slots: they can't be deleted or duplicated";
+        for (const [btn, normalTitle] of /** @type {[HTMLButtonElement, string][]} */ ([
+            [v.dupBtn, 'Copy the selected block directly below it'],
+            [v.delBtn, 'Delete the selected block'],
+        ])) {
+            if (!key) {
+                btn.disabled = true;
+                btn.classList.remove('pm-disabled');
+                btn.removeAttribute('aria-disabled');
+                btn.title = normalTitle;
+            } else if (fixed) {
+                btn.disabled = false;
+                btn.classList.add('pm-disabled');
+                btn.setAttribute('aria-disabled', 'true');
+                btn.title = fixedTitle;
+            } else {
+                btn.disabled = false;
+                btn.classList.remove('pm-disabled');
+                btn.setAttribute('aria-disabled', 'false');
+                btn.title = normalTitle;
+            }
+        }
+    }
+
     /**
      * Rebuild the picker options, keeping the user's selection when that
      * loadout still exists (else the active one); honour a just-created id.
@@ -347,7 +656,7 @@ export function createPresetsTab(pane, bridge) {
         view.picker.value = wanted ?? '';
     }
 
-    /** Targeted refresh: picker, rank bar, notes (if not dirty), outline+editor. */
+    /** Targeted refresh: picker, rank/edit bars, notes (if not dirty), outline+editor. */
     function refreshView() {
         if (!view) return;
         const doc = docs.get(view.id);
@@ -356,8 +665,23 @@ export function createPresetsTab(pane, bridge) {
         const key = selected.get(view.id) ?? null;
         for (const b of view.rankButtons) b.disabled = !key;
         view.shelfSaveBtn.disabled = !key;
+        if (view.delArmedKey && view.delArmedKey !== key) disarmDelete();
+        updateBlockActionButtons(view, doc, key);
         if (!view.notesGuard.dirty) view.notes.value = doc.notes ?? '';
-        view.outline.render(doc, key);
+        const q = view.search.query.trim();
+        const matches = q ? searchMatches(doc, q) : [];
+        if (view.search.index > matches.length - 1) view.search.index = matches.length - 1;
+        view.searchCount.textContent = !q
+            ? ''
+            : (matches.length === 0
+                ? '0 matches'
+                : (view.search.index < 0
+                    ? `${matches.length} match${matches.length === 1 ? '' : 'es'}`
+                    : `${view.search.index + 1}/${matches.length}`));
+        view.outline.render(doc, key, {
+            collapsed: view.collapsed,
+            search: q ? { keys: new Set(matches), current: view.search.index >= 0 ? matches[view.search.index] : null, filter: view.search.filter } : undefined,
+        });
         view.editor.show(doc, key);
         view.modelPanel.render();
     }
@@ -526,6 +850,15 @@ export function createPresetsTab(pane, bridge) {
         t[kind](html, title, { timeOut: kind === 'error' ? 8000 : 10000, extendedTimeOut: 4000, escapeHtml: false });
     }
 
+    /** Re-GET SillyTavern's current working-slot preset id and re-render the tab strip. */
+    async function refreshSlot() {
+        try {
+            const slot = await api('GET', slotPath());
+            slotPresetId = slot?.desired?.presetId ?? null;
+        } catch { /* transient — keep the last known value */ }
+        if (pane.isConnected) renderTabs();
+    }
+
     /**
      * Live refresh: SSE preset events for open docs, slot events and
      * reconciles debounce into one re-GET pass over the open docs.
@@ -542,6 +875,7 @@ export function createPresetsTab(pane, bridge) {
 
     async function refreshOpenDocs() {
         if (!pane.isConnected) return;
+        await refreshSlot();
         for (const id of [...openIds]) {
             let fresh;
             try {
@@ -557,11 +891,55 @@ export function createPresetsTab(pane, bridge) {
         }
     }
 
+    /**
+     * Restore the open tab set + active tab from `pm.presets.open`, then
+     * make sure the current working-slot preset is open too (without
+     * switching to it unless nothing else claims the active slot).
+     */
+    async function restore() {
+        restoring = true;
+        try {
+            await restoreTabs();
+        } finally {
+            restoring = false;
+        }
+        if (!destroyed) saveOpenState();
+    }
+
+    async function restoreTabs() {
+        let /** @type {string[]} */ ids = [];
+        let /** @type {string|null} */ savedActive = null;
+        try {
+            const raw = JSON.parse(localStorage.getItem('pm.presets.open') ?? '{}');
+            ids = Array.isArray(raw?.ids) ? raw.ids.filter((/** @type {any} */ x) => typeof x === 'string') : [];
+            savedActive = typeof raw?.active === 'string' ? raw.active : null;
+        } catch { /* ignore */ }
+        for (const pid of ids) {
+            if (destroyed) return;
+            await addTab(pid, { silent: true });
+        }
+        if (destroyed) return;
+        await refreshSlot();
+        if (destroyed) return;
+        if (slotPresetId && !openIds.includes(slotPresetId)) {
+            await addTab(slotPresetId, { silent: true });
+        }
+        if (destroyed) return;
+        if (active === null) {
+            if (savedActive && openIds.includes(savedActive)) activate(savedActive);
+            else if (slotPresetId && openIds.includes(slotPresetId)) activate(slotPresetId);
+            else if (openIds.length) activate(openIds[0]);
+            else renderTabs();
+        }
+    }
+
     renderTabs();
+    void restore();
     return {
         open: openPreset,
         openIds: () => [...openIds],
         destroy() {
+            destroyed = true;
             unsubscribe();
             clearTimeout(refreshTimer);
             destroyView();

@@ -16,6 +16,7 @@
  */
 import { api } from '../st.js';
 import { blockOrder } from '../../shared/compare.js';
+import { sideBySide } from '../../shared/diff.js';
 
 /** @param {unknown} err @returns {string} */
 function errText(err) {
@@ -83,7 +84,13 @@ export function createDiffTab(pane, _bridge, { openIds }) {
                 </table>
             </div>
             <div class="pm-diff-bottom">
-                <div class="pm-diff-bottom-head"></div>
+                <div class="pm-diff-bottom-bar">
+                    <span class="pm-diff-bottom-head"></span>
+                    <span class="pm-diff-view-toggle">
+                        <button type="button" class="menu_button" data-view="interleaved" title="Unified view: removed and added lines interleaved">Interleaved</button>
+                        <button type="button" class="menu_button" data-view="side" title="Old on the left, new on the right">Side by side</button>
+                    </span>
+                </div>
                 <div class="pm-diff-hunks"></div>
             </div>
         </div>`;
@@ -97,6 +104,8 @@ export function createDiffTab(pane, _bridge, { openIds }) {
     const settingsBody = /** @type {HTMLElement} */ (pane.querySelector('.pm-diff-settings'));
     const bottomHead = /** @type {HTMLElement} */ (pane.querySelector('.pm-diff-bottom-head'));
     const hunksEl = /** @type {HTMLElement} */ (pane.querySelector('.pm-diff-hunks'));
+    const viewToggleEl = /** @type {HTMLElement} */ (pane.querySelector('.pm-diff-view-toggle'));
+    const viewButtons = /** @type {HTMLButtonElement[]} */ (Array.from(viewToggleEl.querySelectorAll('button')));
 
     /** @param {'a'|'b'} name @returns {Side} */
     function makeSide(name) {
@@ -118,8 +127,32 @@ export function createDiffTab(pane, _bridge, { openIds }) {
     /** @typedef {{ presetId: string, rev: string, blockId: string, name: string }} SideSel */
     /** @type {{ a: SideSel, b: SideSel }|null} */
     let lastCompare = null;
+    /** @type {any} last /diff/blocks result rendered by renderBottom, or null */
+    let lastBottom = null;
     let gen = 0;
     let rowGen = 0;
+
+    let view = 'interleaved';
+    try {
+        if (localStorage.getItem('pm.diff.view') === 'side') view = 'side';
+    } catch { /* ignore */ }
+
+    /** Update the toggle buttons' active state to match `view`. */
+    function updateViewButtons() {
+        for (const btn of viewButtons) btn.classList.toggle('pm-active', btn.dataset.view === view);
+    }
+    updateViewButtons();
+
+    for (const btn of viewButtons) {
+        btn.addEventListener('click', () => {
+            const next = /** @type {'interleaved'|'side'} */ (btn.dataset.view);
+            if (next === view) return;
+            view = next;
+            try { localStorage.setItem('pm.diff.view', view); } catch { /* ignore */ }
+            updateViewButtons();
+            if (lastBottom) renderBottom(lastBottom);
+        });
+    }
 
     /** Bump the shared generation, invalidating any pending Compare and any pending row request. @returns {number} the new generation */
     function invalidate() {
@@ -373,6 +406,7 @@ export function createDiffTab(pane, _bridge, { openIds }) {
 
     /** @param {any} result /diff/blocks response */
     function renderBottom(result) {
+        lastBottom = result;
         const identicalSuffix = result.hunks.length === 0 ? ' — identical' : '';
         bottomHead.textContent = `${result.a.name} ⇄ ${result.b.name}${identicalSuffix}`;
         hunksEl.replaceChildren();
@@ -381,6 +415,10 @@ export function createDiffTab(pane, _bridge, { openIds }) {
             div.className = 'pm-diff-identical';
             div.textContent = 'No differences.';
             hunksEl.appendChild(div);
+            return;
+        }
+        if (view === 'side') {
+            renderBottomSide(result);
             return;
         }
         for (const hunk of result.hunks) {
@@ -405,6 +443,42 @@ export function createDiffTab(pane, _bridge, { openIds }) {
             }
             hunksEl.appendChild(hDiv);
         }
+    }
+
+    /** @param {{no: number, text: string, kind: string}|null} cell @param {'del'|'add'} sideKind @returns {HTMLTableCellElement[]} */
+    function buildSideCells(cell, sideKind) {
+        const tdNo = document.createElement('td');
+        tdNo.className = 'pm-sbs-no';
+        tdNo.textContent = cell ? String(cell.no) : '';
+        const tdText = document.createElement('td');
+        const kindClass = cell ? (cell.kind === 'ctx' ? 'pm-sbs-ctx' : sideKind === 'del' ? 'pm-sbs-del' : 'pm-sbs-add') : 'pm-sbs-empty';
+        tdText.className = `pm-sbs-text ${kindClass}`;
+        tdText.textContent = cell ? cell.text : '';
+        return [tdNo, tdText];
+    }
+
+    /** @param {any} result /diff/blocks response, with at least one hunk */
+    function renderBottomSide(result) {
+        const table = document.createElement('table');
+        table.className = 'pm-diff-sbs';
+        const tbody = document.createElement('tbody');
+        for (const hunk of result.hunks) {
+            const headTr = document.createElement('tr');
+            headTr.className = 'pm-sbs-hunk-head';
+            const headTd = document.createElement('td');
+            headTd.colSpan = 4;
+            headTd.textContent = `@@ -${hunk.aStart},${hunk.aLines} +${hunk.bStart},${hunk.bLines} @@`;
+            headTr.appendChild(headTd);
+            tbody.appendChild(headTr);
+            for (const row of sideBySide(hunk)) {
+                const tr = document.createElement('tr');
+                tr.className = 'pm-sbs-row';
+                tr.append(...buildSideCells(row.left, 'del'), ...buildSideCells(row.right, 'add'));
+                tbody.appendChild(tr);
+            }
+        }
+        table.appendChild(tbody);
+        hunksEl.appendChild(table);
     }
 
     async function doCompare() {
@@ -440,6 +514,7 @@ export function createDiffTab(pane, _bridge, { openIds }) {
                 if (destroyed || my !== gen) return;
                 renderTable(result, sel);
                 hunksEl.replaceChildren();
+                lastBottom = null;
                 bottomHead.textContent = 'Click a row to see its line diff.';
                 lastCompare = sel;
                 const prefix = result.identical ? 'identical · ' : '';

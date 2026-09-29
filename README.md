@@ -13,10 +13,11 @@ working-slot compile, SSE live bridge, a minimal Library window, and the
 
 ```
 manifest.json        ST extension manifest (loads index.js as a module)
-index.js             extension entry: plugin check, bridge, window
+index.js             extension entry: plugin check, bridge, wand entry + floating button
 ext/st.js            the only module that touches ST internals
 ext/bridge.js        SSE push, tab reconciliation, panel write-back
-ext/window.js        floating window (Library tab)
+ext/window.js        floating window (Library tab, remembered rect)
+ext/layout.js        pure clamp of saved rects/positions onto the screen
 plugin/index.js      plugin entry (package.json main); routes, store, hub
 plugin/store.js      fs library: presets/, models.json, state.json, shelf/, revisions/
 plugin/routes.js     REST under /api/plugins/st-preset-manager
@@ -287,3 +288,40 @@ Tests: `test/mcp.test.js` (framing, error codes, the argument → HTTP map,
 and the session flow against a fake ST). Check: `node dev/check-phase7.mjs`
 (resets dev data; spawns the server behind a recording proxy and a headless
 Chromium on ST).
+
+## Fix round 1 (owner review, 2026-09-29)
+
+- **Opening**: a draggable floating button (`#pm-float-btn`, bottom right by
+  default; position in localStorage `pm.floatBtn.pos`) opens the window, as
+  does the wand-menu entry. It is also there when the plugin is missing (the
+  install notice opens).
+- **Window memory** (per browser, localStorage): the rect (`pm.window.rect`,
+  saved on drag/resize end, clamped back on screen) and the open preset tabs
+  plus the active one (`pm.presets.open`; ids no longer in the library are
+  dropped silently). On open, the preset in ST's working slot auto-opens and
+  is activated only if nothing else was. Its tab and its Library row carry a
+  `slot` badge that follows slot changes live (SSE).
+- **Presets tab edit bar**: *Insert ▾ → Section heading* asks for a name
+  (default `New section`, stored as `== <Name> ==`) and runs ONE `addSection`
+  op: an empty heading, ON in the active loadout, whose section takes the rows
+  below it up to the next section heading. *Insert ▾ → Block* adds an empty
+  block; *Duplicate* copies the selected block directly below it (`copyBlock`
+  from the same preset, fresh identifier); *Delete* needs a second click on
+  the SAME row. Markers and order-only rows refuse both (toast).
+- **Collapse**: section rows have a caret; the state is display-only, per
+  preset (`pm.collapsed.<presetId>`). A collapsed section moves as one unit
+  and no shelf drop lands inside it.
+- **Search**: names + content, case-insensitive, client-side over the loaded
+  document; a match count, Enter / Shift+Enter walk the matches (the editor
+  follows), *Filter* keeps only matches and their ancestor headings, and a
+  collapsed section holding a match opens while the search is active.
+- **Empty headings are not sent**: a section/group heading whose content is
+  empty or whitespace-only is left out of the working-slot compile (ST's
+  prompt list and `prompt_order`); its switch is library-only. Headings with
+  content still compile and show ⓘ in the outline. The ST export keeps every
+  block.
+- **Diff tab**: the block line diff has an *Interleaved* / *Side by side*
+  toggle (remembered in `pm.diff.view`).
+
+Tests: `test/fix1-*.test.js`. Check: `node dev/check-fix1.mjs` (resets dev
+data; real headless Chromium on ST).

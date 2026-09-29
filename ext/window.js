@@ -10,7 +10,11 @@
  * connection to a Model's profile. Uses plain DOM + CSS from style.css;
  * jQuery UI draggable/resizable are available globally in ST and used for
  * the window. The window also swallows file drag/drop events anywhere
- * inside it so ST's body-level importer never sees them (see below).
+ * inside it so ST's body-level importer never sees them (see below). The
+ * main window remembers its size and position across reloads (localStorage
+ * key `pm.window.rect`, clamped back on screen via ext/layout.js), and the
+ * Library tab marks the preset in ST's working slot with a live badge that
+ * follows slot changes without a manual refresh.
  */
 import { api, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
 import { switchToModel, unlinkProfilePreset } from './connection.js';
@@ -19,12 +23,13 @@ import { createDiffTab } from './tabs/diff.js';
 import { createIoTab } from './tabs/io.js';
 import { createShelfTab } from './tabs/shelf.js';
 import { createSettingsTab } from './tabs/settings.js';
+import { clampRect } from './layout.js';
 
 /**
- * @param {{ title: string, content: string, onClose?: () => void }} opts
+ * @param {{ title: string, content: string, onClose?: () => void, persistKey?: string }} opts
  * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void }}
  */
-export function openWindow({ title, content, onClose }) {
+export function openWindow({ title, content, onClose, persistKey }) {
     const existing = /** @type {any} */ (document.getElementById('pm-window'));
     existing?.__pmCleanup?.();
     existing?.remove();
@@ -39,10 +44,41 @@ export function openWindow({ title, content, onClose }) {
         </div>
         <div class="pm-body">${content}</div>`;
     document.body.appendChild(root);
+    if (persistKey) {
+        /** @type {any} */
+        let saved = null;
+        try {
+            saved = JSON.parse(localStorage.getItem(persistKey) ?? 'null');
+        } catch {
+            saved = null;
+        }
+        const clamped = clampRect(saved, { width: window.innerWidth, height: window.innerHeight });
+        if (clamped) {
+            root.style.left = `${clamped.left}px`;
+            root.style.top = `${clamped.top}px`;
+            root.style.width = `${clamped.width}px`;
+            root.style.height = `${clamped.height}px`;
+            root.style.right = 'auto';
+        }
+    }
+    const save = () => {
+        if (!persistKey) return;
+        const r = root.getBoundingClientRect();
+        try {
+            localStorage.setItem(persistKey, JSON.stringify({
+                left: Math.round(r.left),
+                top: Math.round(r.top),
+                width: Math.round(r.width),
+                height: Math.round(r.height),
+            }));
+        } catch {
+            // storage unavailable/full: skip persisting
+        }
+    };
     const jq = /** @type {any} */ (globalThis).jQuery;
     if (jq?.ui) {
-        jq(root).draggable({ handle: '.pm-titlebar' });
-        jq(root).resizable?.({ minWidth: 360, minHeight: 220 });
+        jq(root).draggable({ handle: '.pm-titlebar', stop: save });
+        jq(root).resizable?.({ minWidth: 360, minHeight: 220, stop: save });
     }
     const close = () => {
         onClose?.();
@@ -75,9 +111,18 @@ export function openMainWindow(bridge) {
     let settings;
     /** @type {(() => void)|null} */
     let unwireModelPicker = null;
+    /** @type {(() => void)|null} */
+    let unsubscribeSlot = null;
+    /** @type {ReturnType<typeof setTimeout>|undefined} */
+    let slotDebounce;
     const win = openWindow({
         title: 'Preset Manager',
-        onClose: () => { presets?.destroy(); diff?.destroy(); io?.destroy(); shelf?.destroy(); settings?.destroy(); unwireModelPicker?.(); },
+        persistKey: 'pm.window.rect',
+        onClose: () => {
+            presets?.destroy(); diff?.destroy(); io?.destroy(); shelf?.destroy(); settings?.destroy(); unwireModelPicker?.();
+            unsubscribeSlot?.();
+            clearTimeout(slotDebounce);
+        },
         content: `
             <div class="pm-toolbar">
                 <label class="pm-model-label">Model</label>
@@ -170,6 +215,15 @@ export function openMainWindow(bridge) {
 
     renderLibrary(libRoot, bridge, { onOpen });
     void refresh(libRoot, bridge, { onOpen });
+
+    unsubscribeSlot = /** @type {() => void} */ (bridge.onUpdate((/** @type {any} */ s) => {
+        if (!root.isConnected) return;
+        if (!(s?.slot || s?.event?.kind === 'slot')) return;
+        clearTimeout(slotDebounce);
+        slotDebounce = setTimeout(() => {
+            void refresh(libRoot, bridge, { onOpen });
+        }, 150);
+    }));
 
     return { root: win.root, body: win.body, close: win.close, presets };
 }
@@ -288,7 +342,7 @@ function wireModelPicker(root, bridge) {
  * Render the Library tab.
  * @param {HTMLElement} root .pm-root element
  * @param {import('./bridge.js').Bridge} _bridge
- * @param {{ items?: any[], desired?: any, onOpen?: (presetId: string) => void }} [state]
+ * @param {{ items?: any[], desired?: any, onOpen?: (presetId: string) => void, filter?: string }} [state]
  */
 export function renderLibrary(root, _bridge, state = {}) {
     root.innerHTML = `
@@ -302,6 +356,7 @@ export function renderLibrary(root, _bridge, state = {}) {
     const list = /** @type {HTMLElement} */ (root.querySelector('.pm-library-list'));
     const slotState = /** @type {HTMLElement} */ (root.querySelector('.pm-slot-state'));
     const filter = /** @type {HTMLInputElement} */ (root.querySelector('.pm-tag-filter'));
+    filter.value = state.filter ?? '';
 
     const render = () => {
         const items = state.items ?? [];
@@ -320,6 +375,7 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     const row = document.createElement('div');
     row.className = 'pm-library-row' + (item.id === desiredId ? ' pm-in-slot' : '');
     row.dataset.presetId = item.id;
+    const badge = item.id === desiredId ? ` <span class="pm-slot-badge" title="In SillyTavern's working slot">slot</span>` : '';
     const tags = item.tags?.length
         ? ` <span class="pm-tags">${item.tags.map((/** @type {string} */ t) => `<span class="pm-tag">${escapeHtml(t)}</span>`).join('')}</span>`
         : '';
@@ -329,7 +385,7 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
               .join('')}</select>`
         : '';
     row.innerHTML = `
-        <span class="pm-name">${escapeHtml(item.name)}</span>${tags}
+        <span class="pm-name">${escapeHtml(item.name)}</span>${badge}${tags}
         <span class="pm-row-actions">${loadouts}
             <button class="menu_button pm-open" title="Open in the Presets tab">Open</button>
             <button class="menu_button pm-load" title="Load into working slot">Load</button>
@@ -349,18 +405,20 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
 
 /**
  * Re-fetch items + slot and re-render, keeping state (onOpen) wired through
- * every re-render. On failure the error stays visible in the library list.
+ * every re-render, and the tag filter text across re-renders. On failure
+ * the error stays visible in the library list.
  * @param {HTMLElement} root .pm-root element
  * @param {import('./bridge.js').Bridge} bridge
  * @param {{ onOpen?: (presetId: string) => void }} [state]
  */
 async function refresh(root, bridge, state = {}) {
+    const filter = /** @type {HTMLInputElement|null} */ (root.querySelector('.pm-tag-filter'))?.value;
     try {
         const [items, slot] = await Promise.all([
             api('GET', '/library'),
             api('GET', slotPath()),
         ]);
-        renderLibrary(root, bridge, { onOpen: state.onOpen, items, desired: slot.desired });
+        renderLibrary(root, bridge, { onOpen: state.onOpen, items, desired: slot.desired, filter });
     } catch (err) {
         // error display moved here from index.js refreshLibrary
         const list = /** @type {HTMLElement|null} */ (root.querySelector('.pm-library-list'));

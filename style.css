@@ -1024,3 +1024,245 @@ pre.pm-shelf-content {
 #pm-window .pm-shelf-detail > .menu_button {
     align-self: flex-start;
 }
+
+/* ---------------------------------------------------------------- fix round 1 */
+
+/* Presets tab edit bar: Insert ▾, Duplicate, Delete, search (items 1, 8, 9) */
+.pm-edit-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 6px;
+}
+
+.pm-insert {
+    position: relative;
+    display: inline-block;
+}
+
+.pm-insert-menu {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    z-index: 5;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 4px;
+    background: var(--SmartThemeBlurTintColor, #1b1b1b);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 4px;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
+}
+
+.pm-insert-menu[hidden] {
+    display: none;
+}
+
+#pm-window .pm-insert-menu .menu_button {
+    text-align: left;
+}
+
+#pm-window .menu_button.pm-disabled,
+#pm-window .menu_button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.pm-search {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    margin-left: auto;
+}
+
+#pm-window .pm-search-input {
+    width: 200px;
+    margin: 0;
+}
+
+.pm-search-count {
+    font-size: 12px;
+    opacity: 0.8;
+    min-width: 5ch;
+}
+
+.pm-search-filter-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 12px;
+    white-space: nowrap;
+}
+
+/* search highlights + filter (item 9) */
+.pm-row.pm-match {
+    background: rgba(255, 200, 60, 0.18);
+}
+
+.pm-row.pm-match-current {
+    background: rgba(255, 200, 60, 0.4);
+    outline: 1px solid rgba(255, 200, 60, 0.8);
+}
+
+.pm-row.pm-match.pm-selected {
+    box-shadow: inset 3px 0 0 rgba(80, 160, 255, 0.9);
+}
+
+li.pm-node.pm-filtered-out {
+    display: none;
+}
+
+/* collapsible section headings (item 2) */
+.pm-caret {
+    display: inline-block;
+    width: 1.2em;
+    text-align: center;
+    cursor: pointer;
+    user-select: none;
+    opacity: 0.8;
+}
+
+.pm-caret:hover {
+    opacity: 1;
+}
+
+li.pm-node.pm-collapsed > ul.pm-list {
+    display: none;
+}
+
+li.pm-node.pm-collapsed > .pm-row .pm-name::after {
+    content: ' …';
+    opacity: 0.6;
+}
+
+/* heading that sends text to the model (item 3) */
+.pm-sends-text {
+    font-size: 1em;
+    opacity: 0.9;
+    color: rgba(120, 180, 255, 1);
+    cursor: help;
+}
+
+/* working-slot badge (item 7) */
+.pm-slot-badge {
+    display: inline-block;
+    margin-left: 4px;
+    padding: 0 5px;
+    font-size: 10px;
+    font-weight: bold;
+    line-height: 1.5;
+    border-radius: 8px;
+    background: rgba(80, 160, 255, 0.35);
+    color: var(--SmartThemeBodyColor, #ddd);
+    vertical-align: middle;
+}
+
+.pm-preset-tabs .pm-preset-tab.pm-slot {
+    border-color: rgba(80, 160, 255, 0.8);
+}
+
+/* block diff view toggle + side-by-side view (item 4) */
+.pm-diff-bottom-bar {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 2px 4px;
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: var(--SmartThemeBlurTintColor, #1b1b1b);
+    font-family: var(--mainFontFamily, sans-serif);
+}
+
+.pm-diff-view-toggle {
+    display: inline-flex;
+    gap: 4px;
+    margin-left: auto;
+}
+
+#pm-window .pm-diff-view-toggle .menu_button {
+    font-size: 11px;
+    padding: 1px 6px;
+}
+
+#pm-window .pm-diff-view-toggle .menu_button.pm-active {
+    font-weight: bold;
+    border-color: var(--SmartThemeBorderColor, #888);
+    background: var(--SmartThemeBlurTintColor, #333);
+}
+
+table.pm-diff-sbs {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+table.pm-diff-sbs td {
+    vertical-align: top;
+    padding: 0 4px;
+}
+
+table.pm-diff-sbs td.pm-sbs-no {
+    width: 4ch;
+    text-align: right;
+    opacity: 0.55;
+    user-select: none;
+}
+
+table.pm-diff-sbs td.pm-sbs-text {
+    width: 50%;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+}
+
+table.pm-diff-sbs td.pm-sbs-text + td.pm-sbs-no {
+    border-left: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+table.pm-diff-sbs td.pm-sbs-del {
+    background: rgba(217, 83, 79, 0.2);
+}
+
+table.pm-diff-sbs td.pm-sbs-add {
+    background: rgba(92, 184, 92, 0.2);
+}
+
+table.pm-diff-sbs td.pm-sbs-empty {
+    background: rgba(128, 128, 128, 0.08);
+}
+
+table.pm-diff-sbs tr.pm-sbs-hunk-head td {
+    opacity: 0.65;
+    padding-top: 4px;
+}
+
+/* floating open button (item 10) */
+#pm-float-btn {
+    position: fixed;
+    z-index: 10040;
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 50%;
+    cursor: pointer;
+    user-select: none;
+    touch-action: none;
+    font-size: 18px;
+    color: var(--SmartThemeBodyColor, #ddd);
+    background: var(--SmartThemeBlurTintColor, #1b1b1b);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+    opacity: 0.85;
+}
+
+#pm-float-btn:hover {
+    opacity: 1;
+}
+
+#pm-float-btn.pm-dragging {
+    cursor: grabbing;
+    opacity: 1;
+}

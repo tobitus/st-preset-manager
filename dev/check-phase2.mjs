@@ -624,12 +624,24 @@ async function main() {
         const name = 'leak: close/reopen releases the window\'s listeners';
         try {
             const size = () => probe.eval('window.__pmStarted.bridge.listeners.size');
+            // fix round 1: a window restores its saved open tabs (and the slot
+            // preset) asynchronously after opening; read the listener count
+            // only once that restore has settled (tab strip == saved ids and,
+            // with any tab open, the active view built)
+            const settled = () => until(() => probe.eval(`(() => {
+                const saved = JSON.parse(localStorage.getItem('pm.presets.open') ?? '{"ids":[]}').ids ?? [];
+                const shown = [...document.querySelectorAll('#pm-window .pm-preset-tab')].map((t) => t.dataset.presetId);
+                return JSON.stringify(saved) === JSON.stringify(shown)
+                    && (shown.length === 0 || !!document.querySelector('#pm-window .pm-preset-view'));
+            })()`), 10000, 'window tab restore settled');
             const n0 = await size();
             for (let i = 0; i < 3; i++) await click('#pm-menu-item'); // replace ×3
+            await settled();
             const nReplace = await size();
             await click('#pm-window .pm-close');
             const nClosed = await size();
             await click('#pm-menu-item');
+            await settled();
             const nReopen = await size();
             report(name, n0 > 0 && nReplace > 0 && nReplace <= n0 && nClosed === 0 && nReopen === nReplace,
                 `listeners open=${n0} after 3 replacements=${nReplace} closed=${nClosed} reopened=${nReopen}`);

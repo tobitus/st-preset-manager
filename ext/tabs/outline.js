@@ -4,6 +4,17 @@
  * wires clicks, switches, keyboard and jQuery UI sortable to ops handed to
  * `handlers.onOps`. Never mutates its own inputs locally: the server doc
  * coming back through re-render is the truth.
+ *
+ * `render`'s optional `opts` layers three display-only extras on top of that
+ * base render, none of which touch the doc: section headings always carry a
+ * `pm-caret` (▾/▸) that toggles `opts.collapsed` membership through
+ * `handlers.onToggleCollapse`, hiding a collapsed section's `ul.pm-list` via
+ * CSS — a collapsed section whose subtree holds a current search match is
+ * shown anyway; `opts.search` highlights matching rows (`pm-match`,
+ * `pm-match-current` on the current key) and, when `search.filter` is set,
+ * hides (`pm-filtered-out`) every row whose own key and whole subtree miss
+ * every search key; and a section/group heading whose header leaf has
+ * non-blank content gets a `pm-sends-text` ⓘ marker.
  */
 import { buildOutline, dragOps, keyAction, pickOneOps } from '../outline-model.js';
 
@@ -78,6 +89,23 @@ function cardSpan(node) {
     return span;
 }
 
+/** @returns {HTMLSpanElement} the ⓘ marker for a heading whose leaf sends non-blank content to the model */
+function sendsTextSpan() {
+    const span = document.createElement('span');
+    span.className = 'pm-sends-text';
+    span.title = 'this heading sends text to the model';
+    span.textContent = 'ⓘ';
+    return span;
+}
+
+/** @returns {HTMLSpanElement} the collapse/expand caret for a section row (display-only; toggled by handlers.onToggleCollapse) */
+function caretSpan() {
+    const span = document.createElement('span');
+    span.className = 'pm-caret';
+    span.title = 'Collapse / expand';
+    return span;
+}
+
 /** @returns {HTMLSpanElement} the '⚠' conflict badge */
 function conflictSpan() {
     const span = document.createElement('span');
@@ -106,11 +134,67 @@ function selectedSuffix(key, selectedKey) {
 }
 
 /**
+ * The per-render context threaded through renderNode/sectionLi/groupLi/
+ * leafLi: `collapsed`/`search` come straight from `render`'s `opts`
+ * (defaulted); `searchActive` = `search.keys.size > 0`; `matches` maps every
+ * model Node to whether its own key or any descendant's key is in
+ * `search.keys` (computed once per render by `computeMatch`, never rescanned
+ * per row).
+ * @typedef {Object} RenderCtx
+ * @property {Set<string>} collapsed
+ * @property {{ keys: Set<string>, current: string|null, filter: boolean }|undefined} search
+ * @property {boolean} searchActive
+ * @property {WeakMap<Node, boolean>} matches
+ */
+
+/**
+ * Adds `pm-match`/`pm-match-current` to `row` when `key` (a li's own,
+ * possibly empty, data-key) is among the active search keys.
+ * @param {HTMLElement} row
+ * @param {string} key
+ * @param {RenderCtx} ctx
+ */
+function applySearchMatch(row, key, ctx) {
+    if (!key || !ctx.search?.keys.has(key)) return;
+    row.classList.add('pm-match');
+    if (key === ctx.search.current) row.classList.add('pm-match-current');
+}
+
+/**
+ * Recursively marks, in `memo`, whether `node`'s own key (leaf key / header
+ * key) or any descendant's key is in `keys`. A single post-order pass over
+ * the whole model per render — never rerun per row.
+ * @param {Node} node
+ * @param {Set<string>} keys
+ * @param {WeakMap<Node, boolean>} memo
+ * @returns {boolean}
+ */
+function computeMatch(node, keys, memo) {
+    let own = false;
+    if (node.type === 'group') {
+        if (node.header && keys.has(node.header.key)) own = true;
+        for (const opt of node.options ?? []) {
+            if (computeMatch(opt, keys, memo)) own = true;
+        }
+    } else if (node.type === 'section') {
+        if (node.header && keys.has(node.header.key)) own = true;
+        for (const child of node.nodes ?? []) {
+            if (computeMatch(child, keys, memo)) own = true;
+        }
+    } else {
+        own = keys.has(/** @type {string} */ (node.key));
+    }
+    memo.set(node, own);
+    return own;
+}
+
+/**
  * @param {LeafNode} node
  * @param {string|null} selectedKey
+ * @param {RenderCtx} ctx
  * @returns {HTMLLIElement}
  */
-function leafLi(node, selectedKey) {
+function leafLi(node, selectedKey, ctx) {
     const li = document.createElement('li');
     li.className = 'pm-node'
         + (node.leafKind === 'marker' ? ' pm-marker' : '')
@@ -122,7 +206,9 @@ function leafLi(node, selectedKey) {
     const row = document.createElement('div');
     row.className = 'pm-row' + selectedSuffix(node.key, selectedKey);
     row.append(handleSpan(), makeSwitch(node), nameSpan(node.name));
+    applySearchMatch(row, node.key, ctx);
     li.append(row);
+    if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
     return li;
 }
 
@@ -132,9 +218,10 @@ function leafLi(node, selectedKey) {
  * and no handle.
  * @param {GroupNode} node
  * @param {string|null} selectedKey
+ * @param {RenderCtx} ctx
  * @returns {HTMLLIElement}
  */
-function groupLi(node, selectedKey) {
+function groupLi(node, selectedKey, ctx) {
     const key = node.header?.key ?? '';
     const li = document.createElement('li');
     li.className = 'pm-node';
@@ -146,29 +233,34 @@ function groupLi(node, selectedKey) {
     row.className = 'pm-row pm-group-row' + selectedSuffix(key, selectedKey);
     if (node.header) {
         row.append(handleSpan(), nameSpan(node.header.name));
+        if (node.header.hasContent) row.append(sendsTextSpan());
     } else {
         row.append(nameSpan(node.name || '(options)'));
     }
     row.append(cardSpan(node));
     if (node.conflict) row.append(conflictSpan());
     if (node.pickOne) row.append(noneLabel(node));
+    applySearchMatch(row, key, ctx);
     li.append(row);
     const list = document.createElement('ul');
     list.className = 'pm-list';
     list.dataset.list = 'options';
-    for (const opt of node.options ?? []) list.append(leafLi(opt, selectedKey));
+    for (const opt of node.options ?? []) list.append(leafLi(opt, selectedKey, ctx));
     li.append(list);
+    if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
     return li;
 }
 
 /**
  * Sections show the section name (or header name when unnamed); handle and
- * switch exist only when a header leaf exists.
+ * switch exist only when a header leaf exists. Every section row carries a
+ * collapse/expand caret (display-only, never affects the doc).
  * @param {import('../outline-model.js').SectionNode} node
  * @param {string|null} selectedKey
+ * @param {RenderCtx} ctx
  * @returns {HTMLLIElement}
  */
-function sectionLi(node, selectedKey) {
+function sectionLi(node, selectedKey, ctx) {
     const key = node.header?.key ?? '';
     const li = document.createElement('li');
     li.className = 'pm-node';
@@ -178,29 +270,38 @@ function sectionLi(node, selectedKey) {
     li.dataset.nodeKey = node.key;
     const row = document.createElement('div');
     row.className = 'pm-row pm-section-row' + selectedSuffix(key, selectedKey);
-    row.append(nameSpan(node.name || node.header?.name || '(section)'));
+    const caret = caretSpan();
+    const collapsedDisplay = !!ctx.collapsed?.has(node.key)
+        && !(ctx.searchActive && ctx.matches.get(node));
+    caret.textContent = collapsedDisplay ? '▸' : '▾';
+    row.append(caret);
     if (node.header) {
-        row.prepend(makeSwitch(node.header));
-        row.prepend(handleSpan());
+        row.append(handleSpan(), makeSwitch(node.header));
     }
+    row.append(nameSpan(node.name || node.header?.name || '(section)'));
+    if (node.header?.hasContent) row.append(sendsTextSpan());
+    applySearchMatch(row, key, ctx);
+    if (collapsedDisplay) li.classList.add('pm-collapsed');
     li.append(row);
     const list = document.createElement('ul');
     list.className = 'pm-list';
     list.dataset.list = 'rows';
-    for (const child of node.nodes ?? []) list.append(renderNode(child, selectedKey));
+    for (const child of node.nodes ?? []) list.append(renderNode(child, selectedKey, ctx));
     li.append(list);
+    if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
     return li;
 }
 
 /**
  * @param {Node} node
  * @param {string|null} selectedKey
+ * @param {RenderCtx} ctx
  * @returns {HTMLLIElement}
  */
-function renderNode(node, selectedKey) {
-    if (node.type === 'group') return groupLi(/** @type {GroupNode} */ (node), selectedKey);
-    if (node.type === 'section') return sectionLi(/** @type {SectionNode} */ (node), selectedKey);
-    return leafLi(/** @type {LeafNode} */ (node), selectedKey);
+function renderNode(node, selectedKey, ctx) {
+    if (node.type === 'group') return groupLi(/** @type {GroupNode} */ (node), selectedKey, ctx);
+    if (node.type === 'section') return sectionLi(/** @type {SectionNode} */ (node), selectedKey, ctx);
+    return leafLi(/** @type {LeafNode} */ (node), selectedKey, ctx);
 }
 
 /**
@@ -287,8 +388,8 @@ export function dropAnchor(li) {
 
 /**
  * @param {HTMLElement} container the .pm-outline element
- * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void> }} handlers
- * @returns {{ render(doc: any, selectedKey: string|null): void, destroy(): void }}
+ * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void }} handlers
+ * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
  */
 export function createOutline(container, handlers) {
     /** group key -> GroupNode from the last buildOutline (radio clicks need it) */
@@ -341,6 +442,11 @@ export function createOutline(container, handlers) {
         if (input) {
             ev.stopPropagation(); // switches never select the row they sit on
             inputClick(input);
+            return;
+        }
+        if (t.closest('.pm-caret')) {
+            const li = /** @type {HTMLElement|null} */ (t.closest('li.pm-node'));
+            handlers.onToggleCollapse?.(li?.dataset.nodeKey ?? '');
             return;
         }
         if (t.closest('.pm-drag-handle') || t.closest('label.pm-none-label')) return;
@@ -429,12 +535,26 @@ export function createOutline(container, handlers) {
         }
     };
 
-    const render = (/** @type {any} */ doc, /** @type {string|null} */ sel) => {
+    const render = (/** @type {any} */ doc, /** @type {string|null} */ sel, /** @type {{ collapsed?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }} */ opts = {}) => {
         selectedKey = sel;
         const top = container.scrollTop;
         destroySortables();
         groupByKey.clear();
         const model = buildOutline(doc);
+        const searchKeys = opts.search?.keys ?? new Set();
+        const searchActive = searchKeys.size > 0;
+        const matches = /** @type {WeakMap<Node, boolean>} */ (new WeakMap());
+        if (searchActive || opts.search?.filter) {
+            for (const seq of model.sequences) {
+                for (const node of seq.nodes ?? []) computeMatch(node, searchKeys, matches);
+            }
+        }
+        const ctx = /** @type {RenderCtx} */ ({
+            collapsed: opts.collapsed ?? new Set(),
+            search: opts.search,
+            searchActive,
+            matches,
+        });
         const frag = document.createDocumentFragment();
         const many = model.sequences.length > 1;
         model.sequences.forEach((/** @type {{ characterId: any, nodes: Node[] }} */ seq, /** @type {number} */ i) => {
@@ -448,13 +568,15 @@ export function createOutline(container, handlers) {
             list.className = 'pm-list';
             list.dataset.list = 'seq';
             list.dataset.seqIndex = String(i);
-            for (const node of seq.nodes ?? []) list.append(renderNode(node, selectedKey));
+            for (const node of seq.nodes ?? []) list.append(renderNode(node, selectedKey, ctx));
             frag.append(list);
         });
         for (const seq of model.sequences) collectGroups(seq.nodes);
         container.replaceChildren(frag);
         container.scrollTop = top;
-        initSortables();
+        const filtering = !!opts.search?.filter;
+        container.classList.toggle('pm-filtering', filtering);
+        if (!filtering) initSortables(); // no drag while filtering: matches are scattered
     };
 
     const destroy = () => {

@@ -160,6 +160,15 @@ compile time (so missing keys track the running ST version, not a copy in this r
    content, role, ...fields, enabled: enabled[id], marker:false, system_prompt:false}` —
    **no `notes`, no group data**; `out.prompt_order` = one entry per sequence, `order` =
    flattened leaf order (outline flatten), each `{identifier, enabled}`; ghosts ride along.
+   **Functionally-empty headings are suppressed** (fix round 1, owner 2026-09-29): a
+   section- or group-heading block whose content is empty or whitespace-only is left out of
+   both `prompts` and `prompt_order` (headings are informational; ST 1.19 already drops
+   empty-content messages at `openai.js` `getChat()`, but whitespace-only content was sent,
+   and the empty rows cluttered ST's prompt list). Its loadout bit stays in the library only
+   (ST's panel cannot toggle it). Headings WITH content still compile (the outline marks
+   them ⓘ). The ST-format export (`exportSt`) does NOT suppress: it keeps every block. Panel
+   write-back: identifiers the panel order lacks keep their place (glued above the row that
+   followed them) when a panel reorder is applied.
 5. Strip every `CONNECTION_KEYS` key. Return `out` and `hash = sha256(canonical JSON)`.
 
 The compiled preset is exactly what `GET /slot` returns and what the tab writes to the
@@ -337,7 +346,7 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 | POST | `/presets/:id/fork` | `{name, folder?}` → new doc (new id, block identifiers re-minted) |
 | POST | `/presets/:id/move` | `{folder?, name?}` |
 | PATCH | `/presets/:id/meta` | `{tags?, notes?, blockNotes?: {id: text}}` |
-| POST | `/presets/:id/ops` | `{op, ...args}` — `toggle`, `setGroup`, `setCardinality`, `promote`, `demote`, `moveLeaf`, `editBlock`, `addBlock`, `deleteBlock`, `copyBlock {fromPresetId|shelfId, identifier, before}`, `renameBlock`, `setSettings` → `{doc, rev}` |
+| POST | `/presets/:id/ops` | `{op, ...args}` — `toggle`, `setGroup`, `setCardinality`, `promote`, `demote`, `moveLeaf`, `editBlock`, `addBlock`, `addSection {name, before}` (one atomic op: an empty section heading, ON in the active loadout; the rows below it up to the next section heading become its children; an anchor inside a group snaps above the group), `deleteBlock`, `copyBlock {fromPresetId|shelfId, identifier, before}`, `renameBlock`, `setSettings` → `{doc, rev, result}` (`result` = the op's return value, e.g. `{identifier, key}` for addBlock/addSection) |
 | POST/PUT/DELETE | `/presets/:id/loadouts[/:lid]` | `{name, from?}` create (copies `from` or current) / rename / delete (not the last) |
 | POST | `/presets/:id/loadouts/:lid/activate` | → recompile if this preset is in the slot |
 | PUT/DELETE | `/presets/:id/loadouts/:lid/overrides/:modelId` | `{enabled:{…}}` |
@@ -380,7 +389,12 @@ orchestrator adds it in Phase 7).
 ### 1.8 Extension UI
 
 Floating window (own `div`, jQuery UI draggable/resizable — both are global in ST), opened
-from a floating icon and a wand-menu (`#extensionsMenu`) entry. Top tabs: **Library,
+from a draggable floating button (`#pm-float-btn`, position in localStorage
+`pm.floatBtn.pos`; also in the missing-plugin path) and a wand-menu (`#extensionsMenu`)
+entry. The window remembers its rect (`pm.window.rect`, clamped on screen) and its open
+preset tabs + active tab (`pm.presets.open`, missing ids dropped); on open the preset in
+ST's working slot auto-opens (activated only if nothing else was) and carries a live `slot`
+badge (tab and Library row). Top tabs: **Library,
 Presets, Diff, Import/Export, Shelf, Settings** (item 13). Presets tab: second row of tabs,
 one per open preset; each shows the outline (sections/groups/rows) with switches (radio for
 pick-one, checkbox otherwise, "none" radio), promote/demote/move, content editor with notes,
@@ -388,9 +402,19 @@ loadout picker + per-Model override editor, tuning panel (global vs "override fo
 preset"), and a **right-hand shelf list** (item 10, toggleable). Drag: jQuery UI sortable on
 every row list with `connectWith` across open presets and the shelf (same mechanism ST's
 prompt manager uses, `PromptManager.js:1919`; drivable headlessly via mouse events).
+Fix round 1 additions to the Presets tab: an edit bar with **Insert ▾** (Section heading via
+ST's input popup → `addSection`; Block → `addBlock`), **Duplicate** (`copyBlock` from the
+same preset, landing directly below) and **Delete** (two-click confirmation bound to the
+selected row); markers/ghosts refuse both with a toast. Section rows carry a collapse caret
+(display-only, per preset in `pm.collapsed.<id>`; a collapsed section moves as one unit and
+no shelf drop lands inside it). A client-side search (names + content, case-insensitive)
+highlights matches with a count, Enter/Shift+Enter walk them, a Filter toggle keeps only
+matches and their ancestor headings, and a collapsed section holding a match opens while
+the search is active.
 Diff tab: **one rendered two-column table in a single scroll container** (rows = matched
 pairs or one-sided rows in left order; moved rows carry a "moved from #n" badge); the bottom
-row is the line diff of the selected pair; the pickers accept any open/library preset, any
+row is the line diff of the selected pair, shown Interleaved or Side by side (toggle
+remembered in `pm.diff.view`; pure rendering of the same hunks); the pickers accept any open/library preset, any
 revision, or any single block ("block A vs block B", acceptance 12). Missing plugin:
 `GET /health` fails → the window shows only the install notice; nothing else initialises.
 

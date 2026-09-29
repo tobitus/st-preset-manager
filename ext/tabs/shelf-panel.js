@@ -128,7 +128,8 @@ export function createShelfPanel(el, opts) {
         const JQ = jq();
         if (!JQ?.fn?.sortable) return;
         JQ(list).sortable({
-            connectWith: '#pm-window .pm-preset-view .pm-outline ul.pm-list',
+            // no drop can land inside a collapsed section or a filtered outline
+            connectWith: '#pm-window .pm-preset-view .pm-outline:not(.pm-filtering) ul.pm-list:not(li.pm-collapsed ul.pm-list)',
             items: '> li.pm-src-item',
             handle: '> .pm-row > .pm-drag-handle',
             helper: 'clone',

@@ -274,7 +274,13 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
 /**
  * Reorder the document's sequences so the flat leaf order matches
  * `newIdents`. Leaves the enabled bits as the panel reports (applied by the
- * caller). Unknown identifiers ride at the end, preserving relative order.
+ * caller). Identifiers the doc has but `newIdents` lacks (e.g. a suppressed
+ * empty heading) keep their place: each absent leaf is glued right above
+ * the next leaf that followed it in the OLD flat order and IS present in
+ * `newIdents` (several consecutive absent leaves keep their relative
+ * order); absent leaves after the last present one stay at the end in
+ * their old order. Unknown identifiers in `newIdents` are ignored, and
+ * each identifier is placed once.
  * @param {any} doc
  * @param {string[]} newIdents
  */
@@ -297,23 +303,41 @@ export function applyOrderToSequences(doc, newIdents) {
     };
     collect(seq.rows ?? []);
     const byIdent = new Map(flat.map((leaf) => [leaf.ref ?? leaf.identifier, leaf]));
+    const newSet = new Set(newIdents);
+    // Anchor each run of absent leaves (old order) to the next leaf that
+    // IS present in newIdents; a run with no following present leaf trails
+    // at the end in its old order.
+    /** @type {Map<string, any[]>} */
+    const anchored = new Map();
+    /** @type {any[]} */
+    const trailing = [];
+    /** @type {any[]} */
+    let pending = [];
+    for (const leaf of flat) {
+        const id = leaf.ref ?? leaf.identifier;
+        if (newSet.has(id)) {
+            if (pending.length) {
+                anchored.set(id, pending);
+                pending = [];
+            }
+        } else {
+            pending.push(leaf);
+        }
+    }
+    trailing.push(...pending);
     /** @type {any[]} */
     const next = [];
     const used = new Set();
     for (const id of newIdents) {
+        if (used.has(id)) continue;
         const leaf = byIdent.get(id);
-        if (leaf) {
-            next.push(leaf);
-            used.add(id);
-        }
+        if (!leaf) continue;
+        const before = anchored.get(id);
+        if (before) next.push(...before);
+        next.push(leaf);
+        used.add(id);
     }
-    for (const leaf of flat) {
-        const id = leaf.ref ?? leaf.identifier;
-        if (!used.has(id)) {
-            next.push(leaf);
-            used.add(id);
-        }
-    }
+    next.push(...trailing);
     seq.rows = next.map((leaf) => ({ ...leaf }));
 }
 

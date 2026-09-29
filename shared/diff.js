@@ -242,3 +242,56 @@ export function lineHunks(aText, bText, context = 3) {
     }
     return hunks;
 }
+
+/**
+ * @typedef {{ no: number, text: string, kind: 'ctx'|'del'|'add' }} SideCell
+ */
+
+/**
+ * @typedef {{ left: SideCell|null, right: SideCell|null }} SideRow
+ */
+
+/**
+ * Lay out one unified hunk as side-by-side rows: old on the left, new on the
+ * right. A context line becomes one row with the same text on both sides. A
+ * maximal run of consecutive non-context lines is split into its '-' lines
+ * and '+' lines (each in original order); the i-th '-' pairs with the i-th
+ * '+' on one row, and once one side runs out the other side's cell is null.
+ * @param {Hunk} hunk
+ * @returns {SideRow[]}
+ */
+export function sideBySide(hunk) {
+    let a = hunk.aStart;
+    let b = hunk.bStart;
+    /** @type {SideRow[]} */
+    const rows = [];
+    const { lines } = hunk;
+    let i = 0;
+    while (i < lines.length) {
+        const line = lines[i];
+        if (line.op === ' ') {
+            rows.push({
+                left: { no: a++, text: line.text, kind: 'ctx' },
+                right: { no: b++, text: line.text, kind: 'ctx' },
+            });
+            i++;
+            continue;
+        }
+        /** @type {string[]} */
+        const dels = [];
+        /** @type {string[]} */
+        const adds = [];
+        while (i < lines.length && lines[i].op !== ' ') {
+            if (lines[i].op === '-') dels.push(lines[i].text);
+            else adds.push(lines[i].text);
+            i++;
+        }
+        const n = Math.max(dels.length, adds.length);
+        for (let k = 0; k < n; k++) {
+            const left = k < dels.length ? { no: a++, text: dels[k], kind: /** @type {const} */ ('del') } : null;
+            const right = k < adds.length ? { no: b++, text: adds[k], kind: /** @type {const} */ ('add') } : null;
+            rows.push({ left, right });
+        }
+    }
+    return rows;
+}

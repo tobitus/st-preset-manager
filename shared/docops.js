@@ -467,6 +467,71 @@ function opAddBlock(doc, a) {
 }
 
 /**
+ * Insert an empty FF-style section heading block: a fresh block (empty
+ * content) becomes a new section-heading leaf. Rows below it up to the next
+ * section heading (or the end) become its children; an anchor on a group
+ * option snaps above the whole group so it never splits it. ON only in the
+ * active loadout, off everywhere else.
+ * @param {any} doc
+ * @param {{ name?: string, before?: string|null }} a
+ */
+function opAddSection(doc, a) {
+    if (typeof a?.name !== 'string' || !a.name.trim()) throw new OpError('addSection needs {name}');
+    if (a.before != null && typeof a.before !== 'string') {
+        throw new OpError('addSection before must be a leaf key');
+    }
+    activeLoadout(doc); // preset has no active loadout -> 409 before any mutation
+    const name = a.name.trim();
+    // anchor lookup BEFORE any mutation: a 404 must leave the doc untouched
+    /** @type {{ seq: any, flat: any[], idx: number }|null} */
+    let anchor = null;
+    if (a.before != null) {
+        for (const seq of doc.sequences ?? []) {
+            const flat = flattenSeq(seq.rows ?? []);
+            const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === a.before);
+            if (idx !== -1) {
+                anchor = { seq, flat, idx };
+                break;
+            }
+        }
+        if (!anchor) throw new OpError(`no row with key ${JSON.stringify(a.before)}`, 404);
+    }
+    const identifier = mintIdentifiers(doc, 1)[0];
+    const key = newKey('row');
+    const entry = { leaf: { kind: 'block', ref: identifier, key }, rank: 'section', gmeta: null, sname: name };
+    /** @type {any} */
+    let seq;
+    /** @type {any[]} */
+    let entries;
+    if (anchor) {
+        seq = anchor.seq;
+        entries = anchor.flat;
+        const at = entries[anchor.idx].rank === 'option' ? snapAboveGroup(entries, anchor.idx) : anchor.idx;
+        entries.splice(at, 0, entry);
+    } else {
+        seq = (doc.sequences ?? [])[0];
+        if (!seq) throw new OpError('document has no sequences', 409);
+        entries = [...flattenSeq(seq.rows ?? []), entry];
+    }
+    // rebuild first (it can still refuse): a throw leaves `doc` untouched
+    let rows;
+    try {
+        rows = rebuildSeq(entries);
+    } catch (err) {
+        if (err instanceof OutlineError) throw new OpError(err.message);
+        throw err;
+    }
+    seq.rows = rows;
+    doc.blocks ??= {};
+    doc.blocks[identifier] = { identifier, name, content: '', role: 'system', fields: defaultFields(), notes: '' };
+    for (const loadout of Object.values(doc.loadouts ?? {})) {
+        loadout.enabled[identifier] = false;
+    }
+    activeLoadout(doc).enabled[identifier] = true;
+    return { identifier, key };
+}
+
+/**
  * Remove a block everywhere: the blocks map entry, every sequence position,
  * and its bit in every loadout/override. Markers are not blocks.
  * @param {any} doc
@@ -861,6 +926,7 @@ function dispatchOp(doc, op, a) {
         case 'renameBlock': return opRenameBlock(doc, a);
         case 'editBlock': return opEditBlock(doc, a);
         case 'addBlock': return opAddBlock(doc, a);
+        case 'addSection': return opAddSection(doc, a);
         case 'deleteBlock': return opDeleteBlock(doc, a);
         case 'setNotes': return opSetNotes(doc, a);
         default: throw new OpError(`unknown op '${op}'`);
