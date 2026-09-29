@@ -17,7 +17,7 @@
  * make a marker a heading or an option raises OutlineError (ghosts cannot be
  * re-ranked at all — they have no name/content).
  */
-import { newKey } from './util.js';
+import { newKey } from './canonical.js';
 
 export const LEAF_KINDS = ['marker', 'block', 'ghost'];
 export const RANKS = ['option', 'item', 'group', 'section'];

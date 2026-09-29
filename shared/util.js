@@ -1,23 +1,10 @@
 /**
- * Canonical JSON + hashing + id helpers. Zero deps.
+ * Hashing + id helpers. Zero deps.
+ * canonicalJson and newKey live in ./canonical.js (browser-safe, no
+ * node: imports).
  */
 import { createHash, randomBytes } from 'node:crypto';
-
-/**
- * Deterministic JSON: object keys sorted recursively. Arrays keep order.
- * @param {any} value
- * @returns {string}
- */
-export function canonicalJson(value) {
-    if (value === null || typeof value !== 'object') {
-        return JSON.stringify(value ?? null);
-    }
-    if (Array.isArray(value)) {
-        return '[' + value.map((v) => canonicalJson(v)).join(',') + ']';
-    }
-    const keys = Object.keys(value).sort();
-    return '{' + keys.map((k) => JSON.stringify(k) + ':' + canonicalJson(value[k])).join(',') + '}';
-}
+import { canonicalJson } from './canonical.js';
 
 /**
  * sha256 hex digest of the canonical JSON of `value`.
@@ -43,14 +30,6 @@ export function newId(prefix = 'p') {
 }
 
 const ENCODE32 = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
-
-/**
- * New short outline key, mirrors v1 `new_key(prefix)`.
- * @param {string} prefix
- */
-export function newKey(prefix) {
-    return `${prefix}-${randomBytes(4).toString('hex')}`;
-}
 
 /**
  * ULID-style id used for documents (stable, sortable).

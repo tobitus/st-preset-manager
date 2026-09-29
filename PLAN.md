@@ -122,8 +122,11 @@ Anything else in an ST preset → `settings` passthrough (v1's hedge, README "Kn
   {presetId, identifier}, savedAt }`.
 - `revisions/<presetId>/<docRev>.json` — full document snapshots (item 17). Written before
   every mutating op on that preset, **coalesced**: if the newest snapshot is < 5 min old and
-  has no label, it is replaced instead of a new one being written (slider drags don't create
-  50 revisions); `POST …/revisions {label}` always writes one. Pruned to the newest 200.
+  has no label, no new one is written — it already holds the state from before the burst, so
+  slider drags don't create 50 revisions and a restore goes back to before the burst (Phase 5:
+  the original "replace it" rule kept only the state one edit before the current one);
+  `POST …/revisions {label}` always writes one, and whole-document swaps (import `replace`,
+  `restore`) snapshot under a label, so they are never coalesced away. Pruned to the newest 200.
 
 **On-disk layout** (single-user: `<dataRoot>/default-user/preset-manager/`, from
 `request.user.directories.root` (`src/users.js:683-697`, `constants.js:18`) + `preset-manager`;
@@ -679,6 +682,8 @@ working tree, so a change is live on tab reload (extension) or `podman restart s
 | Zero runtime deps; MCP hand-rolled stdio JSON-RPC | MCP SDK | dependency-free plugin dir mounts as-is; SDK is the fallback for the MCP process only |
 | Tooling on host node 22 | node container | pure ESM; nothing version-specific |
 | Diff top row = one two-column table in one scroll box | two panes with synced scroll / connector lines | shared scrolling for free; moved rows get a badge; lines add SVG work for little gain |
+| Diff `moved` = pair outside the longest run of pairs that kept their order (LIS); duplicate names pair in order (Phase 5) | v1's raw position compare; v1's first-duplicate-only name pairing | one moved block marks one row, not every block it shifted; a fork (identifiers re-minted) still matches divider-style duplicate names |
+| Browser-reachable shared modules import no `node:` module (`shared/canonical.js` holds `canonicalJson`/`newKey`; `util.js` keeps the `node:crypto` helpers) (Phase 5) | re-implement outline flattening in `ext/` | the Diff tab needs `blockOrder`, which pulls `outline.js`; one implementation serves plugin, tests and the browser |
 | Shelf = toggleable right-hand list in the Presets tab + its own tab | tab only | item 10's ask; drop target must be next to the outline |
 | jQuery UI sortable everywhere | HTML5 DnD | what ST uses; `connectWith` gives cross-list drops; drivable by mouse events |
 | Model seed = one Model per raw id + merge suggestions | auto-merge by normalized id | spec: owner confirms merges |

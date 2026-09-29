@@ -24,7 +24,8 @@ plugin/events.js     SSE hub (no-transform for ST's compression())
 plugin/slot.js       desired state + panel-diff layer routing
 shared/              pure logic used by plugin, extension and tests:
                      schema, recognizers (v1 port), outline, compile, groups,
-                     models, st-keys, util
+                     models, st-keys, compare (v1 port), diff (LCS), util
+                     (node-only) and canonical (browser-safe)
 test/                node --test unit tests (host, node 22)
 dev/                 container scripts + fixtures (gitignored: config, data,
                      fixtures, chrome-profile*, *.pid)
@@ -131,3 +132,39 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   (for MCP) is not supported yet. The seed maps profile `api` to source with a
   two-alias table (`oai`, `google`) rather than ST's `CONNECT_API_MAP`.
 - Check: `node dev/check-phase4.mjs` (resets dev data; tidy is destructive).
+
+## Phase 5: Diff and revisions
+
+- **Diff tab**: side A and side B each pick a preset (open presets first, then
+  the whole library), a revision (`current` or any `#n`), and optionally one
+  block. *Compare* with no block on either side diffs the two presets: ONE
+  two-column table in ONE scroll container (rows = matched pairs or one-sided
+  rows, in A's order; a right-only row sits after its right-hand
+  predecessor), then a table of differing top-level settings. Click a row to
+  see its line diff in the bottom row. A block on both sides diffs just those
+  two blocks (any two: other preset families, or two blocks of one preset).
+- **Matching** (`shared/compare.js`, port of v1 `compare.py`): identifier
+  first, then normalized name (emoji, whitespace and case folded; duplicate
+  names pair in order, so a fork with re-minted identifiers still matches).
+  `changed` = content, role, injection position/depth/order or the active
+  loadout's on/off differ. `moved` = equal, but outside the longest run of
+  pairs that kept their relative order; only the block that actually moved
+  gets the `moved from #n` badge (v1 marked every shifted block).
+- **Line diff** (`shared/diff.js`): zero-dependency LCS with the common
+  prefix/suffix trimmed; unified-diff hunks with 3 lines of context. A middle
+  over 25 M table cells is refused with 413 instead of allocating.
+- **Revisions**: every mutation snapshots the pre-edit document, coalesced:
+  while the newest snapshot is unlabelled and under 5 minutes old, later
+  edits write none, so a burst of edits leaves ONE snapshot holding the state
+  from before the burst. A labelled snapshot (`POST
+  /presets/:id/revisions {label}`) always writes and is never coalesced into.
+  Whole-document swaps (import with `replace`, restore) snapshot the current
+  document under a label first. `POST /presets/:id/restore {rev}` restores
+  that revision's content (id, name and folder stay current); when the preset
+  is in the slot, the slot recompiles and ST shows the restored state.
+- REST added: `POST /diff {a:{presetId, rev?}, b}`, `POST /diff/blocks {a:
+  {presetId, identifier, rev?}|{text}, b, context?}`, `POST
+  /presets/:id/revisions {label}`, `POST /presets/:id/restore {rev}`.
+- Known gaps: the Diff tab has no restore/label button (REST only); the
+  bottom row is a unified diff, not two side-by-side columns.
+- Check: `node dev/check-phase5.mjs` (resets dev data).

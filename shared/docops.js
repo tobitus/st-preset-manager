@@ -17,7 +17,8 @@
 import { CONNECTION_KEYS } from './st-keys.js';
 import { normalize } from './groups.js';
 import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError } from './outline.js';
-import { newId, newKey } from './util.js';
+import { newId } from './util.js';
+import { newKey } from './canonical.js';
 
 /**
  * Op-level failure with an HTTP status (the route forwards it verbatim).

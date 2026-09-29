@@ -436,30 +436,7 @@ export class Store {
                 // replace in place: the new content becomes the next
                 // revision of the SAME document (same id, same createdAt,
                 // history and slot binding kept)
-                doc.id = existing.id;
-                doc.createdAt = existing.doc.createdAt;
-                const desired = this.state.presetId === existing.id;
-                // GET /slot reads this.index + this.state OUTSIDE the store
-                // queue, so the slot-changed marker and the loadout-id
-                // fallback must land in the SAME synchronous instant the
-                // new doc is published into this.index — not before (the
-                // old doc is still indexed) and not after (a reader could
-                // observe the new doc with a stale loadout id in between).
-                // onPublish runs synchronously right after this.index.set.
-                const saved = await this._savePresetNow(doc, {
-                    onPublish: (indexedDoc) => {
-                        if (!desired) return;
-                        this._markSlotChanged();
-                        if (this.state.loadoutId && !Object.prototype.hasOwnProperty.call(indexedDoc.loadouts ?? {}, this.state.loadoutId)) {
-                            // the slot's loadout id no longer exists in the
-                            // new document (an ST re-import re-mints
-                            // loadout ids): fall back to the doc's active
-                            // loadout. _bumpRev() right after this persists
-                            // this.state to disk with the matching rev.
-                            this.state.loadoutId = null;
-                        }
-                    },
-                });
+                const { saved } = await this._replaceDocNow(existing, doc, 'before replace');
                 return saved;
             }
             if (this.index.has(doc.id)) {
@@ -514,6 +491,49 @@ export class Store {
             await this._bumpRev();
             return structuredClone(doc);
         }
+    }
+
+    /**
+     * Replace a document's whole content in place, inside a store-queue
+     * transaction (import replace:true, revision restore): keeps the id and
+     * createdAt, snapshots the current document as a LABELLED revision (a
+     * whole-document swap must never be coalesced away), and — when the
+     * document is the desired slot preset — marks the slot changed and drops
+     * a desired loadout id the new content no longer has in the same
+     * synchronous instant the new doc is published (onPublish), so readers
+     * outside the queue never see the new doc with a stale marker/loadout.
+     * @param {any} existing index entry of the document being replaced
+     * @param {any} doc the new content
+     * @param {string} label revision label for the pre-replace snapshot
+     * @returns {Promise<{ saved: any, desired: boolean }>}
+     */
+    async _replaceDocNow(existing, doc, label) {
+        doc.id = existing.id;
+        doc.createdAt = existing.doc.createdAt;
+        const desired = this.state.presetId === existing.id;
+        // GET /slot reads this.index + this.state OUTSIDE the store
+        // queue, so the slot-changed marker and the loadout-id
+        // fallback must land in the SAME synchronous instant the
+        // new doc is published into this.index — not before (the
+        // old doc is still indexed) and not after (a reader could
+        // observe the new doc with a stale loadout id in between).
+        // onPublish runs synchronously right after this.index.set.
+        const saved = await this._savePresetNow(doc, {
+            label,
+            onPublish: (indexedDoc) => {
+                if (!desired) return;
+                this._markSlotChanged();
+                if (this.state.loadoutId && !Object.prototype.hasOwnProperty.call(indexedDoc.loadouts ?? {}, this.state.loadoutId)) {
+                    // the slot's loadout id no longer exists in the
+                    // new document (an ST re-import re-mints
+                    // loadout ids): fall back to the doc's active
+                    // loadout. _bumpRev() right after this persists
+                    // this.state to disk with the matching rev.
+                    this.state.loadoutId = null;
+                }
+            },
+        });
+        return { saved, desired };
     }
 
     /** @param {string} id */
@@ -634,8 +654,10 @@ export class Store {
     // ------------------------------------------------------------- revisions
 
     /**
-     * Full snapshot, coalesced: a newest snapshot < 5 min old without a label
-     * is replaced; labelled saves always write. Newest 200 kept.
+     * Full snapshot, coalesced: a newest unlabelled snapshot < 5 min old
+     * already holds the pre-burst state, so the save writes none (rapid
+     * edits collapse into one snapshot that restores to before the burst);
+     * a label always writes. Newest 200 kept.
      * @param {any} doc snapshot body (pre-mutation)
      * @param {string} [label]
      */
@@ -650,18 +672,19 @@ export class Store {
             .filter((n) => Number.isInteger(n) && n > 0)
             .sort((a, b) => a - b);
         const newest = revNumbers.at(-1);
-        let coalesce = false;
         if (newest !== undefined && !label) {
             const snap = JSON.parse(await fsp.readFile(path.join(dir, `${newest}.json`), 'utf8'));
             const age = Date.now() - new Date(snap.at).getTime();
-            if (!snap.label && age < 5 * 60 * 1000) coalesce = true;
+            if (!snap.label && age < 5 * 60 * 1000) {
+                return { rev: snap.rev, at: snap.at, label: snap.label };
+            }
         }
-        const revNo = coalesce ? newest : (newest ?? 0) + 1;
+        const revNo = (newest ?? 0) + 1;
         const body = {
             rev: revNo,
             at: new Date().toISOString(),
             label: label ?? null,
-            doc: label === undefined ? doc : doc, // full document snapshot
+            doc, // full document snapshot
         };
         const file = path.join(dir, `${revNo}.json`);
         await atomicWrite(file, JSON.stringify(body, null, 2));
@@ -670,10 +693,30 @@ export class Store {
         for (const f of all.slice(0, Math.max(0, all.length - 200))) {
             await fsp.rm(path.join(dir, f), { force: true });
         }
+        return { rev: revNo, at: body.at, label: body.label };
+    }
+
+    /**
+     * Label-only checkpoint of the CURRENT document: always writes its own
+     * revision (never coalesced into, never coalesces a later save into
+     * it) and does not touch the document or bump the global rev.
+     * @param {string} presetId
+     * @param {string} label
+     */
+    async snapshotRevision(presetId, label) {
+        return this.enqueue(async () => {
+            if (typeof label !== 'string' || !label.trim()) {
+                throw new StoreError('label must be a non-empty string', 400);
+            }
+            const entry = this.index.get(presetId);
+            if (!entry) throw new StoreError(`preset ${presetId} not found`, 404);
+            return this._writeRevision(entry.doc, label.trim());
+        });
     }
 
     /** @param {string} presetId */
     listRevisions(presetId) {
+        if (!this.index.has(presetId)) throw new StoreError(`preset ${presetId} not found`, 404);
         const dir = path.join(this.revisionsDir, presetId);
         if (!fs.existsSync(dir)) return [];
         return fs.readdirSync(dir)
@@ -685,9 +728,39 @@ export class Store {
 
     /** @param {string} presetId @param {number} revNo */
     getRevision(presetId, revNo) {
+        if (!this.index.has(presetId)) throw new StoreError(`preset ${presetId} not found`, 404);
+        if (!Number.isInteger(revNo) || revNo <= 0) {
+            throw new StoreError(`revision ${revNo} of ${presetId} not found`, 404);
+        }
         const file = path.join(this.revisionsDir, presetId, `${revNo}.json`);
         if (!fs.existsSync(file)) throw new StoreError(`revision ${revNo} of ${presetId} not found`, 404);
         return JSON.parse(fs.readFileSync(file, 'utf8'));
+    }
+
+    /**
+     * Restore a preset's content from a past revision: the CURRENT document
+     * is snapshotted first (labelled, so never coalesced), then the
+     * revision's content is written back, keeping the current id, name,
+     * folder and createdAt (restore is content, not identity/location).
+     * Slot-marking and the desired-loadout fallback are done by
+     * `_replaceDocNow` — same shape as DELETE loadout.
+     * @param {string} presetId @param {number} revNo
+     * @returns {Promise<{doc: any, snapshotRev: number, wasDesired: boolean}>}
+     */
+    async restoreRevision(presetId, revNo) {
+        return this.enqueue(async () => {
+            const entry = this.index.get(presetId);
+            if (!entry) throw new StoreError(`preset ${presetId} not found`, 404);
+            const snap = this.getRevision(presetId, revNo);
+            const doc = structuredClone(snap.doc);
+            doc.name = entry.doc.name;
+            if (entry.doc.folder === undefined) delete doc.folder;
+            else doc.folder = entry.doc.folder;
+            const { saved, desired } = await this._replaceDocNow(entry, doc, `before restore to #${revNo}`);
+            const revNumbers = this.listRevisions(presetId).map((r) => r.rev);
+            const snapshotRev = Math.max(...revNumbers);
+            return { doc: saved, snapshotRev, wasDesired: desired };
+        });
     }
 
     // ---------------------------------------------------------------- models

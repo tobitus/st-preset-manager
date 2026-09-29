@@ -718,3 +718,152 @@ ul.pm-list ul.pm-list {
     align-items: center;
     gap: 0.4em;
 }
+
+/* ---- Phase 5: Diff tab ---- */
+/* :not([hidden]) — a plain [data-pane] rule here would out-rank the earlier
+ * `.pm-pane[hidden] { display: none }` (same specificity, later) and keep the
+ * Diff pane on screen under every other tab */
+.pm-pane[data-pane="diff"]:not([hidden]) {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.pm-diff {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    gap: 6px;
+}
+
+.pm-diff-pickers {
+    flex: 0 0 auto;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.pm-diff-side {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+}
+
+.pm-diff-side select {
+    max-width: 220px;
+}
+
+.pm-diff-top {
+    flex: 1 1 60%;
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+}
+
+.pm-diff-table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+}
+
+.pm-diff-table .pm-diff-head-left,
+.pm-diff-table .pm-diff-left {
+    width: 44%;
+}
+
+.pm-diff-table .pm-diff-head-right,
+.pm-diff-table .pm-diff-right {
+    width: 44%;
+}
+
+.pm-diff-table .pm-diff-head-mid,
+.pm-diff-table .pm-diff-mid {
+    width: 12%;
+}
+
+.pm-diff-table thead th {
+    position: sticky;
+    top: 0;
+    background: var(--SmartThemeBlurTintColor, #222);
+    z-index: 1;
+}
+
+.pm-diff-table td,
+.pm-diff-table th {
+    padding: 2px 6px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.pm-diff-row {
+    cursor: pointer;
+}
+
+.pm-diff-row[data-status="changed"] {
+    background: rgba(217, 164, 65, 0.15);
+}
+
+.pm-diff-row[data-status="moved"] {
+    background: rgba(80, 160, 255, 0.15);
+}
+
+.pm-diff-row[data-status="only-left"] {
+    background: rgba(217, 83, 79, 0.15);
+}
+
+.pm-diff-row[data-status="only-right"] {
+    background: rgba(92, 184, 92, 0.15);
+}
+
+.pm-diff-selected {
+    outline: 2px solid var(--SmartThemeQuoteColor, #e8a33d);
+    outline-offset: -2px;
+}
+
+.pm-diff-moved {
+    display: inline-block;
+    border-radius: 8px;
+    background: rgba(80, 160, 255, 0.3);
+    font-size: 0.8em;
+    margin-left: 6px;
+    padding: 0 6px;
+}
+
+.pm-diff-empty {
+    opacity: 0.5;
+}
+
+.pm-diff-bottom {
+    flex: 0 0 38%;
+    min-height: 0;
+    overflow: auto;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    font-family: monospace;
+    font-size: 0.85em;
+}
+
+.pm-diff-line {
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.pm-diff-add {
+    background: rgba(92, 184, 92, 0.2);
+}
+
+.pm-diff-del {
+    background: rgba(217, 83, 79, 0.2);
+}
+
+.pm-diff-hunk-head {
+    opacity: 0.65;
+}
+
+.pm-diff-op {
+    display: inline-block;
+    width: 1.5ch;
+}

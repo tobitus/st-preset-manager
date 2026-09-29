@@ -38,7 +38,7 @@ import { createModelPanel } from './model-panel.js';
 /**
  * @param {HTMLElement} pane .pm-pane[data-pane="presets"]
  * @param {import('../bridge.js').Bridge} bridge
- * @returns {{ open(presetId: string): Promise<void>, destroy(): void }}
+ * @returns {{ open(presetId: string): Promise<void>, destroy(): void, openIds(): string[] }}
  */
 export function createPresetsTab(pane, bridge) {
     // Contract state `open`: preset ids in tab order.
@@ -454,6 +454,7 @@ export function createPresetsTab(pane, bridge) {
     renderTabs();
     return {
         open: openPreset,
+        openIds: () => [...openIds],
         destroy() {
             unsubscribe();
             clearTimeout(refreshTimer);

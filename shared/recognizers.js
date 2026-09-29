@@ -8,7 +8,7 @@
  * components dict.
  */
 import { isStMarkerIdentifier, CONNECTION_KEYS } from './st-keys.js';
-import { newKey } from './util.js';
+import { newKey } from './canonical.js';
 
 export const PICK_HEADER = /^🔻PICK:\s*(.+?)\s*🔻$/;
 export const SECTION_HEADER = /^🔹🔹\s*(.+?)\s*🔹🔹$/;

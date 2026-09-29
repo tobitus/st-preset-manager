@@ -3,8 +3,9 @@
  * Phase 1 subset: /health, /library, /presets (import + get/put/delete +
  * /ops toggle|setSettings), /presets/:id/export, /slot/* (load, model —
  * per-tab GET/POST raw, review-1 W2 —, panel), /events, /rescan,
- * /revisions, /models (GET/PUT + :modelId/tuning PUT/PATCH + seed +
- * rename/merge), /presets/:id/tuning-overrides/:modelId and
+ * /revisions (list/get/snapshot/restore), /diff, /diff/blocks, /models
+ * (GET/PUT + :modelId/tuning PUT/PATCH + seed + rename/merge),
+ * /presets/:id/tuning-overrides/:modelId and
  * /presets/:id/loadouts/:lid/overrides/:modelId (PUT/DELETE/PATCH),
  * /profiles GET, /profiles/backup, /shelf. The rest of the table lands
  * with its phase.
@@ -20,6 +21,8 @@ import { iterLeaves, completeOverride } from '../shared/groups.js';
 import { resolveModel } from '../shared/models.js';
 import { canonicalHash, ulid, newId } from '../shared/util.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
+import { lineHunks } from '../shared/diff.js';
+import { comparePresets } from '../shared/compare.js';
 
 /**
  * Base = ST's own OpenAI Settings/Default.json from the user dir, read at
@@ -121,6 +124,29 @@ function slotView(req, raw = null) {
     };
 }
 
+/**
+ * Resolve one side of a /diff or /diff/blocks request to a document: the
+ * current document when `rev` is omitted/null, a past revision's document
+ * otherwise.
+ * @param {any} store
+ * @param {{presetId?: string, rev?: number|string|null}} side
+ * @param {string} label 'a' or 'b', for error messages
+ * @returns {{doc: any, rev: number|null}}
+ */
+function docAt(store, side, label) {
+    if (!side || typeof side !== 'object' || typeof side.presetId !== 'string' || !side.presetId) {
+        throw new StoreError(`${label}.presetId is required`, 400);
+    }
+    if (side.rev === undefined || side.rev === null) {
+        return { doc: store.getPreset(side.presetId), rev: null };
+    }
+    const n = Number(side.rev);
+    if (!Number.isInteger(n) || n <= 0) {
+        throw new StoreError(`${label}.rev must be a positive integer`, 400);
+    }
+    return { doc: store.getRevision(side.presetId, n).doc, rev: n };
+}
+
 /** @returns {Router} */
 export function makeRouter() {
     const router = Router();
@@ -195,12 +221,95 @@ export function makeRouter() {
 
     // ------------------------------------------------------------ revisions
 
-    router.get('/presets/:id/revisions', (req, res) => {
-        res.json(req.pm.store.listRevisions(req.params.id));
+    router.get('/presets/:id/revisions', (req, res, next) => {
+        try {
+            res.json(req.pm.store.listRevisions(req.params.id));
+        } catch (err) { next(err); }
     });
 
-    router.get('/presets/:id/revisions/:rev', (req, res) => {
-        res.json(req.pm.store.getRevision(req.params.id, Number(req.params.rev)));
+    router.get('/presets/:id/revisions/:rev', (req, res, next) => {
+        try {
+            res.json(req.pm.store.getRevision(req.params.id, Number(req.params.rev)));
+        } catch (err) { next(err); }
+    });
+
+    // POST /presets/:id/revisions {label} -> 201 {rev, at, label}. A
+    // label-only checkpoint of the CURRENT document: no broadcast, since
+    // nothing in the library changed and the global rev does not move.
+    router.post('/presets/:id/revisions', async (req, res, next) => {
+        try {
+            const entry = await req.pm.store.snapshotRevision(req.params.id, req.body?.label);
+            res.status(201).json(entry);
+        } catch (err) { next(err); }
+    });
+
+    // POST /presets/:id/restore {rev} -> {doc, snapshotRev, rev}. Restores
+    // content from a past revision, keeping identity/location current.
+    router.post('/presets/:id/restore', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const revNo = Number(req.body?.rev);
+            if (!Number.isInteger(revNo) || revNo <= 0) {
+                throw new StoreError('rev must be a positive integer', 400);
+            }
+            const out = await store.restoreRevision(req.params.id, revNo);
+            broadcast(req, out.wasDesired ? 'slot' : 'preset', out.wasDesired ? null : req.params.id);
+            res.json({ doc: out.doc, snapshotRev: out.snapshotRev, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // ------------------------------------------------------------------ diff
+
+    // POST /diff {a:{presetId, rev?}, b:{presetId, rev?}} -> 2x2 preset
+    // diff (PLAN §2 Phase 5): row-level content/settings comparison of two
+    // preset documents, either of which may be the current document
+    // (rev omitted/null) or a past revision (rev given).
+    router.post('/diff', (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const body = req.body ?? {};
+            const a = docAt(store, body.a, 'a');
+            const b = docAt(store, body.b, 'b');
+            res.json({
+                a: { presetId: body.a.presetId, rev: a.rev, name: a.doc.name },
+                b: { presetId: body.b.presetId, rev: b.rev, name: b.doc.name },
+                ...comparePresets(a.doc, b.doc),
+            });
+        } catch (err) { next(err); }
+    });
+
+    // POST /diff/blocks {a, b, context?} -> unified-diff hunks between two
+    // block contents. Each side is either raw {text} or
+    // {presetId, identifier, rev?} resolved against the library/revisions.
+    router.post('/diff/blocks', (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const body = req.body ?? {};
+            let context = 3;
+            if (body.context !== undefined) {
+                context = Number(body.context);
+                if (!Number.isInteger(context) || context < 0 || context > 1000) {
+                    throw new StoreError('context must be an integer between 0 and 1000', 400);
+                }
+            }
+            const side = (/** @type {any} */ raw, /** @type {string} */ label) => {
+                if (raw && typeof raw === 'object' && typeof raw.text === 'string') {
+                    return { text: raw.text, info: { name: 'text' } };
+                }
+                const { doc, rev } = docAt(store, raw, label);
+                const block = typeof raw.identifier === 'string'
+                    && Object.prototype.hasOwnProperty.call(doc.blocks ?? {}, raw.identifier)
+                    ? doc.blocks[raw.identifier] : null;
+                if (!block) throw new StoreError(`block ${raw.identifier} not found in ${raw.presetId}`, 404);
+                return {
+                    text: block.content ?? '',
+                    info: { presetId: raw.presetId, rev, identifier: raw.identifier, name: block.name ?? raw.identifier },
+                };
+            };
+            const a = side(body.a, 'a');
+            const b = side(body.b, 'b');
+            res.json({ a: a.info, b: b.info, hunks: lineHunks(a.text, b.text, context) });
+        } catch (err) { next(err); }
     });
 
     // ----------------------------------------------------------------- ops

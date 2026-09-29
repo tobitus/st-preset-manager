@@ -24,6 +24,8 @@ interface PmHandle {
         deletePreset(id: string): Promise<void>;
         listRevisions(presetId: string): { rev: number; at: string; label: string | null }[];
         getRevision(presetId: string, rev: number): unknown;
+        snapshotRevision(presetId: string, label: unknown): Promise<{ rev: number; at: string; label: string | null }>;
+        restoreRevision(presetId: string, revNo: number): Promise<{ doc: Record<string, unknown>; snapshotRev: number; wasDesired: boolean }>;
         mutateState(fn: (st: Record<string, unknown>) => void): Promise<unknown>;
         mutateModels(fn: (reg: Record<string, unknown>) => unknown): Promise<unknown>;
         /** slot preset doc without taking the queue (null instead of 404) */

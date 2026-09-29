@@ -1,17 +1,19 @@
 /**
- * Floating window shell (2b/4): one window, four tabs plus a connection
+ * Floating window shell (2b/4/5): one window, five tabs plus a connection
  * toolbar. Library = preset list (load into slot, open in the Presets tab);
- * Presets = per-preset editor tabs (ext/tabs/*); Import/Export = file
- * import/export (ext/tabs/io.js); Settings = Model registry + connection
- * profile tidy (ext/tabs/settings.js). The toolbar above the tabs holds a
- * Model picker that switches ST's live connection to a Model's profile.
- * Uses plain DOM + CSS from style.css; jQuery UI draggable/resizable are
- * available globally in ST and used for the window. The window also swallows
- * file drag/drop events anywhere inside it so ST's body-level importer never sees them (see below).
+ * Presets = per-preset editor tabs (ext/tabs/*); Diff = 2x2 preset/revision/
+ * block comparison (ext/tabs/diff.js); Import/Export = file import/export
+ * (ext/tabs/io.js); Settings = Model registry + connection profile tidy
+ * (ext/tabs/settings.js). The toolbar above the tabs holds a Model picker
+ * that switches ST's live connection to a Model's profile. Uses plain DOM +
+ * CSS from style.css; jQuery UI draggable/resizable are available globally
+ * in ST and used for the window. The window also swallows file drag/drop
+ * events anywhere inside it so ST's body-level importer never sees them (see below).
  */
 import { api, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
 import { switchToModel, unlinkProfilePreset } from './connection.js';
 import { createPresetsTab } from './tabs/presets.js';
+import { createDiffTab } from './tabs/diff.js';
 import { createIoTab } from './tabs/io.js';
 import { createSettingsTab } from './tabs/settings.js';
 
@@ -50,16 +52,18 @@ export function openWindow({ title, content, onClose }) {
 }
 
 /**
- * Open the main window: tab strip + Library/Presets/Import-Export/Settings
- * panes, wired to the bridge. Library "Open" switches to the Presets tab and
- * opens the preset. The connection toolbar above the tabs switches ST's live
- * connection to a Model's profile.
+ * Open the main window: tab strip + Library/Presets/Diff/Import-Export/
+ * Settings panes, wired to the bridge. Library "Open" switches to the
+ * Presets tab and opens the preset. The connection toolbar above the tabs
+ * switches ST's live connection to a Model's profile.
  * @param {import('./bridge.js').Bridge} bridge
- * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void, presets: { open(presetId: string): Promise<void>, destroy(): void } }}
+ * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void, presets: { open(presetId: string): Promise<void>, destroy(): void, openIds(): string[] } }}
  */
 export function openMainWindow(bridge) {
     /** @type {any} */
     let presets;
+    /** @type {any} */
+    let diff;
     /** @type {any} */
     let io;
     /** @type {any} */
@@ -68,7 +72,7 @@ export function openMainWindow(bridge) {
     let unwireModelPicker = null;
     const win = openWindow({
         title: 'Preset Manager',
-        onClose: () => { presets?.destroy(); io?.destroy(); settings?.destroy(); unwireModelPicker?.(); },
+        onClose: () => { presets?.destroy(); diff?.destroy(); io?.destroy(); settings?.destroy(); unwireModelPicker?.(); },
         content: `
             <div class="pm-toolbar">
                 <label class="pm-model-label">Model</label>
@@ -78,6 +82,7 @@ export function openMainWindow(bridge) {
             <div class="pm-tabs">
                 <button type="button" class="pm-tab menu_button pm-active" data-tab="library">Library</button>
                 <button type="button" class="pm-tab menu_button" data-tab="presets">Presets</button>
+                <button type="button" class="pm-tab menu_button" data-tab="diff">Diff</button>
                 <button type="button" class="pm-tab menu_button" data-tab="io">Import/Export</button>
                 <button type="button" class="pm-tab menu_button" data-tab="settings">Settings</button>
             </div>
@@ -85,6 +90,7 @@ export function openMainWindow(bridge) {
                 <div class="pm-root"></div>
             </div>
             <div class="pm-pane" data-pane="presets" hidden></div>
+            <div class="pm-pane" data-pane="diff" hidden></div>
             <div class="pm-pane" data-pane="io" hidden></div>
             <div class="pm-pane" data-pane="settings" hidden></div>`,
     });
@@ -111,6 +117,7 @@ export function openMainWindow(bridge) {
         for (const pane of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-pane')))) {
             pane.hidden = pane.dataset.pane !== name;
         }
+        if (name === 'diff') void diff.refresh();
         if (name === 'io') void io.refresh();
         if (name === 'settings') void settings.refresh();
     };
@@ -121,6 +128,12 @@ export function openMainWindow(bridge) {
     presets = createPresetsTab(
         /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="presets"]')),
         bridge,
+    );
+
+    diff = createDiffTab(
+        /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="diff"]')),
+        bridge,
+        { openIds: () => presets.openIds() },
     );
 
     const onOpen = (/** @type {string} */ presetId) => {
