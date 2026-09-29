@@ -117,18 +117,13 @@ test('initialize negotiates only the supported protocol version', async () => {
     assert.equal(m.result.serverInfo.name, 'st-preset-manager');
     assert.equal(typeof m.result.serverInfo.version, 'string');
     assert.deepEqual(m.result.capabilities, { tools: {} });
-    for (const version of ['2025-03-26', '2024-11-05']) {
-        const compatible = harness();
-        compatible.server.feed(req(version, 'initialize', { protocolVersion: version, capabilities: {} }));
-        await compatible.server.idle();
-        assert.equal(compatible.msgs()[0].result.protocolVersion, version);
+    for (const version of ['2025-03-26', '2024-11-05', '2099-01-01']) {
+        const unsupported = harness();
+        unsupported.server.feed(req(version, 'initialize', { protocolVersion: version, capabilities: {} }));
+        await unsupported.server.idle();
+        assert.equal(unsupported.msgs()[0].result.protocolVersion, '2025-06-18');
+        assert.equal(unsupported.msgs()[0].id, version);
     }
-
-    const future = harness();
-    future.server.feed(req('a', 'initialize', { protocolVersion: '2099-01-01', capabilities: {} }));
-    await future.server.idle();
-    assert.equal(future.msgs()[0].result.protocolVersion, '2025-06-18');
-    assert.equal(future.msgs()[0].id, 'a');
 });
 
 test('initialize rejects malformed params with -32602', async () => {

@@ -15,7 +15,6 @@ import { pathToFileURL } from 'node:url';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
 const PROTOCOL_VERSION = '2025-06-18';
-const PROTOCOL_VERSIONS = new Set([PROTOCOL_VERSION, '2025-03-26', '2024-11-05']);
 const PLUGIN = '/api/plugins/st-preset-manager';
 const obj = (properties = {}, required = []) => ({ type: 'object', properties, ...(required.length ? { required } : {}) });
 const str = (description) => ({ type: 'string', description });
@@ -250,7 +249,7 @@ export function createMcpServer({ session, write, log }) {
                         error(id, -32602, 'Invalid initialize params');
                         break;
                     }
-                    emit({ id, result: { protocolVersion: PROTOCOL_VERSIONS.has(message.params.protocolVersion) ? message.params.protocolVersion : PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'st-preset-manager', version: VERSION } } });
+                    emit({ id, result: { protocolVersion: message.params.protocolVersion === PROTOCOL_VERSION ? message.params.protocolVersion : PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'st-preset-manager', version: VERSION } } });
                     break;
                 case 'ping': emit({ id, result: {} }); break;
                 case 'tools/list': emit({ id, result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } }); break;
