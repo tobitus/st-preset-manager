@@ -194,7 +194,10 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   above a group or section heading lands above it. A whole group lands as
   heading plus options, with its name and cardinality, and snaps above a
   group it was dropped into (it never splits one). A drop at the end of a
-  nested list lands after that container.
+  nested list lands after that container. A drop right before a group
+  without a heading lands above that group, not in it (`outsideGroup`).
+  Copies publish through the store's `_commit`: a failed write leaves the
+  document, the index and the rev as they were.
 - **Copy rules**: every copied block gets a freshly minted identifier (two
   copies of one shelf item never share one). Copied blocks start off in
   every loadout. `fields.marker` is forced false. Markers never transfer:
@@ -206,7 +209,7 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   do `{{char}}`/`{{user}}`. v1's `rstrip("}")` made that last check dead
   code; v2 implements its stated intent.
 - REST added: `POST /presets/:id/ops {op: 'copyBlock', shelfId |
-  fromPresetId + (identifier | group), before}` → `{doc, rev, warnings,
+  fromPresetId + (identifier | group), before, outsideGroup?}` → `{doc, rev, warnings,
   identifiers, keys, group}`; `GET /shelf/:id`; `PATCH /shelf/:id {name?,
   notes?, tags?}`; `POST /shelf {fromPresetId, identifier} | {block}` accepts
   `name?`, `notes?` and `tags?`.

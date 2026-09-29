@@ -91,7 +91,7 @@ function presetLi(item, presetId) {
  *   getDoc(id: string): any,
  *   getSource(): string,
  *   setSource(s: string): void,
- *   onCopy(src: { shelfId: string } | { fromPresetId: string, identifier: string } | { fromPresetId: string, group: string }, before: string|null): Promise<void>,
+ *   onCopy(src: { shelfId: string } | { fromPresetId: string, identifier: string } | { fromPresetId: string, group: string }, anchor: { before: string|null, outsideGroup: boolean }): Promise<void>,
  * }} opts
  * @returns {{ render(): Promise<void>, destroy(): void }}
  */
@@ -141,14 +141,14 @@ export function createShelfPanel(el, opts) {
             stop(/** @type {any} */ _ev, /** @type {any} */ ui) {
                 const li = /** @type {HTMLElement} */ (ui.item[0]);
                 let src = null;
-                let before = null;
+                let anchor = null;
                 if (li.parentElement !== list && li.closest('.pm-outline')) {
-                    before = dropAnchor(li);
+                    anchor = dropAnchor(li);
                     src = sourceOf(li);
                 }
                 // the row goes back; the server response re-renders the outline
                 JQ(list).sortable('cancel');
-                if (src) void opts.onCopy(src, before).catch(() => {});
+                if (src) void opts.onCopy(src, anchor).catch(() => {});
             },
         });
         sortable = true;

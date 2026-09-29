@@ -16,6 +16,7 @@ import { createEditor } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
 import { findLeaf } from '../outline-model.js';
+import { createEditGuard } from '../dirty.js';
 
 /**
  * @typedef {object} PresetView
@@ -33,8 +34,7 @@ import { findLeaf } from '../outline-model.js';
  * @property {{ render(doc: any, selectedKey: string|null): void, destroy(): void }} outline
  * @property {{ render(): void, destroy(): void }} modelPanel
  * @property {{ show(doc: any, key: string|null): void }} editor
- * @property {boolean} notesDirty user typed into the notes textarea
- * @property {number} notesRev bumped each time the user types into notes
+ * @property {import('../dirty.js').EditGuard} notesGuard tracks unsaved edits to the notes textarea
  * @property {boolean} deleteArmed first delete click happened
  * @property {any} deleteTimer restore-'Delete' timer
  * @property {string|null} selectNextLid loadout to select after creation
@@ -233,8 +233,7 @@ export function createPresetsTab(pane, bridge) {
             editor: createEditor(editorEl, {
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
             }),
-            notesDirty: false,
-            notesRev: 0,
+            notesGuard: createEditGuard(),
             deleteArmed: false,
             deleteTimer: null,
             selectNextLid: null,
@@ -255,7 +254,7 @@ export function createPresetsTab(pane, bridge) {
             getDoc: (/** @type {string} */ x) => docs.get(x),
             getSource: () => shelfSource,
             setSource: (/** @type {string} */ s) => { shelfSource = s; },
-            onCopy: (/** @type {any} */ src, /** @type {string|null} */ before) => copyInto(id, src, before),
+            onCopy: (/** @type {any} */ src, /** @type {{ before: string|null, outsideGroup: boolean }} */ anchor) => copyInto(id, src, anchor),
         });
         nextView.picker.addEventListener('change', () => nextView.modelPanel.render());
         q('.pm-loadout-new').addEventListener('click', () => void newLoadout(nextView));
@@ -271,7 +270,7 @@ export function createPresetsTab(pane, bridge) {
             shelfOpen = !shelfOpen;
             applyShelfOpen(nextView);
         });
-        nextView.notes.addEventListener('input', () => { nextView.notesDirty = true; nextView.notesRev++; });
+        nextView.notes.addEventListener('input', () => { nextView.notesGuard.edited(); });
         q('.pm-preset-notes-save').addEventListener('click', () => void saveNotes(nextView));
         host.replaceChildren(root);
         view = nextView;
@@ -357,7 +356,7 @@ export function createPresetsTab(pane, bridge) {
         const key = selected.get(view.id) ?? null;
         for (const b of view.rankButtons) b.disabled = !key;
         view.shelfSaveBtn.disabled = !key;
-        if (!view.notesDirty) view.notes.value = doc.notes ?? '';
+        if (!view.notesGuard.dirty) view.notes.value = doc.notes ?? '';
         view.outline.render(doc, key);
         view.editor.show(doc, key);
         view.modelPanel.render();
@@ -451,11 +450,11 @@ export function createPresetsTab(pane, bridge) {
     async function saveNotes(/** @type {PresetView} */ v) {
         const id = v.id;
         const notes = v.notes.value;
-        const rev = v.notesRev;
+        const tok = v.notesGuard.token();
         try {
             const res = await bridge.edit(() => api('PATCH', `/presets/${id}/meta`, { notes }));
             setDoc(id, res.doc);
-            if (view === v && v.notesRev === rev) v.notesDirty = false;
+            v.notesGuard.saved(tok);
             setStatus('');
         } catch (err) {
             setStatus(errText(err), true);
@@ -486,14 +485,15 @@ export function createPresetsTab(pane, bridge) {
 
     /**
      * Copy a shelf entry or a source preset's block/group into `targetId`,
-     * before the given leaf key (or at the end when `before` is null).
+     * before the given leaf key (or at the end when `anchor.before` is
+     * null), optionally outside its enclosing group.
      * @param {string} targetId
      * @param {{ shelfId: string } | { fromPresetId: string, identifier: string } | { fromPresetId: string, group: string }} src
-     * @param {string|null} before
+     * @param {{ before: string|null, outsideGroup: boolean }} anchor
      */
-    async function copyInto(targetId, src, before) {
+    async function copyInto(targetId, src, anchor) {
         try {
-            const res = await bridge.edit(() => api('POST', `/presets/${targetId}/ops`, { op: 'copyBlock', ...src, before }));
+            const res = await bridge.edit(() => api('POST', `/presets/${targetId}/ops`, { op: 'copyBlock', ...src, before: anchor.before, outsideGroup: anchor.outsideGroup }));
             setDoc(targetId, res.doc);
             let text = `Copied ${res.identifiers.length} block(s)`;
             if (res.warnings?.length) {

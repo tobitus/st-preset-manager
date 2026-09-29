@@ -218,41 +218,71 @@ function listKeys(ul) {
 }
 
 /**
- * @param {Element} li a `li.pm-node`
- * @returns {string|null} its own data-key, or (headerless group/section, whose
- *   own data-key is empty) its first descendant leaf's data-key
+ * @param {any} el
+ * @returns {boolean} true for a `li.pm-node`
  */
-function firstKey(li) {
-    const own = /** @type {HTMLElement} */ (li).dataset.key;
-    if (own) return own;
-    const desc = li.querySelector('li.pm-node[data-key]:not([data-key=""])');
-    return desc ? /** @type {HTMLElement} */ (desc).dataset.key ?? null : null;
+function isNode(el) {
+    return el?.tagName === 'LI' && el.classList.contains('pm-node');
 }
 
 /**
- * The `before` anchor for an element just dropped (by jQuery UI sortable)
- * into one of the outline's `ul.pm-list` lists: the key of the first row
- * BELOW the drop point, climbing out of nested lists at their end (a drop at
- * the very end of the whole outline anchors on nothing, `null`).
+ * @param {any} li a `li.pm-node`
+ * @returns {{ key: string, outsideGroup: boolean }|null} its own data-key, or
+ *   (headerless group/section, whose own data-key is empty) the first
+ *   descendant leaf's data-key found by a depth-first search of its `ul`
+ *   children's `li.pm-node` items, recursing into nested headerless
+ *   containers. `outsideGroup` is true when that key sits in the options of
+ *   a headerless GROUP the search descended into.
+ */
+function firstKey(li) {
+    const own = /** @type {string} */ (li.dataset.key);
+    if (own) return { key: own, outsideGroup: false };
+    for (const child of li.children) {
+        if (child.tagName !== 'UL') continue;
+        for (const item of child.children) {
+            if (!isNode(item)) continue;
+            const found = firstKey(item);
+            if (!found) continue;
+            const outsideGroup = found.outsideGroup || li.dataset.kind === 'group';
+            return { key: found.key, outsideGroup };
+        }
+    }
+    return null;
+}
+
+/**
+ * The `{ before, outsideGroup }` anchor for an element just dropped (by
+ * jQuery UI sortable) into one of the outline's `ul.pm-list` lists: `before`
+ * = the key of the first row BELOW the drop point, climbing out of nested
+ * lists at their end (a drop at the very end of the whole outline anchors on
+ * nothing, `before: null`); `outsideGroup` = that row was found by
+ * descending into a HEADERLESS group (the drop point sits above the whole
+ * group, not inside it — copyIntoDoc lands a plain item there instead of
+ * joining the group).
  *
- * @param {Element} li the dropped `li.pm-node`
- * @returns {string|null}
+ * @param {any} li the dropped `li.pm-node`
+ * @returns {{ before: string|null, outsideGroup: boolean }}
  */
 export function dropAnchor(li) {
-    /** @type {Element|null} */
+    /** @type {any} */
     let node = li;
     while (node) {
         for (let sib = node.nextElementSibling; sib; sib = sib.nextElementSibling) {
-            if (sib.matches('li.pm-node')) {
-                const k = firstKey(sib);
-                if (k) return k;
+            if (isNode(sib)) {
+                const found = firstKey(sib);
+                if (found) return { before: found.key, outsideGroup: found.outsideGroup };
             }
         }
-        const parentLi = node.parentElement?.closest('li.pm-node') ?? null;
-        if (!parentLi || !parentLi.closest('.pm-outline')) return null;
-        node = parentLi;
+        /** @type {any} */
+        let anc = node.parentElement;
+        while (anc && !isNode(anc)) {
+            if (anc.classList.contains('pm-outline')) return { before: null, outsideGroup: false };
+            anc = anc.parentElement;
+        }
+        if (!anc) return { before: null, outsideGroup: false };
+        node = anc;
     }
-    return null;
+    return { before: null, outsideGroup: false };
 }
 
 /**

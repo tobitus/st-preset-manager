@@ -1263,9 +1263,9 @@ export class Store {
     /**
      * Copy a block into `presetId` at the `before` anchor: ONE queue
      * transaction that reads the source (a shelf item or another preset),
-     * copies into the target document and saves it.
+     * copies into the target document and publishes it through `_commit`.
      * @param {string} presetId
-     * @param {{ shelfId?: string, fromPresetId?: string, identifier?: string, group?: string, before?: string|null }} body
+     * @param {{ shelfId?: string, fromPresetId?: string, identifier?: string, group?: string, before?: string|null, outsideGroup?: boolean }} body
      */
     async copyBlock(presetId, body) {
         return this.enqueue(async () => {
@@ -1289,9 +1289,9 @@ export class Store {
                 if (body.group !== undefined) a.group = body.group;
                 payload = copyPayloadFromDoc(src, a);
             }
-            const res = copyIntoDoc(doc, payload, body.before ?? null);
-            const saved = await this._savePresetNow(doc);
-            return { doc: saved, identifiers: res.identifiers, keys: res.keys, group: res.group, warnings: res.warnings };
+            const res = copyIntoDoc(doc, payload, body.before ?? null, { outsideGroup: body.outsideGroup });
+            await this._commit({ docs: [doc] });
+            return { doc: structuredClone(doc), identifiers: res.identifiers, keys: res.keys, group: res.group, warnings: res.warnings };
         });
     }
 }

@@ -23,6 +23,10 @@
  *      the copyBlock REST op refuses a marker with 400 too
  *   6h Sola's identifier multiset grew by exactly the copied count; no id reused
  *   6i Shelf tab: the item listed; rename + notes through the UI reach GET /shelf
+ *   6j Shelf tab: text typed into the notes while their save is held survives
+ *      the save and the refresh (review round 1, finding 3)
+ *   6k Shelf tab: Delete armed on item A, then B selected: the next click only
+ *      arms B; B is deleted on B's own confirmation, A stays (finding 4)
  * Screenshots (dev/shots/): phase6-presets-shelf.png (Presets tab, shelf list
  * open) and phase6-shelf-tab.png (Shelf tab).
  *
@@ -199,6 +203,25 @@ async function dragInto(handleSel, targetSel, wantIndex) {
     await m('mouseReleased', g.to.x, y, { button: 'left', buttons: 0, clickCount: 1 });
     return placeholder;
 }
+
+/** Hold the page's next fetch whose URL ends with urlPart and body contains bodyPart. */
+const holdFetch = (/** @type {string} */ urlPart, /** @type {string} */ bodyPart) => probe.eval(`(() => {
+    window.__chkHeld = false; window.__chkDone = false;
+    window.__chkOrigFetch = window.__chkOrigFetch ?? window.fetch;
+    const orig = window.__chkOrigFetch;
+    let armed = true;
+    window.fetch = async (...args) => {
+        const url = String(args[0]?.url ?? args[0]);
+        const body = String(args[1]?.body ?? '');
+        const mine = armed && url.endsWith(${J(urlPart)}) && body.includes(${J(bodyPart)});
+        if (!mine) return orig(...args);
+        armed = false;
+        window.__chkHeld = true;
+        await new Promise((r) => { window.__chkRelease = r; });
+        try { return await orig(...args); } finally { setTimeout(() => { window.__chkDone = true; }, 0); }
+    };
+    return true; })()`);
+const unhold = () => probe.eval(`(() => { window.__chkRelease?.(); if (window.__chkOrigFetch) window.fetch = window.__chkOrigFetch; window.__chkOrigFetch = undefined; return true; })()`);
 
 async function shot(/** @type {string} */ file) {
     fs.mkdirSync(SHOTS, { recursive: true });
@@ -483,6 +506,59 @@ async function main() {
         await clearToasts();
         await shot('phase6-shelf-tab.png');
         return `GET /shelf: name "${s[0].name}", notes "${s[0].notes}"; detail shows the content`;
+    });
+
+    // ------------------------------------------------------------------ 6j
+    await check('6j Shelf tab: notes typed while their save is held survive the save and the refresh', async () => {
+        const item = `#pm-window .pm-shelf-items li.pm-shelf-item[data-shelf-id="${ids.shelf}"]`;
+        await click(item);
+        await until(() => exists(`${item}.pm-selected`), 5000, 'item selected');
+        const first = 'chk6j first';
+        const more = 'chk6j first + typed during the save';
+        must(await setValue('#pm-window .pm-shelf-notes', first), 'notes input');
+        await holdFetch(`/shelf/${ids.shelf}`, first);
+        await click('#pm-window .pm-shelf-notes-save');
+        await until(() => probe.eval('window.__chkHeld === true'), 5000, 'notes PATCH held');
+        must(await setValue('#pm-window .pm-shelf-notes', more), 'typing during the save');
+        await unhold();
+        await until(async () => (await getShelf()).find((/** @type {any} */ x) => x.id === ids.shelf)?.notes === first, 8000, 'the held save landed');
+        await until(() => probe.eval('window.__chkDone === true'), 5000, 'held fetch finished');
+        await sleep(800); // the save's refresh and the SSE-driven refresh
+        const shown = await probe.eval(`document.querySelector('#pm-window .pm-shelf-notes').value`);
+        must(shown === more, `textarea after the save: ${J(shown)}`);
+        await click('#pm-window .pm-shelf-notes-save');
+        await until(async () => (await getShelf()).find((/** @type {any} */ x) => x.id === ids.shelf)?.notes === more, 8000, 'second save landed');
+        return `held save stored ${J(first)}; the textarea kept ${J(more)} through the refresh; saving again stored it`;
+    });
+    await unhold();
+
+    // ------------------------------------------------------------------ 6k
+    await check('6k Shelf tab: Delete armed on A does not delete B after B is selected', async () => {
+        const other = Object.values(dem0.blocks).find((/** @type {any} */ b) => b.name === '「 Frenetic 」');
+        must(other, 'precondition: DEM has 「 Frenetic 」');
+        const add = await api('POST', '/shelf', { fromPresetId: ids.dem, identifier: other.identifier });
+        must(add.status === 201, `POST /shelf -> ${add.status}`);
+        const bId = add.json.id;
+        const A = `#pm-window .pm-shelf-items li.pm-shelf-item[data-shelf-id="${ids.shelf}"]`;
+        const B = `#pm-window .pm-shelf-items li.pm-shelf-item[data-shelf-id="${bId}"]`;
+        await until(() => exists(B), 8000, 'B listed (SSE refresh)');
+        await click(A);
+        await until(() => exists(`${A}.pm-selected`), 5000, 'A selected');
+        await click('#pm-window .pm-shelf-delete');
+        const armedText = await probe.eval(`document.querySelector('#pm-window .pm-shelf-delete').textContent`);
+        must(armedText === 'Confirm delete', `after one click on A: ${J(armedText)}`);
+        await click(B);
+        await until(() => exists(`${B}.pm-selected`), 5000, 'B selected');
+        await click('#pm-window .pm-shelf-delete');
+        await sleep(800);
+        const mid = (await getShelf()).map((/** @type {any} */ x) => x.id);
+        must(mid.includes(ids.shelf) && mid.includes(bId), `after A-armed, B-selected, click: shelf ${J(mid)}`);
+        const text2 = await probe.eval(`document.querySelector('#pm-window .pm-shelf-delete').textContent`);
+        must(text2 === 'Confirm delete', `that click should arm B: ${J(text2)}`);
+        await click('#pm-window .pm-shelf-delete');
+        const end = await until(async () => { const x = (await getShelf()).map((/** @type {any} */ e) => e.id); return x.includes(bId) ? null : x; }, 8000, 'B deleted');
+        must(end.includes(ids.shelf), 'A was deleted');
+        return `armed on A, selected B, clicked: nothing deleted, B armed; confirmed: B deleted, A kept (${J(end)})`;
     });
 
     finish();

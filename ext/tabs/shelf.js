@@ -7,6 +7,7 @@
  * preset document.
  */
 import { api } from '../st.js';
+import { createEditGuard } from '../dirty.js';
 
 /** @param {unknown} err @returns {string} */
 function errText(err) {
@@ -55,8 +56,9 @@ export function createShelfTab(pane, bridge) {
     let selectedId = null;
     /** @type {Map<string, string>} */
     let names = new Map();
-    let notesDirty = false;
-    let deleteArmed = false;
+    const notesGuard = createEditGuard();
+    /** @type {string|null} id of the shelf item the delete confirmation belongs to */
+    let armedId = null;
     /** @type {any} */
     let deleteTimer = null;
     let refreshTimer = /** @type {any} */ (null);
@@ -71,6 +73,13 @@ export function createShelfTab(pane, bridge) {
         const pid = item?.savedFrom?.presetId;
         if (!pid) return 'saved directly';
         return `from ${names.get(pid) ?? pid}`;
+    }
+
+    function disarm() {
+        clearTimeout(deleteTimer);
+        deleteTimer = null;
+        armedId = null;
+        deleteBtn.textContent = 'Delete';
     }
 
     function render() {
@@ -92,7 +101,8 @@ export function createShelfTab(pane, bridge) {
             li.append(nameSpan, fromSpan);
             li.addEventListener('click', () => {
                 selectedId = item.id;
-                notesDirty = false;
+                notesGuard.reset();
+                disarm();
                 render();
             });
             itemsEl.appendChild(li);
@@ -101,12 +111,12 @@ export function createShelfTab(pane, bridge) {
         const selected = items.find((it) => it.id === selectedId) ?? null;
         if (selected) {
             nameInput.value = selected.name;
-            if (!notesDirty) notesEl.value = selected.notes ?? '';
+            if (!notesGuard.dirty) notesEl.value = selected.notes ?? '';
             metaEl.textContent = `${selected.role} · saved ${new Date(selected.savedAt).toLocaleString()} · ${fromName(selected)}`;
             contentEl.textContent = selected.content;
         } else {
             nameInput.value = '';
-            if (!notesDirty) notesEl.value = '';
+            if (!notesGuard.dirty) notesEl.value = '';
             metaEl.textContent = '';
             contentEl.textContent = '';
         }
@@ -151,16 +161,17 @@ export function createShelfTab(pane, bridge) {
         })();
     });
 
-    notesEl.addEventListener('input', () => { notesDirty = true; });
+    notesEl.addEventListener('input', () => { notesGuard.edited(); });
 
     notesSaveBtn.addEventListener('click', () => {
         void (async () => {
             if (!selectedId) return;
             const id = selectedId;
             const notes = notesEl.value;
+            const tok = notesGuard.token();
             try {
                 await bridge.edit(() => api('PATCH', `/shelf/${id}`, { notes }));
-                notesDirty = false;
+                notesGuard.saved(tok);
                 setStatus('');
             } catch (err) {
                 setStatus(errText(err), true);
@@ -172,22 +183,18 @@ export function createShelfTab(pane, bridge) {
     deleteBtn.addEventListener('click', () => {
         void (async () => {
             if (!selectedId) return;
-            if (!deleteArmed) {
-                deleteArmed = true;
+            if (armedId === null || armedId !== selectedId) {
+                armedId = selectedId;
                 deleteBtn.textContent = 'Confirm delete';
-                deleteTimer = setTimeout(() => {
-                    deleteArmed = false;
-                    deleteBtn.textContent = 'Delete';
-                }, 4000);
+                clearTimeout(deleteTimer);
+                deleteTimer = setTimeout(() => { disarm(); }, 4000);
                 return;
             }
-            if (deleteTimer) clearTimeout(deleteTimer);
-            deleteArmed = false;
-            deleteBtn.textContent = 'Delete';
-            const id = selectedId;
+            const id = armedId;
+            disarm(); // before the await: a third click cannot send a second DELETE
             try {
                 await bridge.edit(() => api('DELETE', `/shelf/${id}`));
-                selectedId = null;
+                if (selectedId === id) selectedId = null;
                 setStatus('');
             } catch (err) {
                 setStatus(errText(err), true);
@@ -209,7 +216,7 @@ export function createShelfTab(pane, bridge) {
         destroy() {
             unsubscribe();
             clearTimeout(refreshTimer);
-            clearTimeout(deleteTimer);
+            disarm();
         },
     };
 }

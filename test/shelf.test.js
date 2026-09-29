@@ -228,3 +228,37 @@ test('copyBlock refuses a marker (400) and bad sources; the target document and 
     assert.deepEqual(store.getPreset(pid), before);
     assert.equal(store.rev, rev0);
 });
+
+// ---------------------------------------------------------------- review round 1: copyBlock publishes through _commit
+
+test('copyBlock: a failed state write leaves the target (index, file on disk) and rev unchanged', async () => {
+    const { store, pid, qid } = await fixture();
+    const item = /** @type {any} */ (await store.shelfAdd({ fromPresetId: qid, identifier: 'a' }));
+    const before = store.getPreset(pid);
+    const file = /** @type {any} */ (store.index.get(pid)).path;
+    const disk0 = fs.readFileSync(file, 'utf8');
+    const rev0 = store.rev;
+    const blocked = path.join(store.root, 'blocked-state.json');
+    fs.mkdirSync(path.join(blocked, 'x'), { recursive: true });
+    store.stateFile = blocked;
+    await assert.rejects(() => store.copyBlock(pid, { shelfId: item.id, before: null }));
+    assert.deepEqual(store.getPreset(pid), before);
+    assert.equal(fs.readFileSync(file, 'utf8'), disk0);
+    assert.equal(store.rev, rev0);
+});
+
+test('copyBlock passes outsideGroup through to the landing', async () => {
+    const { store, pid, qid } = await fixture();
+    const d0 = store.getPreset(pid);
+    const g = groupOf(d0);
+    assert.ok(g && g.options.length, 'precondition: P has a group with options');
+    const firstOpt = g.options[0].key;
+    const r = /** @type {any} */ (await store.copyBlock(pid, { fromPresetId: qid, identifier: 'c', before: firstOpt, outsideGroup: true }));
+    const d1 = store.getPreset(pid);
+    const g1 = d1.sequences[0].rows.find((/** @type {any} */ row) => row.kind === 'group' && row.key === g.key);
+    assert.deepEqual(g1.options, g.options, 'the group is unchanged (the copy is not a member)');
+    assert.deepEqual(g1.header, g.header);
+    // above the whole group (never between its heading and its options)
+    const ids1 = flatIds(d1);
+    assert.equal(ids1[ids1.indexOf(r.identifiers[0]) + 1], identOf(g.header));
+});

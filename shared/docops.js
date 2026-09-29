@@ -614,6 +614,20 @@ function mintIdentifiers(doc, count) {
 }
 
 /**
+ * The snap index for an entry landing directly above an anchor option's
+ * whole group: walk the option run back to its start; a headed group lands
+ * right at its heading, a headerless one right at its first option (both
+ * `j`), anything else lands right after it (`j + 1`).
+ * @param {any[]} entries
+ * @param {number} idx the anchor's index (an option)
+ */
+function snapAboveGroup(entries, idx) {
+    let j = idx;
+    while (j > 0 && entries[j].rank === 'option') j--;
+    return (entries[j].rank === 'group' || entries[j].rank === 'option') ? j : j + 1;
+}
+
+/**
  * Land a copy payload in `doc` at `before` (a leaf row key; null/undefined =
  * end of the first sequence). Every copied block gets a freshly minted
  * identifier and row key — never the source's — and starts off in every
@@ -629,8 +643,17 @@ function mintIdentifiers(doc, count) {
  * @param {any} doc
  * @param {CopyPayload} payload
  * @param {string|null|undefined} before
+ * @param {{ outsideGroup?: boolean }} [opts] `outsideGroup`: for a BLOCK
+ *   payload anchored on an option, land as a plain item above the anchor's
+ *   whole group instead of joining it — the drop point was outside the
+ *   anchor's group (dropAnchor reached the anchor by descending into a
+ *   headerless container). No effect on a group payload or a non-option
+ *   anchor.
  */
-export function copyIntoDoc(doc, payload, before) {
+export function copyIntoDoc(doc, payload, before, opts = {}) {
+    if (opts.outsideGroup !== undefined && typeof opts.outsideGroup !== 'boolean') {
+        throw new OpError('copyBlock outsideGroup must be a boolean');
+    }
     if (before !== null && before !== undefined && typeof before !== 'string') {
         throw new OpError('copyBlock before must be a leaf key');
     }
@@ -667,18 +690,21 @@ export function copyIntoDoc(doc, payload, before) {
     let newEntries;
     if (payload.kind === 'block') {
         const A = anchor ? entries[anchor.idx] : null;
-        const at = anchor ? anchor.idx : entries.length;
-        const rank = A?.rank === 'option' ? 'option' : 'item';
-        const gmeta = A?.rank === 'option' ? { ...A.gmeta } : null;
+        let at = anchor ? anchor.idx : entries.length;
+        let rank = A?.rank === 'option' ? 'option' : 'item';
+        let gmeta = A?.rank === 'option' ? { ...A.gmeta } : null;
+        if (opts.outsideGroup && anchor && A?.rank === 'option') {
+            at = snapAboveGroup(entries, anchor.idx);
+            rank = 'item';
+            gmeta = null;
+        }
         newEntries = [{ leaf: { kind: 'block', ref: ids[0], key: keys[0] }, rank, gmeta, sname: null }];
         entries.splice(at, 0, ...newEntries);
     } else {
         const A = anchor ? entries[anchor.idx] : null;
         let at;
         if (anchor && A?.rank === 'option') {
-            let j = anchor.idx;
-            while (j > 0 && entries[j].rank === 'option') j--;
-            at = (entries[j].rank === 'group' || entries[j].rank === 'option') ? j : j + 1;
+            at = snapAboveGroup(entries, anchor.idx);
         } else {
             at = anchor ? anchor.idx : entries.length;
         }

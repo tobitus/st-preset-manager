@@ -378,3 +378,46 @@ test('macroWarnings: a macro the target mentions in a block NAME counts as prese
     const res = copyIntoDoc(doc, blockPayload({ content: '{{getvar::fromname}}' }), null);
     assert.deepEqual(res.warnings, []);
 });
+
+// ---------------------------------------------------------------- review round 1: outsideGroup
+
+/** a, [p1 p2 headerless options], b, … — the target with a headerless group after a */
+function headerlessTarget() {
+    const doc = target();
+    const leaf = Object.fromEntries(flat(doc).map((e) => [identOf(e.leaf), e.leaf]));
+    const gm = { name: 'Loose', cardinality: 'pick-one', guessed: false };
+    doc.sequences[0].rows = rebuildSeq([
+        { leaf: leaf.a, rank: 'item', gmeta: null, sname: null },
+        { leaf: leaf.o1, rank: 'option', gmeta: { ...gm }, sname: null },
+        { leaf: leaf.o2, rank: 'option', gmeta: { ...gm }, sname: null },
+        { leaf: leaf.b, rank: 'item', gmeta: null, sname: null },
+    ]);
+    return doc;
+}
+
+test('outsideGroup: a block anchored on a headerless group\'s first option lands ABOVE the group, not in it', () => {
+    const doc = headerlessTarget();
+    const res = copyIntoDoc(doc, blockPayload(), keyOf(doc, 'o1'), { outsideGroup: true });
+    assert.deepEqual(flatIds(doc), ['a', res.identifiers[0], 'o1', 'o2', 'b']);
+    assert.equal(flat(doc)[1].rank, 'item');
+    const g = groups(doc);
+    assert.equal(g.length, 1);
+    assert.deepEqual(g[0].options, ['o1', 'o2']);
+    assert.equal(g[0].cardinality, 'pick-one');
+});
+
+test('outsideGroup false (default) on the same anchor still joins the group', () => {
+    const doc = headerlessTarget();
+    const res = copyIntoDoc(doc, blockPayload(), keyOf(doc, 'o1'));
+    assert.deepEqual(groups(doc)[0].options, [res.identifiers[0], 'o1', 'o2']);
+    const doc2 = headerlessTarget();
+    const res2 = copyIntoDoc(doc2, blockPayload(), keyOf(doc2, 'o1'), { outsideGroup: false });
+    assert.deepEqual(groups(doc2)[0].options, [res2.identifiers[0], 'o1', 'o2']);
+});
+
+test('outsideGroup must be a boolean: 400, document untouched', () => {
+    const doc = headerlessTarget();
+    const snap = structuredClone(doc);
+    assert.throws(() => copyIntoDoc(doc, blockPayload(), keyOf(doc, 'o1'), /** @type {any} */ ({ outsideGroup: 'yes' })), status(400));
+    assert.deepEqual(doc, snap);
+});
