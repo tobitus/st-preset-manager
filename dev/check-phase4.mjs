@@ -208,6 +208,7 @@ const holdFetch = (/** @type {string} */ urlPart, /** @type {string} */ bodyPart
             armed = false;
             window.__chkHeld = true;
             await new Promise((r) => { window.__chkRelease = r; });
+            if (window.__chkFailHeld) { window.__chkFailHeld = false; throw new TypeError('check: held request failed'); }
         }
         return orig(...args);
     };
@@ -638,6 +639,50 @@ async function main() {
             const ff2 = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
             must(s2.temperature === V && ff2 === V, `A's edit reverted: ST ${s2.temperature}, override ${ff2}`);
             return `during the hold ST's slider was blocked (${J(during)}); after release A at ${c1.s.temperature}, B's ${V} on mock; A edit ${V} -> FF Kimi override ${ff2}, ST ${s2.temperature} (kept)`;
+        } finally {
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+        }
+    });
+
+    // ------------------------------------------------------------------ 2g
+    await check('2g B\'s report failed; v2 picker switch back to A queued while B\'s write-back is held: B\'s value only on B, ST ends on A with A\'s tuning', async () => {
+        const V = 1.57;
+        try {
+            await loadViaLibrary(ids.ff);
+            await ensureModel(KIMI, HAP);
+            const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            const kimiG = (await getModels()).models[KIMI].tuning.temperature;
+            must(kimiOv !== V, 'precondition: fresh value');
+            try {
+                await holdFetch('/api/plugins/st-preset-manager/slot/model');
+                must(await pickStProfile('Mock'), 'dropdown pick failed');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'report for Mock held');
+                must(await setSlider('temp_openai', V), 'no #temp_openai');
+                await sleep(1500);
+                // arm the write-back hold BEFORE the report is released, then
+                // let the report FAIL (network error): no reconcile is queued for B
+                await probe.eval('(() => { window.__chkReleaseReport = window.__chkRelease; window.__chkRelease = undefined; return true; })()');
+                await holdFetch('/api/plugins/st-preset-manager/slot/panel', String(V));
+                await probe.eval('(() => { window.__chkFailHeld = true; window.__chkReleaseReport?.(); window.__chkReleaseReport = undefined; return true; })()');
+                await until(() => probe.eval('window.__chkHeld === true'), 10000, 'B\'s edit POST held');
+                // the v2 toolbar picker queues a switch back to A behind the held op
+                await toolbarPick(KIMI);
+                await sleep(500);
+                const s0 = await st();
+                must(s0.model === 'mock', `precondition: the picker switch is queued, not run (ST on ${s0.model})`);
+            } finally {
+                await unhold();
+            }
+            await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+            const c = await until(async () => { const x = await converged(); return x && x.s.model === HAP ? x : null; }, 15000, 'ST settled on A (hapuppy)');
+            await sleep(2000);
+            const ff = await getDoc(ids.ff);
+            const reg = await getModels();
+            const s2 = await st();
+            must(ff.tuningOverrides[KIMI].temperature === kimiOv, `A's override became ${ff.tuningOverrides[KIMI].temperature} (was ${kimiOv})`);
+            must(reg.models[KIMI].tuning.temperature === kimiG, `A's global became ${reg.models[KIMI].tuning.temperature} (was ${kimiG})`);
+            must(s2.temperature === kimiOv, `ST on A shows ${s2.temperature}, expected A's ${kimiOv}`);
+            return `B (mock) ${V} -> mock global; queued picker switch -> ST on ${c.s.model} at ${s2.temperature}; A override ${kimiOv} and global ${kimiG} unchanged`;
         } finally {
             await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
         }

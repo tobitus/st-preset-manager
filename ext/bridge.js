@@ -524,6 +524,38 @@ export class Bridge {
     }
 
     /**
+     * Atomically install a fresh write-back baseline for `raw`, called
+     * inline from flushPanel's transition-edit branch — from inside the
+     * SAME op that just posted the edit against it (flushPanel is only
+     * ever called from inside a queued op, so it still holds the queue
+     * slot and the overlay here). Re-fetches the slot and, if it names a
+     * real preset, applies it and performs the same bookkeeping
+     * `_reconcileInner` does after its own apply, so `baseSnapshot` /
+     * `baseRaw` name `raw`'s fresh compile before this op releases the
+     * queue slot. This closes the race a later, separately-enqueued
+     * reconcile left open: an op queued in between (e.g. a picker switch
+     * back to the old connection) would clear `_transition` and let that
+     * later reconcile's flush read the just-sent values on screen as an
+     * edit made under the OLD connection, reposting them there. Never
+     * calls flushPanel.
+     * @param {{source: string, model: string, profileId: string}} raw
+     * @returns {Promise<any>} the slot view fetched
+     */
+    async _installBaseline(raw) {
+        const slot = /** @type {{rev: number, slotChangedRev?: number, desired: any, compiled: any, hash: string}} */ (await api('GET', slotPath(raw)));
+        if (slot.desired?.presetId && slot.compiled) {
+            await this.apply(slot);
+            this.appliedSlotChangedRev = slot.slotChangedRev ?? 0;
+            this.baseRaw = raw;
+            this.detached = false;
+            this._transition = null;
+        }
+        this._releaseTransitionHold();
+        this.emit({ slot, attached: this.attached });
+        return slot;
+    }
+
+    /**
      * Transparent input blocker over the editable preset surfaces for the
      * duration of an apply. `pointer-events: none` stops clicks / sliders /
      * drag-sort (PromptManager's sortable starts on pointerdown);
@@ -699,11 +731,18 @@ export class Bridge {
      * depends on whether that connection is STILL current when the response
      * lands: if `currentRaw()` still hashes to `raw`, they are folded into
      * `_transition.tuning` — but only if `_transition` still IS that same
-     * object — so they are never resent; otherwise the connection changed
-     * again while the POST was in flight, the panel now shows values that
-     * belong to nobody's edit, and the bridge marks it unattributable
-     * (`_panelUnattributable`) and re-arms the transition hold on the overlay
-     * until the reconcile this forces installs a fresh baseline.
+     * object — so they are never resent, and (ATOMIC RE-BASELINE) this same
+     * flush installs the fresh write-back baseline for `raw` via
+     * `_installBaseline` before returning, from inside this same op while it
+     * still holds the queue slot and the overlay: no op queued after this
+     * flush can run before `baseSnapshot`/`baseRaw` name the new
+     * connection's compile, so none can misread the just-sent values on
+     * screen as an edit made under the OLD connection and repost them
+     * there. Otherwise the connection changed again while the POST was in
+     * flight, the panel now shows values that belong to nobody's edit, and
+     * the bridge marks it unattributable (`_panelUnattributable`) and
+     * re-arms the transition hold on the overlay until the reconcile this
+     * forces installs a fresh baseline.
      * `currentRaw()` and `this._transition` are read ONCE at flush start
      * (`liveRaw`/`tr`) and reused for the whole flush, because either can
      * change out from under an in-flight await (a second transition
@@ -831,8 +870,11 @@ export class Bridge {
                 return null;
             }
             this.appliedRev = Math.max(this.appliedRev, res2.rev);
-            // forces the reconcile that follows to re-apply the new Model's
-            // compile instead of comparing a hash taken against the old one
+            // clears the hash comparison against the OLD connection's
+            // baseline; forces a reconcile to re-apply the new Model's
+            // compile UNLESS the still-live branch below re-baselines
+            // synchronously first via _installBaseline (which sets a real
+            // appliedHash)
             this.appliedHash = null;
             // acknowledged only if the connection that sent them is still
             // live: otherwise the panel is unattributable until the
@@ -843,6 +885,22 @@ export class Bridge {
                 // into the transition tuning so it is never resent
                 if (this._transition === tr) {
                     for (const key of Object.keys(genuine)) tr.tuning[key] = genuine[key];
+                }
+                // Atomic re-baseline: install the fresh baseline for tr.raw
+                // NOW, inside this same flush, instead of waiting for a
+                // later, separately-enqueued reconcile. This flush still
+                // holds the queue slot and the overlay, so no op queued
+                // after this one can run before baseSnapshot/baseRaw name
+                // tr.raw's fresh compile — closing the race where such an
+                // op (e.g. a picker switch back to the old connection)
+                // would clear `_transition` and let a later reconcile's
+                // flush misread these just-sent values as an edit made
+                // under the OLD connection. Skipped when the tab is no
+                // longer attached to the slot (detached mid-flush): the
+                // existing reconcile path (forced by appliedHash = null
+                // above) installs the baseline instead.
+                if (currentPresetName() === SLOT_NAME && !this.detached) {
+                    await this._installBaseline(tr.raw);
                 }
             } else {
                 // the connection changed again while the POST was in

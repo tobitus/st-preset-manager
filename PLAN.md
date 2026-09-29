@@ -278,7 +278,9 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   (including the transition-edit POST) and every connection transition until the new
   baseline is installed (15 s liveness bound). Values a write-back sent are acknowledged
   only while the sending connection is still live; otherwise the panel is unattributable
-  and is re-applied, never read as an edit.
+  and is re-applied, never read as an edit. A transition-edit write-back that succeeds while its
+  connection is still live installs the new baseline inside the same op (review 5), so no
+  queued op can run between the write and the re-baseline.
 - **An apply never undoes another actor's preset choice.** A reconcile's apply checks,
   just before ST selects the slot and while it waits for ST to show it, whether ST moved
   to a foreign preset since the reconcile started (e.g. a profile that loads a preset);
