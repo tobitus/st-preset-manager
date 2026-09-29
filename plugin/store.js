@@ -17,6 +17,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { validateDoc, validateRegistry, nativeShapeErrors } from '../shared/schema.js';
+import { copyPayloadFromDoc, copyIntoDoc } from '../shared/docops.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
 import { ensureAllLeaves, completeOverride, iterLeaves, collectGroups } from '../shared/groups.js';
 import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
@@ -70,6 +71,9 @@ function isPlainObject(value) {
     return proto === Object.prototype || proto === null;
 }
 
+/** shelf item id: `b_` + 26-char Crockford base32 ULID */
+const SHELF_ID = /^b_[0-9A-Z]{26}$/;
+
 export class Store {
     /** @param {string} root plugin data root (<user>/preset-manager) */
     constructor(root) {
@@ -83,6 +87,8 @@ export class Store {
         this.stateFile = path.join(root, 'state.json');
         /** @type {Map<string, {id: string, path: string, name: string, folder: string, tags: string[], updatedAt: string, doc: any}>} */
         this.index = new Map();
+        /** @type {Map<string, any>} */
+        this.shelf = new Map();
         /** @type {Promise<any>} tail of the single-writer queue */
         this._queue = Promise.resolve();
         /** @type {number} */
@@ -128,6 +134,15 @@ export class Store {
     async init() {
         for (const d of [this.presetsDir, this.shelfDir, this.revisionsDir]) {
             fs.mkdirSync(d, { recursive: true });
+        }
+        for (const f of fs.readdirSync(this.shelfDir).filter((f) => f.endsWith('.json'))) {
+            try {
+                const entry = JSON.parse(fs.readFileSync(path.join(this.shelfDir, f), 'utf8'));
+                if (`${entry.id}.json` !== f) throw new Error(`id ${entry.id} does not match filename ${f}`);
+                this.shelf.set(entry.id, entry);
+            } catch (err) {
+                console.warn('[preset-manager] skipping shelf file', f, err);
+            }
         }
         if (!fs.existsSync(this.modelsFile)) {
             atomicWriteSync(this.modelsFile, JSON.stringify({ version: 1, models: {} }, null, 2));
@@ -186,9 +201,9 @@ export class Store {
      * never call directly from a route. Docs must already be indexed and
      * keep their name/folder (this is a content transaction, not a
      * rename/move — `_savePresetNow` handles those).
-     * @param {{ registry?: any, docs?: any[], revisionLabel?: string }} [opts]
+     * @param {{ registry?: any, docs?: any[], revisionLabel?: string, shelf?: { id: string, entry: any }[] }} [opts]
      */
-    async _commit({ registry = undefined, docs = [], revisionLabel = undefined } = {}) {
+    async _commit({ registry = undefined, docs = [], revisionLabel = undefined, shelf = [] } = {}) {
         if (registry !== undefined) {
             const errs = validateRegistry(registry);
             if (errs.length) throw new StoreError(`invalid registry: ${errs.join(', ')}`, 400);
@@ -231,6 +246,13 @@ export class Store {
                 await atomicWrite(this.modelsFile, JSON.stringify(registry, null, 2));
                 written.push({ file: this.modelsFile, prev });
             }
+            for (const { id, entry } of shelf) {
+                const file = path.join(this.shelfDir, `${id}.json`);
+                const prev = fs.existsSync(file) ? await fsp.readFile(file, 'utf8') : null;
+                if (entry) await atomicWrite(file, JSON.stringify(entry, null, 2));
+                else await fsp.rm(file, { force: true });
+                written.push({ file, prev });
+            }
             {
                 const prev = fs.existsSync(this.stateFile) ? await fsp.readFile(this.stateFile, 'utf8') : null;
                 await atomicWrite(this.stateFile, JSON.stringify(nextState, null, 2));
@@ -248,6 +270,10 @@ export class Store {
 
         for (const { entry, doc } of targets) {
             this.index.set(doc.id, { ...entry, updatedAt: doc.updatedAt, tags: doc.tags ?? [], doc: structuredClone(doc) });
+        }
+        for (const { id, entry } of shelf) {
+            if (entry) this.shelf.set(id, structuredClone(entry));
+            else this.shelf.delete(id);
         }
         if (registry !== undefined) this.models = registry;
         this.state = nextState;
@@ -1129,52 +1155,143 @@ export class Store {
 
     // ----------------------------------------------------------------- shelf
 
-    /** @param {{ block?: any, fromPresetId?: string, identifier?: string, tags?: string[] }} body */
+    /** @param {string} id */
+    _shelfEntry(id) {
+        if (!SHELF_ID.test(String(id)) || !this.shelf.has(id)) {
+            throw new StoreError(`shelf item ${id} not found`, 404);
+        }
+        return this.shelf.get(id);
+    }
+
+    shelfList() {
+        return [...this.shelf.values()]
+            .map((e) => structuredClone(e))
+            .sort((a, b) => (a.savedAt < b.savedAt ? -1 : a.savedAt > b.savedAt ? 1 : (a.id < b.id ? -1 : 1)));
+    }
+
+    /** @param {string} id */
+    shelfGet(id) {
+        return structuredClone(this._shelfEntry(id));
+    }
+
+    /** @param {{ block?: any, fromPresetId?: string, identifier?: string, name?: string, notes?: string, tags?: string[] }} body */
     async shelfAdd(body) {
         return this.enqueue(async () => {
+            if (!isPlainObject(body)) throw new StoreError('shelf add needs {block} or {fromPresetId, identifier}', 400);
+            const hasBlock = isPlainObject(body.block);
+            const hasPreset = typeof body.fromPresetId === 'string' && typeof body.identifier === 'string';
+            if (hasBlock === hasPreset) throw new StoreError('shelf add needs {block} or {fromPresetId, identifier}', 400);
             let block;
-            if (body.block) {
-                block = structuredClone(body.block);
-            } else if (body.fromPresetId && body.identifier) {
-                const doc = this.getPreset(body.fromPresetId);
-                block = doc.blocks?.[body.identifier];
-                if (!block) throw new StoreError(`no block ${body.identifier} in ${body.fromPresetId}`, 404);
+            let fromPresetId;
+            let identifier;
+            if (hasPreset) {
+                fromPresetId = body.fromPresetId;
+                identifier = body.identifier;
+                const doc = this.index.get(fromPresetId)?.doc;
+                if (!doc) throw new StoreError(`preset ${fromPresetId} not found`, 404);
+                if ((doc.markers ?? []).some((m) => m.identifier === identifier)) {
+                    throw new StoreError('markers never go on the shelf (fixed ST slots)', 400);
+                }
+                block = doc.blocks?.[identifier];
+                if (!block) throw new StoreError(`no block ${identifier} in ${fromPresetId}`, 404);
             } else {
-                throw new StoreError('shelf add needs {block} or {fromPresetId, identifier}');
+                block = body.block;
+                if (block.marker === true) throw new StoreError('markers never go on the shelf (fixed ST slots)', 400);
+                if (typeof block.name !== 'string' || block.name.trim() === '') throw new StoreError('shelf block needs a name', 400);
+                if (typeof block.content !== 'string') throw new StoreError('shelf block needs string content', 400);
+                if (block.role !== undefined && typeof block.role !== 'string') throw new StoreError('shelf block role must be a string', 400);
+                if (block.fields !== undefined && !isPlainObject(block.fields)) throw new StoreError('shelf block fields must be an object', 400);
+                if (block.notes !== undefined && typeof block.notes !== 'string') throw new StoreError('shelf block notes must be a string', 400);
+            }
+            if (body.name !== undefined && (typeof body.name !== 'string' || body.name.trim() === '')) {
+                throw new StoreError('shelf name must be a non-empty string', 400);
+            }
+            if (body.notes !== undefined && typeof body.notes !== 'string') throw new StoreError('shelf notes must be a string', 400);
+            if (body.tags !== undefined && (!Array.isArray(body.tags) || body.tags.some((t) => typeof t !== 'string'))) {
+                throw new StoreError('shelf tags must be an array of strings', 400);
             }
             const id = `b_${ulid()}`;
             const entry = {
                 id,
-                name: block.name ?? body.identifier ?? '(block)',
+                name: (body.name ?? block.name).trim(),
                 content: block.content ?? '',
                 role: block.role ?? 'system',
-                fields: block.fields ?? {},
-                notes: block.notes ?? '',
+                fields: { ...structuredClone(block.fields ?? {}), marker: false },
+                notes: body.notes ?? block.notes ?? '',
                 tags: body.tags ?? [],
-                savedFrom: { presetId: body.fromPresetId ?? null, identifier: body.identifier ?? null },
+                savedFrom: { presetId: fromPresetId ?? null, identifier: identifier ?? null },
                 savedAt: new Date().toISOString(),
             };
-            await atomicWrite(path.join(this.shelfDir, `${id}.json`), JSON.stringify(entry, null, 2));
-            await this._bumpRev();
-            return entry;
+            await this._commit({ shelf: [{ id, entry }] });
+            return structuredClone(entry);
         });
     }
 
-    shelfList() {
-        if (!fs.existsSync(this.shelfDir)) return [];
-        return fs.readdirSync(this.shelfDir)
-            .filter((f) => f.endsWith('.json'))
-            .map((f) => JSON.parse(fs.readFileSync(path.join(this.shelfDir, f), 'utf8')))
-            .sort((a, b) => (a.savedAt < b.savedAt ? -1 : 1));
+    /** @param {string} id @param {{ name?: string, notes?: string, tags?: string[] }} patch */
+    async shelfUpdate(id, patch) {
+        return this.enqueue(async () => {
+            const entry = this._shelfEntry(id);
+            if (!isPlainObject(patch)) throw new StoreError('shelf update needs an object', 400);
+            const allowed = new Set(['name', 'notes', 'tags']);
+            for (const k of Object.keys(patch)) {
+                if (!allowed.has(k)) throw new StoreError(`unknown shelf field ${k}`, 400);
+            }
+            if (patch.name !== undefined && (typeof patch.name !== 'string' || patch.name.trim() === '')) {
+                throw new StoreError('shelf name must be a non-empty string', 400);
+            }
+            if (patch.notes !== undefined && typeof patch.notes !== 'string') throw new StoreError('shelf notes must be a string', 400);
+            if (patch.tags !== undefined && (!Array.isArray(patch.tags) || patch.tags.some((t) => typeof t !== 'string'))) {
+                throw new StoreError('shelf tags must be an array of strings', 400);
+            }
+            const next = structuredClone(entry);
+            if (patch.name !== undefined) next.name = patch.name.trim();
+            if (patch.notes !== undefined) next.notes = patch.notes;
+            if (patch.tags !== undefined) next.tags = patch.tags;
+            await this._commit({ shelf: [{ id, entry: next }] });
+            return structuredClone(next);
+        });
     }
 
     /** @param {string} id */
     async shelfRemove(id) {
         return this.enqueue(async () => {
-            const file = path.join(this.shelfDir, `${id}.json`);
-            if (!fs.existsSync(file)) throw new StoreError(`shelf item ${id} not found`, 404);
-            await fsp.rm(file, { force: true });
-            await this._bumpRev();
+            this._shelfEntry(id);
+            await this._commit({ shelf: [{ id, entry: null }] });
+        });
+    }
+
+    /**
+     * Copy a block into `presetId` at the `before` anchor: ONE queue
+     * transaction that reads the source (a shelf item or another preset),
+     * copies into the target document and saves it.
+     * @param {string} presetId
+     * @param {{ shelfId?: string, fromPresetId?: string, identifier?: string, group?: string, before?: string|null }} body
+     */
+    async copyBlock(presetId, body) {
+        return this.enqueue(async () => {
+            if (!isPlainObject(body)) throw new StoreError('copyBlock needs {shelfId} or {fromPresetId, identifier|group}', 400);
+            const hasShelf = body.shelfId !== undefined;
+            const hasPreset = body.fromPresetId !== undefined;
+            if (hasShelf === hasPreset) throw new StoreError('copyBlock needs {shelfId} or {fromPresetId, identifier|group}', 400);
+            const doc = this.getDocNow(presetId);
+            if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
+            /** @type {any} */
+            let payload;
+            if (hasShelf) {
+                const e = this._shelfEntry(String(body.shelfId));
+                payload = { kind: 'block', block: { name: e.name, content: e.content, role: e.role, fields: e.fields, notes: e.notes } };
+            } else {
+                const src = this.index.get(body.fromPresetId)?.doc;
+                if (!src) throw new StoreError(`preset ${body.fromPresetId} not found`, 404);
+                /** @type {{ identifier?: string, group?: string }} */
+                const a = {};
+                if (body.identifier !== undefined) a.identifier = body.identifier;
+                if (body.group !== undefined) a.group = body.group;
+                payload = copyPayloadFromDoc(src, a);
+            }
+            const res = copyIntoDoc(doc, payload, body.before ?? null);
+            const saved = await this._savePresetNow(doc);
+            return { doc: saved, identifiers: res.identifiers, keys: res.keys, group: res.group, warnings: res.warnings };
         });
     }
 }

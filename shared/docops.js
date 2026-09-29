@@ -523,6 +523,248 @@ function opSetNotes(doc, a) {
     return {};
 }
 
+// ------ copy (Phase 6)
+// Cross-preset copy (v1 ops.py copy_component / copy_group): build a
+// detached payload from one document or a shelf item (copyPayloadFromDoc)
+// and land it in another (copyIntoDoc); macroWarnings ports v1
+// token_warnings (pmcore/ops.py ~570-596).
+
+/**
+ * @typedef {{kind: 'block', block: any}
+ *   | {kind: 'group', name: string, cardinality: string, header: any|null, options: any[]}} CopyPayload
+ */
+
+/**
+ * Detach one block's copyable fields from its source doc (name/content/
+ * role/fields/notes only) so the payload shares no references with `src`.
+ * @param {any} b
+ */
+function pickBlock(b) {
+    return {
+        name: b.name,
+        content: b.content ?? '',
+        role: b.role ?? 'system',
+        fields: structuredClone(b.fields ?? {}),
+        notes: b.notes ?? '',
+    };
+}
+
+/**
+ * Build a copy payload from `src`: one block (`{identifier}`) or a whole
+ * group (`{group}`, a "grp:<key>" row key) — exactly one of the two.
+ * Markers never transfer (fixed ST slots); a group's marker/ghost members
+ * are silently skipped — only its block header/options travel. Every block
+ * in the payload is deep-detached from `src` (pickBlock).
+ * @param {any} src
+ * @param {{identifier?: string, group?: string}} a
+ * @returns {CopyPayload}
+ */
+export function copyPayloadFromDoc(src, a) {
+    const hasId = typeof a?.identifier === 'string';
+    const hasGroup = typeof a?.group === 'string';
+    if (hasId === hasGroup) throw new OpError('copyBlock needs {identifier} or {group}', 400);
+    if (hasId) {
+        const identifier = /** @type {string} */ (a.identifier);
+        if ((src.markers ?? []).some((/** @type {any} */ m) => m.identifier === identifier)) {
+            throw new OpError('markers never transfer (fixed ST slots)', 400);
+        }
+        const block = src.blocks?.[identifier];
+        if (!block) throw new OpError(`no block ${JSON.stringify(identifier)}`, 404);
+        return { kind: 'block', block: pickBlock(block) };
+    }
+    const group = /** @type {string} */ (a.group);
+    const grp = requireGroup(src, group);
+    const header = grp.header?.kind === 'block' && src.blocks?.[grp.header.ref]
+        ? pickBlock(src.blocks[grp.header.ref])
+        : null;
+    const options = (grp.options ?? [])
+        .filter((/** @type {any} */ o) => o.kind === 'block' && src.blocks?.[o.ref])
+        .map((/** @type {any} */ o) => pickBlock(src.blocks[o.ref]));
+    if (!header && options.length === 0) throw new OpError('group has nothing to copy', 400);
+    return {
+        kind: 'group',
+        name: grp.name ?? '',
+        cardinality: grp.cardinality ?? 'pick-one-or-more',
+        header,
+        options,
+    };
+}
+
+/**
+ * Fresh identifiers, none colliding with any block, marker, or leaf
+ * (including ghosts) anywhere in `doc`, nor with each other.
+ * @param {any} doc
+ * @param {number} count
+ */
+function mintIdentifiers(doc, count) {
+    const used = new Set(Object.keys(doc.blocks ?? {}));
+    for (const m of doc.markers ?? []) used.add(m.identifier);
+    for (const seq of doc.sequences ?? []) {
+        for (const e of flattenSeq(seq.rows ?? [])) used.add(identOf(e.leaf));
+    }
+    /** @type {string[]} */
+    const ids = [];
+    for (let i = 0; i < count; i++) {
+        let id = newId();
+        while (used.has(id)) id = newId();
+        used.add(id);
+        ids.push(id);
+    }
+    return ids;
+}
+
+/**
+ * Land a copy payload in `doc` at `before` (a leaf row key; null/undefined =
+ * end of the first sequence). Every copied block gets a freshly minted
+ * identifier and row key — never the source's — and starts off in every
+ * loadout. Landing rules (`before` = the key of the row the drop landed
+ * above):
+ *   single block  anchor option -> an option of that group at that position
+ *                 anything else -> an item at that position
+ *   whole group   anchor option -> snaps above the anchor's group (never
+ *                                  splits it)
+ *                 anything else -> right above the anchor
+ * A group landing is refused (400) when it would merge into a neighbouring
+ * group's options. All validation runs before any mutation of `doc`.
+ * @param {any} doc
+ * @param {CopyPayload} payload
+ * @param {string|null|undefined} before
+ */
+export function copyIntoDoc(doc, payload, before) {
+    if (before !== null && before !== undefined && typeof before !== 'string') {
+        throw new OpError('copyBlock before must be a leaf key');
+    }
+    if (payload?.kind !== 'block' && payload?.kind !== 'group') {
+        throw new OpError('copyBlock needs a block or group payload');
+    }
+
+    /** @type {{ seq: any, idx: number }|null} */
+    let anchor = null;
+    /** @type {any} */
+    let host;
+    /** @type {any[]} */
+    let entries;
+    if (before != null) {
+        for (const seq of doc.sequences ?? []) {
+            const flat = flattenSeq(seq.rows ?? []);
+            const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === before);
+            if (idx !== -1) { anchor = { seq, idx }; host = seq; entries = flat; break; }
+        }
+        if (!anchor) throw new OpError(`no row with key ${JSON.stringify(before)}`, 404);
+    } else {
+        host = (doc.sequences ?? [])[0];
+        if (!host) throw new OpError('document has no sequences', 409);
+        entries = flattenSeq(host.rows ?? []);
+    }
+
+    const blocksToMint = payload.kind === 'block'
+        ? [payload.block]
+        : [...(payload.header ? [payload.header] : []), ...(payload.options ?? [])];
+    const ids = mintIdentifiers(doc, blocksToMint.length);
+    const keys = blocksToMint.map(() => newKey('row'));
+
+    /** @type {any[]} */
+    let newEntries;
+    if (payload.kind === 'block') {
+        const A = anchor ? entries[anchor.idx] : null;
+        const at = anchor ? anchor.idx : entries.length;
+        const rank = A?.rank === 'option' ? 'option' : 'item';
+        const gmeta = A?.rank === 'option' ? { ...A.gmeta } : null;
+        newEntries = [{ leaf: { kind: 'block', ref: ids[0], key: keys[0] }, rank, gmeta, sname: null }];
+        entries.splice(at, 0, ...newEntries);
+    } else {
+        const A = anchor ? entries[anchor.idx] : null;
+        let at;
+        if (anchor && A?.rank === 'option') {
+            let j = anchor.idx;
+            while (j > 0 && entries[j].rank === 'option') j--;
+            at = (entries[j].rank === 'group' || entries[j].rank === 'option') ? j : j + 1;
+        } else {
+            at = anchor ? anchor.idx : entries.length;
+        }
+        if (entries[at]?.rank === 'option') {
+            throw new OpError('a group cannot land directly above the options of a group without a heading', 400);
+        }
+        if (!payload.header && at > 0 && (entries[at - 1].rank === 'option' || entries[at - 1].rank === 'group')) {
+            throw new OpError('a group without a heading cannot land directly below another group', 400);
+        }
+        const gmeta = { name: payload.name, cardinality: payload.cardinality, guessed: false };
+        newEntries = [];
+        let k = 0;
+        if (payload.header) {
+            newEntries.push({ leaf: { kind: 'block', ref: ids[k], key: keys[k] }, rank: 'group', gmeta: { ...gmeta }, sname: null });
+            k++;
+        }
+        for (const _opt of payload.options ?? []) {
+            newEntries.push({ leaf: { kind: 'block', ref: ids[k], key: keys[k] }, rank: 'option', gmeta: { ...gmeta }, sname: null });
+            k++;
+        }
+        entries.splice(at, 0, ...newEntries);
+    }
+
+    // rebuild first (it can still refuse): a throw leaves `doc` untouched
+    let rows;
+    try {
+        rows = rebuildSeq(entries);
+    } catch (err) {
+        if (err instanceof OutlineError) throw new OpError(err.message);
+        throw err;
+    }
+    doc.blocks ??= {};
+    blocksToMint.forEach((b, i) => {
+        doc.blocks[ids[i]] = {
+            identifier: ids[i],
+            name: b.name,
+            content: b.content,
+            role: b.role,
+            fields: { ...structuredClone(b.fields ?? {}), marker: false },
+            notes: b.notes ?? '',
+        };
+    });
+    host.rows = rows;
+    for (const loadout of Object.values(doc.loadouts ?? {})) {
+        for (const id of ids) loadout.enabled[id] = false;
+    }
+    const group = payload.kind === 'group' ? 'grp:' + keys[0] : null;
+    const warnings = macroWarnings(doc, ids);
+    return { identifiers: ids, keys, group, warnings };
+}
+
+const MACRO_RE = /\{\{[^}]*\}\}|\{[a-zA-Z][^}]*\}/g;
+const UNIVERSAL_MACROS = new Set(['{{char}}', '{{user}}']);
+
+/**
+ * v1 token_warnings port (pmcore/ops.py ~570-596): for each copied block's
+ * macro tokens, warn when the token appears nowhere in the rest of the doc
+ * (content + name of every OTHER block). Comments ({{//...}}) and the
+ * universal {{char}}/{{user}} macros never warn. Sorted, de-duplicated.
+ * @param {any} doc
+ * @param {string[]} copiedIdentifiers
+ */
+export function macroWarnings(doc, copiedIdentifiers) {
+    const copied = new Set(copiedIdentifiers);
+    const targetBlob = Object.entries(doc.blocks ?? {})
+        .filter(([id]) => !copied.has(id))
+        .map(([, b]) => `${(/** @type {any} */ (b).content) || ''} ${(/** @type {any} */ (b).name) || ''}`)
+        .join(' ');
+    /** @type {string[]} */
+    const warnings = [];
+    for (const id of copiedIdentifiers) {
+        const block = doc.blocks?.[id];
+        if (!block) continue;
+        const tokens = new Set((block.content || '').match(MACRO_RE) ?? []);
+        for (const raw of tokens) {
+            const tok = raw.trim();
+            if (tok.toLowerCase().startsWith('{{//')) continue;
+            if (UNIVERSAL_MACROS.has(tok.toLowerCase())) continue;
+            if (tok && !targetBlob.includes(tok)) {
+                warnings.push(`'${block.name}' references ${tok} — absent in target preset`);
+            }
+        }
+    }
+    return [...new Set(warnings)].sort();
+}
+
 // ------------------------------------------------------------------ dispatch
 
 /**

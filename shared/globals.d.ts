@@ -43,10 +43,13 @@ interface PmHandle {
         /** bump the global rev and persist it (call only inside enqueue) */
         _bumpRev(): Promise<void>;
         /** publish a multi-file transaction atomically (call only inside enqueue) */
-        _commit(opts?: { registry?: Record<string, unknown>; docs?: Record<string, unknown>[]; revisionLabel?: string }): Promise<void>;
+        _commit(opts?: { registry?: Record<string, unknown>; docs?: Record<string, unknown>[]; revisionLabel?: string; shelf?: { id: string; entry: unknown }[] }): Promise<void>;
         shelfAdd(body: Record<string, unknown>): Promise<unknown>;
         shelfList(): unknown[];
+        shelfGet(id: string): unknown;
+        shelfUpdate(id: string, patch: Record<string, unknown>): Promise<unknown>;
         shelfRemove(id: string): Promise<void>;
+        copyBlock(presetId: string, body: Record<string, unknown>): Promise<{ doc: unknown; identifiers: string[]; keys: string[]; group: string | null; warnings: string[] }>;
         rescan(): Promise<void>;
         enqueue<T>(fn: () => T): Promise<T>;
         /** mark the desired slot changed at rev+1 (call inside mutateState) */

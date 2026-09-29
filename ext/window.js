@@ -1,20 +1,23 @@
 /**
- * Floating window shell (2b/4/5): one window, five tabs plus a connection
+ * Floating window shell (2b/4/5/6): one window, six tabs plus a connection
  * toolbar. Library = preset list (load into slot, open in the Presets tab);
  * Presets = per-preset editor tabs (ext/tabs/*); Diff = 2x2 preset/revision/
  * block comparison (ext/tabs/diff.js); Import/Export = file import/export
- * (ext/tabs/io.js); Settings = Model registry + connection profile tidy
- * (ext/tabs/settings.js). The toolbar above the tabs holds a Model picker
- * that switches ST's live connection to a Model's profile. Uses plain DOM +
- * CSS from style.css; jQuery UI draggable/resizable are available globally
- * in ST and used for the window. The window also swallows file drag/drop
- * events anywhere inside it so ST's body-level importer never sees them (see below).
+ * (ext/tabs/io.js); Shelf = saved blocks (rename/notes/delete), dropped back
+ * into a preset from that tab's own shelf list (ext/tabs/shelf.js);
+ * Settings = Model registry + connection profile tidy (ext/tabs/settings.js).
+ * The toolbar above the tabs holds a Model picker that switches ST's live
+ * connection to a Model's profile. Uses plain DOM + CSS from style.css;
+ * jQuery UI draggable/resizable are available globally in ST and used for
+ * the window. The window also swallows file drag/drop events anywhere
+ * inside it so ST's body-level importer never sees them (see below).
  */
 import { api, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
 import { switchToModel, unlinkProfilePreset } from './connection.js';
 import { createPresetsTab } from './tabs/presets.js';
 import { createDiffTab } from './tabs/diff.js';
 import { createIoTab } from './tabs/io.js';
+import { createShelfTab } from './tabs/shelf.js';
 import { createSettingsTab } from './tabs/settings.js';
 
 /**
@@ -53,7 +56,7 @@ export function openWindow({ title, content, onClose }) {
 
 /**
  * Open the main window: tab strip + Library/Presets/Diff/Import-Export/
- * Settings panes, wired to the bridge. Library "Open" switches to the
+ * Shelf/Settings panes, wired to the bridge. Library "Open" switches to the
  * Presets tab and opens the preset. The connection toolbar above the tabs
  * switches ST's live connection to a Model's profile.
  * @param {import('./bridge.js').Bridge} bridge
@@ -67,12 +70,14 @@ export function openMainWindow(bridge) {
     /** @type {any} */
     let io;
     /** @type {any} */
+    let shelf;
+    /** @type {any} */
     let settings;
     /** @type {(() => void)|null} */
     let unwireModelPicker = null;
     const win = openWindow({
         title: 'Preset Manager',
-        onClose: () => { presets?.destroy(); diff?.destroy(); io?.destroy(); settings?.destroy(); unwireModelPicker?.(); },
+        onClose: () => { presets?.destroy(); diff?.destroy(); io?.destroy(); shelf?.destroy(); settings?.destroy(); unwireModelPicker?.(); },
         content: `
             <div class="pm-toolbar">
                 <label class="pm-model-label">Model</label>
@@ -84,6 +89,7 @@ export function openMainWindow(bridge) {
                 <button type="button" class="pm-tab menu_button" data-tab="presets">Presets</button>
                 <button type="button" class="pm-tab menu_button" data-tab="diff">Diff</button>
                 <button type="button" class="pm-tab menu_button" data-tab="io">Import/Export</button>
+                <button type="button" class="pm-tab menu_button" data-tab="shelf">Shelf</button>
                 <button type="button" class="pm-tab menu_button" data-tab="settings">Settings</button>
             </div>
             <div class="pm-pane" data-pane="library">
@@ -92,6 +98,7 @@ export function openMainWindow(bridge) {
             <div class="pm-pane" data-pane="presets" hidden></div>
             <div class="pm-pane" data-pane="diff" hidden></div>
             <div class="pm-pane" data-pane="io" hidden></div>
+            <div class="pm-pane" data-pane="shelf" hidden></div>
             <div class="pm-pane" data-pane="settings" hidden></div>`,
     });
     const root = win.root;
@@ -119,6 +126,7 @@ export function openMainWindow(bridge) {
         }
         if (name === 'diff') void diff.refresh();
         if (name === 'io') void io.refresh();
+        if (name === 'shelf') void shelf.refresh();
         if (name === 'settings') void settings.refresh();
     };
     for (const tab of /** @type {HTMLElement[]} */ (Array.from(root.querySelectorAll('.pm-tab')))) {
@@ -146,6 +154,11 @@ export function openMainWindow(bridge) {
         /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="io"]')),
         bridge,
         { onOpen, onLibraryChanged: () => void refresh(libRoot, bridge, { onOpen }) },
+    );
+
+    shelf = createShelfTab(
+        /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="shelf"]')),
+        bridge,
     );
 
     settings = createSettingsTab(

@@ -288,3 +288,56 @@ export function findLeaf(doc, key) {
     }
     return null;
 }
+
+/**
+ * Flatten one loadout's outline into the shelf panel's cross-preset copy
+ * rows: a leaf per row (ghosts skipped — nothing to copy), a group's header
+ * and options collapsed into one draggable row (the whole group copies as a
+ * unit) followed by its block options as their own rows, and a section's
+ * header (when set) followed by its children one level deeper.
+ *
+ * @param {any} doc library document
+ * @returns {Array<
+ *   { kind: 'leaf', identifier: string, leafKind: 'block'|'marker'|'ghost', name: string, depth: number, heading: 'section'|null } |
+ *   { kind: 'group', groupKey: string, name: string, cardinality: 'pick-one'|'pick-one-or-more', count: number, depth: number }
+ * >}
+ */
+export function sourceItems(doc) {
+    /** @type {any[]} */
+    const items = [];
+    const visit = (/** @type {any} */ node, /** @type {number} */ depth) => {
+        if (node.type === 'leaf') {
+            if (node.leafKind === 'ghost') return;
+            items.push({ kind: 'leaf', identifier: node.identifier, leafKind: node.leafKind, name: node.name, depth, heading: null });
+            return;
+        }
+        if (node.type === 'group') {
+            const count = (node.header && node.header.leafKind === 'block' ? 1 : 0)
+                + node.options.filter((/** @type {any} */ o) => o.leafKind === 'block').length;
+            items.push({
+                kind: 'group',
+                groupKey: node.key,
+                name: node.header?.name || node.name || '(options)',
+                cardinality: node.cardinality,
+                count,
+                depth,
+            });
+            for (const o of node.options) {
+                if (o.leafKind === 'ghost') continue;
+                items.push({ kind: 'leaf', identifier: o.identifier, leafKind: o.leafKind, name: o.name, depth: depth + 1, heading: null });
+            }
+            return;
+        }
+        // section
+        if (node.header && node.header.leafKind !== 'ghost') {
+            items.push({ kind: 'leaf', identifier: node.header.identifier, leafKind: node.header.leafKind, name: node.name || node.header.name, depth, heading: 'section' });
+            for (const child of node.nodes) visit(child, depth + 1);
+            return;
+        }
+        for (const child of node.nodes) visit(child, depth);
+    };
+    for (const seq of buildOutline(doc).sequences) {
+        for (const node of seq.nodes) visit(node, 0);
+    }
+    return items;
+}

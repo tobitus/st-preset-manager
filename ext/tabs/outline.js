@@ -218,6 +218,44 @@ function listKeys(ul) {
 }
 
 /**
+ * @param {Element} li a `li.pm-node`
+ * @returns {string|null} its own data-key, or (headerless group/section, whose
+ *   own data-key is empty) its first descendant leaf's data-key
+ */
+function firstKey(li) {
+    const own = /** @type {HTMLElement} */ (li).dataset.key;
+    if (own) return own;
+    const desc = li.querySelector('li.pm-node[data-key]:not([data-key=""])');
+    return desc ? /** @type {HTMLElement} */ (desc).dataset.key ?? null : null;
+}
+
+/**
+ * The `before` anchor for an element just dropped (by jQuery UI sortable)
+ * into one of the outline's `ul.pm-list` lists: the key of the first row
+ * BELOW the drop point, climbing out of nested lists at their end (a drop at
+ * the very end of the whole outline anchors on nothing, `null`).
+ *
+ * @param {Element} li the dropped `li.pm-node`
+ * @returns {string|null}
+ */
+export function dropAnchor(li) {
+    /** @type {Element|null} */
+    let node = li;
+    while (node) {
+        for (let sib = node.nextElementSibling; sib; sib = sib.nextElementSibling) {
+            if (sib.matches('li.pm-node')) {
+                const k = firstKey(sib);
+                if (k) return k;
+            }
+        }
+        const parentLi = node.parentElement?.closest('li.pm-node') ?? null;
+        if (!parentLi || !parentLi.closest('.pm-outline')) return null;
+        node = parentLi;
+    }
+    return null;
+}
+
+/**
  * @param {HTMLElement} container the .pm-outline element
  * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void> }} handlers
  * @returns {{ render(doc: any, selectedKey: string|null): void, destroy(): void }}
@@ -322,7 +360,9 @@ export function createOutline(container, handlers) {
         for (const ul of container.querySelectorAll('ul.pm-list')) {
             /** @type {(string|null)[]} */
             let keysBefore = [];
-            // connectWith arrives in Phase 6; keep all options in one literal.
+            // Outline lists only RECEIVE cross-list drops (the shelf panel's
+            // sortable connects to them; see shelf-panel.js) and never send
+            // them — no connectWith here.
             JQ(ul).sortable({
                 handle: '> .pm-row > .pm-drag-handle',
                 items: '> li.pm-node',

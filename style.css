@@ -729,6 +729,12 @@ ul.pm-list ul.pm-list {
     overflow: hidden;
 }
 
+.pm-pane[data-pane="shelf"]:not([hidden]) {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
 .pm-diff {
     display: flex;
     flex-direction: column;
@@ -866,4 +872,155 @@ ul.pm-list ul.pm-list {
 .pm-diff-op {
     display: inline-block;
     width: 1.5ch;
+}
+
+/* Phase 6: shelf */
+.pm-shelf-panel {
+    flex: 0 0 260px;
+    min-width: 0;
+    overflow: auto;
+    border-left: 1px solid var(--SmartThemeBorderColor, #444);
+    padding-left: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.pm-shelf-panel[hidden] {
+    display: none;
+}
+
+.pm-split:has(> .pm-shelf-panel:not([hidden])) .pm-outline {
+    flex-basis: 45%;
+}
+
+.pm-shelf-panel-head {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.pm-shelf-panel-head .text_pole {
+    margin: 0;
+    flex: 1;
+    min-width: 0;
+}
+
+.pm-shelf-hint, .pm-shelf-empty {
+    font-size: 12px;
+    opacity: 0.75;
+}
+
+ul.pm-shelf-list, ul.pm-shelf-items {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+li.pm-src-item .pm-row {
+    cursor: default;
+}
+
+.pm-src-group .pm-name, .pm-src-heading .pm-name {
+    font-weight: bold;
+}
+
+.pm-shelf-toggle.pm-active {
+    outline: 1px solid rgba(80, 160, 255, 0.8);
+}
+
+/* the drag helper lives in document.body */
+body > li.pm-src-item {
+    list-style: none;
+    background: var(--SmartThemeBlurTintColor, #222);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    padding: 2px 6px;
+    opacity: 0.9;
+}
+
+/* Shelf tab */
+.pm-shelf-tab {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    height: 100%;
+    min-height: 0;
+}
+
+.pm-shelf-status {
+    font-size: 12px;
+    min-height: 1em;
+}
+
+.pm-shelf-status.pm-error {
+    color: #ff9c9c;
+    font-weight: bold;
+}
+
+.pm-shelf-split {
+    display: flex;
+    gap: 8px;
+    flex: 1;
+    min-height: 0;
+}
+
+.pm-shelf-split[hidden], .pm-shelf-tab-empty[hidden] {
+    display: none;
+}
+
+ul.pm-shelf-items {
+    flex: 0 0 38%;
+    overflow: auto;
+}
+
+li.pm-shelf-item {
+    padding: 4px 6px;
+    cursor: pointer;
+    display: flex;
+    flex-direction: column;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+li.pm-shelf-item.pm-selected {
+    background: rgba(80, 160, 255, 0.25);
+}
+
+.pm-shelf-item-from, .pm-shelf-meta {
+    font-size: 12px;
+    opacity: 0.7;
+}
+
+.pm-shelf-detail {
+    flex: 1;
+    min-width: 0;
+    overflow: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.pm-shelf-rename-row {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.pm-shelf-rename-row .text_pole {
+    flex: 1;
+    margin: 0;
+}
+
+pre.pm-shelf-content {
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    max-height: 40vh;
+    overflow: auto;
+    background: rgba(0, 0, 0, 0.2);
+    padding: 6px;
+    margin: 0;
+}
+
+#pm-window .pm-shelf-detail > .menu_button {
+    align-self: flex-start;
 }

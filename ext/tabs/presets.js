@@ -1,6 +1,8 @@
 /**
- * Presets tab (sub-phase 2b): a tab strip of open presets plus the active
- * preset's view (loadout bar, rank bar, status line, outline/editor split).
+ * Presets tab (sub-phase 2b, extended in Phase 6): a tab strip of open
+ * presets plus the active preset's view (loadout bar, rank bar, status
+ * line, outline/editor split, and a toggleable right-hand shelf panel for
+ * cross-preset / shelf block copies).
  *
  * Re-render strategy: the view skeleton is built ONCE per activation, so the
  * outline/editor/notes state survives refreshes; afterwards only the loadout
@@ -12,6 +14,8 @@ import { api } from '../st.js';
 import { createOutline } from './outline.js';
 import { createEditor } from './editor.js';
 import { createModelPanel } from './model-panel.js';
+import { createShelfPanel } from './shelf-panel.js';
+import { findLeaf } from '../outline-model.js';
 
 /**
  * @typedef {object} PresetView
@@ -24,6 +28,7 @@ import { createModelPanel } from './model-panel.js';
  * @property {HTMLInputElement} loadoutName typed loadout name
  * @property {HTMLButtonElement} deleteBtn two-click-armed delete
  * @property {HTMLButtonElement[]} rankButtons promote/demote/move up/down
+ * @property {HTMLButtonElement} shelfSaveBtn 'Save to shelf' button
  * @property {HTMLTextAreaElement} notes preset notes textarea
  * @property {{ render(doc: any, selectedKey: string|null): void, destroy(): void }} outline
  * @property {{ render(): void, destroy(): void }} modelPanel
@@ -33,6 +38,8 @@ import { createModelPanel } from './model-panel.js';
  * @property {boolean} deleteArmed first delete click happened
  * @property {any} deleteTimer restore-'Delete' timer
  * @property {string|null} selectNextLid loadout to select after creation
+ * @property {HTMLElement} shelfPanelEl the `.pm-shelf-panel` element
+ * @property {{ render(): Promise<void>, destroy(): void }} shelfPanel
  */
 
 /**
@@ -48,6 +55,8 @@ export function createPresetsTab(pane, bridge) {
     const /** @type {Map<string, string|null>} */ selected = new Map();
     let /** @type {PresetView|null} */ view = null;
     let /** @type {any} */ refreshTimer = undefined;
+    let shelfOpen = false;
+    let shelfSource = 'shelf';
 
     pane.innerHTML = `
         <div class="pm-preset-tabs"></div>
@@ -127,7 +136,7 @@ export function createPresetsTab(pane, bridge) {
             openIds.push(presetId);
         }
         if (active !== presetId) activate(presetId);
-        else { renderTabs(); refreshView(); }
+        else { renderTabs(); refreshView(); if (view && shelfOpen) void view.shelfPanel.render(); }
     }
 
     /** Remove from state; activate the neighbour or show the empty text. */
@@ -145,6 +154,7 @@ export function createPresetsTab(pane, bridge) {
             else renderTabs();
         } else {
             renderTabs();
+            if (view && shelfOpen) void view.shelfPanel.render();
         }
     }
 
@@ -153,6 +163,7 @@ export function createPresetsTab(pane, bridge) {
         if (view.deleteTimer) clearTimeout(view.deleteTimer);
         view.outline.destroy();
         view.modelPanel.destroy();
+        view.shelfPanel.destroy();
         view.root.remove();
         view = null;
     }
@@ -179,6 +190,8 @@ export function createPresetsTab(pane, bridge) {
                 <button class="pm-rank-demote menu_button" title="Demote the selected row">Demote (Shift+Tab)</button>
                 <button class="pm-move-up menu_button" title="Move the selected row up">↑ (Alt+↑)</button>
                 <button class="pm-move-down menu_button" title="Move the selected row down">↓ (Alt+↓)</button>
+                <button class="pm-shelf-save menu_button" title="Save the selected block to the shelf">Save to shelf</button>
+                <button class="pm-shelf-toggle menu_button" title="Show the shelf list (drag blocks into this preset)">Shelf ▸</button>
             </div>
             <div class="pm-status"></div>
             <div class="pm-split">
@@ -192,6 +205,7 @@ export function createPresetsTab(pane, bridge) {
                     </div>
                     <div class="pm-model-panel-host"></div>
                 </div>
+                <div class="pm-shelf-panel" hidden></div>
             </div>`;
         const q = (/** @type {string} */ sel) => /** @type {any} */ (root.querySelector(sel));
         const outlineEl = /** @type {HTMLElement} */ (q('.pm-outline'));
@@ -207,6 +221,7 @@ export function createPresetsTab(pane, bridge) {
             loadoutName: q('.pm-loadout-name'),
             deleteBtn: q('.pm-loadout-delete'),
             rankButtons: [q('.pm-rank-promote'), q('.pm-rank-demote'), q('.pm-move-up'), q('.pm-move-down')],
+            shelfSaveBtn: q('.pm-shelf-save'),
             notes: q('.pm-preset-notes'),
             outline: createOutline(outlineEl, {
                 onSelect: (/** @type {string|null} */ key) => {
@@ -224,6 +239,8 @@ export function createPresetsTab(pane, bridge) {
             deleteTimer: null,
             selectNextLid: null,
             modelPanel: /** @type {any} */ (null),
+            shelfPanelEl: q('.pm-shelf-panel'),
+            shelfPanel: /** @type {any} */ (null),
         };
         nextView.modelPanel = createModelPanel(q('.pm-model-panel-host'), {
             bridge,
@@ -231,6 +248,14 @@ export function createPresetsTab(pane, bridge) {
             getDoc: () => docs.get(id),
             setDoc: (/** @type {any} */ d) => setDoc(id, d),
             getLoadoutId: () => nextView.picker.value,
+        });
+        nextView.shelfPanel = createShelfPanel(nextView.shelfPanelEl, {
+            bridge,
+            sources: () => openIds.filter((x) => x !== id).map((x) => ({ id: x, name: docs.get(x)?.name ?? x })),
+            getDoc: (/** @type {string} */ x) => docs.get(x),
+            getSource: () => shelfSource,
+            setSource: (/** @type {string} */ s) => { shelfSource = s; },
+            onCopy: (/** @type {any} */ src, /** @type {string|null} */ before) => copyInto(id, src, before),
         });
         nextView.picker.addEventListener('change', () => nextView.modelPanel.render());
         q('.pm-loadout-new').addEventListener('click', () => void newLoadout(nextView));
@@ -241,11 +266,28 @@ export function createPresetsTab(pane, bridge) {
         q('.pm-rank-demote').addEventListener('click', () => rankOp(id, 'demote'));
         q('.pm-move-up').addEventListener('click', () => rankOp(id, 'moveLeaf', -1));
         q('.pm-move-down').addEventListener('click', () => rankOp(id, 'moveLeaf', 1));
+        q('.pm-shelf-save').addEventListener('click', () => void saveToShelf(nextView));
+        q('.pm-shelf-toggle').addEventListener('click', () => {
+            shelfOpen = !shelfOpen;
+            applyShelfOpen(nextView);
+        });
         nextView.notes.addEventListener('input', () => { nextView.notesDirty = true; nextView.notesRev++; });
         q('.pm-preset-notes-save').addEventListener('click', () => void saveNotes(nextView));
         host.replaceChildren(root);
         view = nextView;
+        applyShelfOpen(nextView);
         refreshView();
+    }
+
+    /** Show/hide the shelf panel; toggle button label/state; render when opened. */
+    function applyShelfOpen(/** @type {PresetView} */ v) {
+        v.shelfPanelEl.hidden = !shelfOpen;
+        const btn = /** @type {HTMLElement} */ (v.root.querySelector('.pm-shelf-toggle'));
+        if (btn) {
+            btn.classList.toggle('pm-active', shelfOpen);
+            btn.textContent = shelfOpen ? 'Shelf ◂' : 'Shelf ▸';
+        }
+        if (shelfOpen) void v.shelfPanel.render();
     }
 
     /** @param {'promote'|'demote'|'moveLeaf'} op @param {number} [delta] */
@@ -314,6 +356,7 @@ export function createPresetsTab(pane, bridge) {
         refreshLoadoutBar(doc);
         const key = selected.get(view.id) ?? null;
         for (const b of view.rankButtons) b.disabled = !key;
+        view.shelfSaveBtn.disabled = !key;
         if (!view.notesDirty) view.notes.value = doc.notes ?? '';
         view.outline.render(doc, key);
         view.editor.show(doc, key);
@@ -421,6 +464,68 @@ export function createPresetsTab(pane, bridge) {
         refreshView();
     }
 
+    /** Save the selected outline row (leaf) as a new shelf entry. */
+    async function saveToShelf(/** @type {PresetView} */ v) {
+        const id = v.id;
+        const key = selected.get(id);
+        if (!key) return;
+        const doc = docs.get(id);
+        if (!doc) return;
+        const found = findLeaf(doc, key);
+        if (!found) return;
+        try {
+            const entry = await bridge.edit(() => api('POST', '/shelf', { fromPresetId: id, identifier: found.identifier }));
+            setStatus(`Saved "${entry.name}" to the shelf`);
+            toast('success', `Saved "${entry.name}" to the shelf`);
+        } catch (err) {
+            const message = /** @type {any} */ (err).body?.error ?? /** @type {any} */ (err).message;
+            setStatus(message, true);
+            toast('error', message);
+        }
+    }
+
+    /**
+     * Copy a shelf entry or a source preset's block/group into `targetId`,
+     * before the given leaf key (or at the end when `before` is null).
+     * @param {string} targetId
+     * @param {{ shelfId: string } | { fromPresetId: string, identifier: string } | { fromPresetId: string, group: string }} src
+     * @param {string|null} before
+     */
+    async function copyInto(targetId, src, before) {
+        try {
+            const res = await bridge.edit(() => api('POST', `/presets/${targetId}/ops`, { op: 'copyBlock', ...src, before }));
+            setDoc(targetId, res.doc);
+            let text = `Copied ${res.identifiers.length} block(s)`;
+            if (res.warnings?.length) {
+                toast('warning', res.warnings.join('\n'), 'Macro warning');
+                text += ` — ${res.warnings.length} macro warning(s)`;
+            }
+            if (view?.id === targetId) setStatus(text);
+        } catch (err) {
+            const message = /** @type {any} */ (err).body?.error ?? /** @type {any} */ (err).message;
+            toast('error', message, 'Copy refused');
+            if (view?.id === targetId) setStatus(message, true);
+            await regetDoc(targetId);
+        }
+        if (view?.id === targetId) refreshView();
+    }
+
+    /** @param {'success'|'error'|'warning'|'info'} kind @param {string} text @param {string} [title] */
+    function toast(kind, text, title = 'Preset Manager') {
+        const t = /** @type {any} */ (globalThis).toastr;
+        if (!t) return;
+        const html = text
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;')
+            .replace(/\n/g, '<br>');
+        // escaped above; ST turns toastr's escapeHtml on globally, which
+        // would escape it twice and show the <br> literally
+        t[kind](html, title, { timeOut: kind === 'error' ? 8000 : 10000, extendedTimeOut: 4000, escapeHtml: false });
+    }
+
     /**
      * Live refresh: SSE preset events for open docs, slot events and
      * reconciles debounce into one re-GET pass over the open docs.
@@ -446,6 +551,7 @@ export function createPresetsTab(pane, bridge) {
             if (JSON.stringify(docs.get(id)) !== JSON.stringify(fresh)) {
                 docs.set(id, fresh);
                 if (id === active) refreshView();
+                else if (view && shelfOpen) void view.shelfPanel.render();
                 renderTabs();
             }
         }

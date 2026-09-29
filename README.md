@@ -177,3 +177,41 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 - Known gaps: the Diff tab has no restore/label button (REST only); the
   bottom row is a unified diff, not two side-by-side columns.
 - Check: `node dev/check-phase5.mjs` (resets dev data).
+
+## Phase 6: Block shelf and cross-preset copy
+
+- **Shelf** (`shelf/<id>.json`, held in memory and published through the
+  store queue with the global rev): a library of reusable blocks. Presets
+  tab → select a block → *Save to shelf*. The **Shelf tab** lists the items
+  (name, source preset), and renames them, keeps notes on them and deletes
+  them.
+- **Shelf list** in the Presets tab (*Shelf ▸* toggles it, on the right).
+  Its source is the shelf or any other open preset (groups show as one row
+  plus their options). Drag a row into the outline: jQuery UI sortable
+  `connectWith` puts the drop between two rows. The drop becomes ONE
+  `copyBlock` op anchored at the row below the drop point (`before`). A
+  block dropped among a group's options joins that group. A block dropped
+  above a group or section heading lands above it. A whole group lands as
+  heading plus options, with its name and cardinality, and snaps above a
+  group it was dropped into (it never splits one). A drop at the end of a
+  nested list lands after that container.
+- **Copy rules**: every copied block gets a freshly minted identifier (two
+  copies of one shelf item never share one). Copied blocks start off in
+  every loadout. `fields.marker` is forced false. Markers never transfer:
+  the shelf and `copyBlock` answer 400, and the UI shows the error as a
+  toast. A group's marker and ghost members are skipped.
+- **Macro warnings** (v1 `token_warnings`): a copied block's `{{…}}` or
+  `{word…}` tokens that appear in no other block of the target (content or
+  name) produce a warning toast. `{{// comments}}` never warn, and neither
+  do `{{char}}`/`{{user}}`. v1's `rstrip("}")` made that last check dead
+  code; v2 implements its stated intent.
+- REST added: `POST /presets/:id/ops {op: 'copyBlock', shelfId |
+  fromPresetId + (identifier | group), before}` → `{doc, rev, warnings,
+  identifiers, keys, group}`; `GET /shelf/:id`; `PATCH /shelf/:id {name?,
+  notes?, tags?}`; `POST /shelf {fromPresetId, identifier} | {block}` accepts
+  `name?`, `notes?` and `tags?`.
+- Known gaps: sections copy only block by block (no whole-section copy). A
+  drop at the very end of a second sequence appends to the first. Dragging
+  from the outline into the shelf list is not supported (use *Save to
+  shelf*).
+- Check: `node dev/check-phase6.mjs` (resets dev data).

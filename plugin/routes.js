@@ -330,7 +330,7 @@ export function makeRouter() {
         'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'moveLeaf',
         'createGroup', 'renameGroup', 'addOption', 'removeOption',
         'setContent', 'editBlock', 'renameBlock', 'addBlock', 'deleteBlock',
-        'setSettings', 'setBlockNotes', 'setNotes',
+        'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock',
     ]);
     router.post('/presets/:id/ops', async (req, res, next) => {
         try {
@@ -338,6 +338,12 @@ export function makeRouter() {
             const { op } = req.body ?? {};
             if (!op) throw new StoreError('missing op', 400);
             if (!OPS.includes(op)) throw new StoreError(`unknown op '${op}'`, 400);
+            if (op === 'copyBlock') {
+                const out = await store.copyBlock(req.params.id, req.body ?? {});
+                broadcast(req, 'preset', req.params.id);
+                res.json({ doc: out.doc, rev: store.rev, warnings: out.warnings, identifiers: out.identifiers, keys: out.keys, group: out.group });
+                return;
+            }
             const saved = await store.enqueue(async () => {
                 const doc = store.getDocNow(req.params.id);
                 if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
@@ -1002,11 +1008,25 @@ export function makeRouter() {
         res.json(req.pm.store.shelfList());
     });
 
+    router.get('/shelf/:id', (req, res, next) => {
+        try {
+            res.json(req.pm.store.shelfGet(req.params.id));
+        } catch (err) { next(err); }
+    });
+
     router.post('/shelf', async (req, res, next) => {
         try {
             const entry = await req.pm.store.shelfAdd(req.body ?? {});
             broadcast(req, 'shelf', null);
             res.status(201).json(entry);
+        } catch (err) { next(err); }
+    });
+
+    router.patch('/shelf/:id', async (req, res, next) => {
+        try {
+            const entry = await req.pm.store.shelfUpdate(req.params.id, req.body ?? {});
+            broadcast(req, 'shelf', null);
+            res.json(entry);
         } catch (err) { next(err); }
     });
 
