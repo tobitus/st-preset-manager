@@ -41,6 +41,24 @@ import { canonicalJson } from './canonical.js';
 // fields whose difference makes a matched row "changed"
 export const ROW_FIELDS = ['content', 'role', 'injection_position', 'injection_depth', 'injection_order', 'enabled'];
 
+/**
+ * Largest leaf count (blocks, markers, ghosts of sequences[0]) per side.
+ * POST /diff runs comparePresets synchronously in ST's own process, and the
+ * anchored move chain is O(k²); real presets have < 300 leaves, and 5,000
+ * keeps the worst allowed case well under a second (Phase 5 review 2).
+ */
+export const MAX_DIFF_LEAVES = 5000;
+
+/** A request too large to compare (413, like /diff/blocks' DiffError). */
+export class CompareError extends Error {
+    /** @param {string} message */
+    constructor(message) {
+        super(message);
+        this.name = 'CompareError';
+        this.status = 413;
+    }
+}
+
 const EMOJI_RE = /[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{1F1E6}-\u{1F1FF}\u{2B00}-\u{2BFF}\u{FE00}-\u{FE0F}\u{2190}-\u{21FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{200D}♀♂]/gu;
 
 /**
@@ -227,6 +245,12 @@ function anchoredChain(a, b, pairs) {
  * @returns {{rows: any[], settings: {key: string, a?: any, b?: any}[], counts: Record<string, number>, identical: boolean}}
  */
 export function comparePresets(a, b) {
+    for (const [label, doc] of [['a', a], ['b', b]]) {
+        const leaves = flattenSeq(doc.sequences?.[0]?.rows ?? []).length;
+        if (leaves > MAX_DIFF_LEAVES) {
+            throw new CompareError(`preset ${label} too large to compare (${leaves} leaves, limit ${MAX_DIFF_LEAVES})`);
+        }
+    }
     const leftOrder = blockOrder(a);
     const rightOrder = blockOrder(b);
     const rightById = new Map(rightOrder.map((r) => [r.identifier, r]));

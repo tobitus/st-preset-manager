@@ -11,7 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { comparePresets, normName, blockOrder, ROW_FIELDS } from '../shared/compare.js';
+import { comparePresets, normName, blockOrder, ROW_FIELDS, CompareError, MAX_DIFF_LEAVES } from '../shared/compare.js';
 import { importStPreset } from '../shared/recognizers.js';
 import { ensureDefaultLoadout } from '../plugin/store.js';
 
@@ -225,4 +225,39 @@ test('markers anchor moves: the marker is never the one sacrificed to keep a blo
 test('markers anchor moves: a marker present on one side only is not an anchor', () => {
     const res = comparePresets(mkMarked(['a', '@worldInfoBefore', 'b'], [B('a'), B('b')]), mkMarked(['a', 'b'], [B('a'), B('b')]));
     assert.deepEqual(summary(res), ['same:a>a', 'same:b>b']);
+});
+
+// Phase 5 review 2: POST /diff runs comparePresets synchronously in ST's
+// process and move detection is quadratic in the leaf count, so each side is
+// bounded (the same 413 policy as /diff/blocks).
+test('size bound: a side over MAX_DIFF_LEAVES leaves is refused with 413', () => {
+    assert.ok(MAX_DIFF_LEAVES <= 5000, `MAX_DIFF_LEAVES ${MAX_DIFF_LEAVES}`);
+    const ids = Array.from({ length: MAX_DIFF_LEAVES + 1 }, (_, i) => `b${i}`);
+    const big = mkDoc(ids.map((x) => B(x)));
+    const small = mkDoc([B('b0')]);
+    for (const [l, r] of [[big, small], [small, big]]) {
+        assert.throws(() => comparePresets(l, r), (/** @type {any} */ e) => e instanceof CompareError && e.status === 413);
+    }
+    // markers count toward the bound too
+    const withMarker = mkMarked(['@chatHistory', ...ids.slice(0, MAX_DIFF_LEAVES)], ids.slice(0, MAX_DIFF_LEAVES).map((x) => B(x)));
+    assert.throws(() => comparePresets(withMarker, small), CompareError);
+});
+
+test('size bound: the worst allowed case (every block reordered, markers interleaved) finishes fast', () => {
+    const n = MAX_DIFF_LEAVES;
+    const order = Array.from({ length: n }, (_, i) => (i % 500 === 0 ? `@m${i}` : `b${i}`));
+    const blocks = order.filter((x) => !x.startsWith('@')).map((x) => B(x));
+    const left = mkMarked(order, blocks);
+    // right: blocks reversed inside a fixed marker skeleton -> maximal chain work
+    const rev = order.filter((x) => !x.startsWith('@')).reverse();
+    let k = 0;
+    const right = mkMarked(order.map((x) => (x.startsWith('@') ? x : rev[k++])), blocks);
+    for (const [l, r] of [[left, structuredClone(left)], [left, right]]) {
+        const t0 = performance.now();
+        const res = comparePresets(l, r);
+        const ms = performance.now() - t0;
+        console.log(`# worst allowed compare: ${n} leaves -> ${ms.toFixed(1)} ms`);
+        assert.ok(ms < 1000, `compare of ${n} leaves took ${ms.toFixed(0)} ms`);
+        assert.equal(res.rows.length, blocks.length);
+    }
 });

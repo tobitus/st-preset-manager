@@ -157,7 +157,9 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   to integers, with the common prefix/suffix trimmed; unified-diff hunks with
   3 lines of context. It runs inside ST's own process, so a request is
   refused with 413 when the trimmed table exceeds 4 M cells or the input
-  exceeds 2 M characters; the worst allowed case takes ~25 ms.
+  exceeds 2 M characters; the worst allowed case takes ~25 ms. `POST /diff`
+  refuses a preset with more than 5,000 leaves (413); the worst allowed
+  compare takes ~30 ms.
 - **Diff tab races**: every picker change and every Compare invalidates
   pending results; headers come from the request that rendered the rows.
 - **Revisions**: every mutation snapshots the pre-edit document, coalesced:
