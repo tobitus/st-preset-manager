@@ -339,6 +339,10 @@ async function main() {
         const extra = names.filter((/** @type {string} */ n) => !TOOL_NAMES.includes(n));
         must(!missing.length && !extra.length, `missing ${J(missing)} extra ${J(extra)}`);
         must(tools.every((/** @type {any} */ t) => t.inputSchema?.type === 'object' && t.description), 'a tool lacks an object schema or a description');
+        const future = await rpc('initialize', { protocolVersion: '2099-01-01', capabilities: {} });
+        must(future.result?.protocolVersion === '2025-06-18', `unsupported version negotiation ${J(future)}`);
+        const malformed = await rpc('initialize', { protocolVersion: 7 });
+        must(malformed.error?.code === -32602, `malformed initialize ${J(malformed)}`);
         return `server ${init.result.serverInfo.name} ${init.result.serverInfo.version}, protocol ${init.result.protocolVersion}; ${tools.length} tools, all mapped, all with object schemas`;
     });
 
@@ -422,13 +426,17 @@ async function main() {
         const l = await tool('slot_load', { presetId: bad });
         const lRest = await api('POST', '/slot/load', { presetId: bad });
         must(l.isError && l.data.status === 404 && l.data.error === lRest.json.error, `slot_load -> ${J(l)} / REST ${lRest.status} ${J(lRest.json)}`);
-        const m = await tool('preset_get', {});
-        must(m.isError && /presetId/.test(String(m.data)), `missing arg -> ${J(m)}`);
+        const beforeInvalid = proxy.log.length;
+        const m = await rpc('tools/call', { name: 'preset_get', arguments: {} });
+        must(m.error?.code === -32602 && /presetId/.test(m.error.message), `missing arg -> ${J(m)}`);
+        const dot = await rpc('tools/call', { name: 'loadout_delete', arguments: { presetId: ids.sola, loadoutId: '..' } });
+        must(dot.error?.code === -32602 && /loadoutId/.test(dot.error.message), `dot segment -> ${J(dot)}`);
+        must(proxy.log.length === beforeInvalid, 'an invalid path argument reached HTTP');
         const u = await rpc('tools/call', { name: 'no_such_tool', arguments: {} });
         must(u.error?.code === -32602, `unknown tool -> ${J(u)}`);
         const x = await rpc('resources/list', {});
         must(x.error?.code === -32601, `unknown method -> ${J(x)}`);
-        return `preset_get: isError ${J(g.data)}; slot_load: isError ${J(l.data)}; missing presetId: isError; unknown tool -32602; unknown method -32601`;
+        return `preset_get: isError ${J(g.data)}; slot_load: isError ${J(l.data)}; missing/dot path args -32602 without HTTP; unknown tool -32602; unknown method -32601`;
     });
 
     // ------------------------------------------------------------------ 7g

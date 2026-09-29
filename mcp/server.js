@@ -14,6 +14,7 @@ import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 const VERSION = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+const PROTOCOL_VERSION = '2025-06-18';
 const PLUGIN = '/api/plugins/st-preset-manager';
 const obj = (properties = {}, required = []) => ({ type: 'object', properties, ...(required.length ? { required } : {}) });
 const str = (description) => ({ type: 'string', description });
@@ -87,6 +88,7 @@ export function createSession({ stUrl, user, password, log }) {
     const base = stUrl.replace(/\/+$/, '');
     const jar = new Map();
     let token = null;
+    let generation = 0;
     /** @type {Promise<void>|null} */
     let refreshing = null;
 
@@ -131,6 +133,7 @@ export function createSession({ stUrl, user, password, log }) {
             }
             await fetchToken();
         }
+        generation += 1;
     }
     async function refresh() {
         if (!refreshing) {
@@ -142,19 +145,20 @@ export function createSession({ stUrl, user, password, log }) {
     async function request(method, pluginPath, body = undefined) {
         if (!token) await refresh();
         const run = async () => {
+            const usedGeneration = generation;
             const headers = new Headers({ 'x-csrf-token': /** @type {string} */ (token) });
             if (body !== undefined) headers.set('content-type', 'application/json');
             const res = await send(`${base}${PLUGIN}${pluginPath}`, {
                 method, headers, ...(body === undefined ? {} : { body: JSON.stringify(body) }),
             });
-            return responseBody(res);
+            return { out: await responseBody(res), usedGeneration };
         };
-        let out = await run();
-        if (out.status === 403) {
-            await refresh();
-            out = await run();
+        let attempt = await run();
+        if (attempt.out.status === 403) {
+            if (attempt.usedGeneration === generation) await refresh();
+            attempt = await run();
         }
-        return out;
+        return attempt.out;
     }
     void log;
     return { refresh, request };
@@ -163,6 +167,20 @@ export function createSession({ stUrl, user, password, log }) {
 /** @param {any} value */
 function plainObject(value) {
     return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+/** Reject URL dot segments even when the caller encoded them one or more times. @param {any} value */
+function unsafePathArgument(value) {
+    if (value === undefined || value === null || value === '') return true;
+    let decoded = String(value);
+    for (let i = 0; i < 4; i++) {
+        let next;
+        try { next = decodeURIComponent(decoded); }
+        catch { return true; }
+        if (next === decoded) break;
+        decoded = next;
+    }
+    return decoded === '.' || decoded === '..';
 }
 
 /**
@@ -184,8 +202,8 @@ export function createMcpServer({ session, write, log }) {
         const args = plainObject(params?.arguments) ? params.arguments : {};
         const pathNames = [...tool.path.matchAll(/:(\w+)/g)].map((m) => m[1]);
         for (const name of pathNames) {
-            if (args[name] === undefined || args[name] === null || args[name] === '') {
-                return emit({ id, result: { content: [{ type: 'text', text: `missing required argument "${name}"` }], isError: true } });
+            if (unsafePathArgument(args[name])) {
+                return error(id, -32602, `Invalid path argument: ${name}`);
             }
         }
         let path = tool.path.replace(/:(\w+)/g, (_m, name) => encodeURIComponent(String(args[name])));
@@ -226,7 +244,11 @@ export function createMcpServer({ session, write, log }) {
         try {
             switch (message.method) {
                 case 'initialize':
-                    emit({ id, result: { protocolVersion: message.params?.protocolVersion ?? '2025-06-18', capabilities: { tools: {} }, serverInfo: { name: 'st-preset-manager', version: VERSION } } });
+                    if (!plainObject(message.params) || typeof message.params.protocolVersion !== 'string') {
+                        error(id, -32602, 'Invalid initialize params');
+                        break;
+                    }
+                    emit({ id, result: { protocolVersion: message.params.protocolVersion === PROTOCOL_VERSION ? message.params.protocolVersion : PROTOCOL_VERSION, capabilities: { tools: {} }, serverInfo: { name: 'st-preset-manager', version: VERSION } } });
                     break;
                 case 'ping': emit({ id, result: {} }); break;
                 case 'tools/list': emit({ id, result: { tools: TOOLS.map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) } }); break;
@@ -270,9 +292,32 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
         password: process.env.ST_PASSWORD,
         log,
     });
-    const server = createMcpServer({ session, write: (line) => process.stdout.write(line), log });
+    let writes = 0;
+    /** @type {(() => void)[]} */
+    let writeWaiters = [];
+    const write = (/** @type {string} */ line) => {
+        writes += 1;
+        process.stdout.write(line, () => {
+            writes -= 1;
+            if (writes === 0) {
+                const waiters = writeWaiters;
+                writeWaiters = [];
+                for (const resolve of waiters) resolve();
+            }
+        });
+    };
+    /** @returns {Promise<void>} */
+    function writesIdle() {
+        if (writes === 0) return Promise.resolve();
+        return new Promise((resolve) => writeWaiters.push(resolve));
+    }
+    const server = createMcpServer({ session, write, log });
     void session.refresh().catch((err) => log(`startup session unavailable: ${err instanceof Error ? err.message : String(err)}`));
     process.stdin.on('data', (chunk) => server.feed(chunk));
-    process.stdin.on('end', async () => { await server.idle(); process.exit(0); });
+    process.stdin.on('end', async () => {
+        await server.idle();
+        await writesIdle();
+        process.stdout.end();
+    });
     process.stdin.resume();
 }

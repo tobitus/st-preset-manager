@@ -7,6 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
+import { spawn } from 'node:child_process';
 import { TOOLS, createMcpServer, createSession } from '../mcp/server.js';
 
 const PLUGIN = '/api/plugins/st-preset-manager';
@@ -105,7 +106,7 @@ async function callTool(/** @type {string} */ name, /** @type {any} */ args, /**
 
 // ------------------------------------------------------------------ framing
 
-test('initialize echoes protocolVersion, names the server, advertises tools', async () => {
+test('initialize negotiates only the supported protocol version', async () => {
     const h = harness();
     h.server.feed(req(1, 'initialize', { protocolVersion: '2025-06-18', capabilities: {}, clientInfo: { name: 'x', version: '0' } }));
     await h.server.idle();
@@ -116,12 +117,21 @@ test('initialize echoes protocolVersion, names the server, advertises tools', as
     assert.equal(m.result.serverInfo.name, 'st-preset-manager');
     assert.equal(typeof m.result.serverInfo.version, 'string');
     assert.deepEqual(m.result.capabilities, { tools: {} });
-    // an older client version is echoed too
-    const h2 = harness();
-    h2.server.feed(req('a', 'initialize', { protocolVersion: '2024-11-05', capabilities: {} }));
-    await h2.server.idle();
-    assert.equal(h2.msgs()[0].result.protocolVersion, '2024-11-05');
-    assert.equal(h2.msgs()[0].id, 'a');
+
+    const future = harness();
+    future.server.feed(req('a', 'initialize', { protocolVersion: '2099-01-01', capabilities: {} }));
+    await future.server.idle();
+    assert.equal(future.msgs()[0].result.protocolVersion, '2025-06-18');
+    assert.equal(future.msgs()[0].id, 'a');
+});
+
+test('initialize rejects malformed params with -32602', async () => {
+    for (const params of [undefined, null, [], {}, { protocolVersion: 7 }]) {
+        const h = harness();
+        h.server.feed(req(1, 'initialize', params));
+        await h.server.idle();
+        assert.equal(h.msgs()[0].error?.code, -32602, JSON.stringify(params));
+    }
 });
 
 test('every output is one JSON object on one line, newline-terminated', async () => {
@@ -331,11 +341,16 @@ test('HTTP error -> isError with the status and the server\'s error body', async
     assert.deepEqual(JSON.parse(r.result.content[0].text), { status: 502, error: 'Bad Gateway' });
 });
 
-test('missing path argument -> isError naming it; no HTTP call', async () => {
-    const { result, calls } = await callTool('preset_get', {});
-    assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /presetId/);
-    assert.equal(calls.length, 0);
+test('missing or unsafe path argument -> -32602; no HTTP call', async () => {
+    for (const loadoutId of [undefined, null, '', '.', '..', '%2e', '%2E%2e', '%252e%252e']) {
+        const h = harness();
+        h.server.feed(call(7, 'loadout_delete', { presetId: 'p1', ...(loadoutId === undefined ? {} : { loadoutId }) }));
+        await h.server.idle();
+        const [m] = h.msgs();
+        assert.equal(m.error?.code, -32602, `loadoutId=${String(loadoutId)}: ${JSON.stringify(m)}`);
+        assert.match(m.error.message, /loadoutId/);
+        assert.equal(h.calls.length, 0);
+    }
 });
 
 test('network failure -> isError with the message', async () => {
@@ -359,7 +374,7 @@ test('unknown tool -> JSON-RPC -32602', async () => {
 /**
  * A fake ST: /csrf-token hands out a cookie pair and a token (rotating per
  * `rotate`), /api/users/login, and the plugin paths answered by `plugin`.
- * @param {{ plugin?: (req: http.IncomingMessage, body: string, st: any) => {status: number, json?: any, html?: string, headers?: Record<string, string|string[]>}, login?: (body: any, st: any) => {status: number, json?: any, headers?: any} }} opts
+ * @param {{ plugin?: (req: http.IncomingMessage, body: string, st: any) => {status: number, json?: any, html?: string, headers?: Record<string, string|string[]>}|Promise<{status: number, json?: any, html?: string, headers?: Record<string, string|string[]>}>, login?: (body: any, st: any) => {status: number, json?: any, headers?: any} }} opts
  */
 async function fakeSt(opts = {}) {
     const st = {
@@ -372,7 +387,7 @@ async function fakeSt(opts = {}) {
     const srv = http.createServer((rq, rs) => {
         let body = '';
         rq.on('data', (c) => (body += c));
-        rq.on('end', () => {
+        rq.on('end', async () => {
             st.seen.push({ method: rq.method ?? '', url: rq.url ?? '', headers: rq.headers, body });
             /** @param {{status: number, json?: any, html?: string, headers?: any}} r */
             const send = (r) => {
@@ -392,7 +407,7 @@ async function fakeSt(opts = {}) {
                 return send(opts.login ? opts.login(JSON.parse(body || '{}'), st) : { status: 200, json: { handle: 'u' } });
             }
             if (rq.url?.startsWith(PLUGIN)) {
-                return send(opts.plugin ? opts.plugin(rq, body, st) : { status: 200, json: { ok: true } });
+                return send(opts.plugin ? await opts.plugin(rq, body, st) : { status: 200, json: { ok: true } });
             }
             send({ status: 404, json: { error: 'nope' } });
         });
@@ -465,6 +480,29 @@ test('403 -> one refresh, one retry with the new token', async () => {
         assert.equal(plugin[0].headers['x-csrf-token'], 'tk1zq');
         assert.equal(plugin[1].headers['x-csrf-token'], 'tk2zq');
         assert.equal(plugin[1].body, plugin[0].body, 'the retry resends the same body');
+    } finally { await f.close(); }
+});
+test('staggered 403s from one stale session share one completed refresh', async () => {
+    let stale = 0;
+    const f = await fakeSt({
+        plugin: async (rq) => {
+            const sent = rq.headers['x-csrf-token'];
+            if (sent === 'tk1zq') {
+                const delay = stale++ * 40;
+                await new Promise((r) => setTimeout(r, delay));
+                return { status: 403, json: { error: 'stale' } };
+            }
+            return { status: 200, json: { token: sent } };
+        },
+    });
+    try {
+        const s = createSession({ stUrl: f.url, log: () => {} });
+        await s.refresh();
+        const out = await Promise.all(['/a', '/b', '/c'].map((p) => s.request('GET', p)));
+        assert.ok(out.every((r) => r.status === 200));
+        assert.ok(out.every((r) => r.json.token === 'tk2zq'));
+        assert.equal(f.st.count('/csrf-token'), 2, 'initial session + exactly one refresh');
+        assert.equal(f.st.count(PLUGIN), 6, 'three rejected attempts + one retry each');
     } finally { await f.close(); }
 });
 
@@ -550,5 +588,37 @@ test('end to end over the fake: a tool call never leaks the cookie or the token'
             assert.ok(!text.includes(secret), `output contains ${secret}`);
         }
         assert.ok(!/cookie|csrf/i.test(text));
+    } finally { await f.close(); }
+});
+
+test('main drains a large response from stdout after stdin EOF', async () => {
+    const blob = 'x'.repeat(2 * 1024 * 1024);
+    const f = await fakeSt({ plugin: () => ({ status: 200, json: { id: 'p_big', blob } }) });
+    try {
+        const child = spawn(process.execPath, ['mcp/server.js'], {
+            cwd: new URL('..', import.meta.url),
+            env: { ...process.env, ST_URL: f.url, ST_USER: '', ST_PASSWORD: '' },
+            stdio: ['pipe', 'pipe', 'pipe'],
+        });
+        let stdout = '';
+        let stderr = '';
+        child.stdout.setEncoding('utf8');
+        child.stderr.setEncoding('utf8');
+        child.stdout.on('data', (c) => (stdout += c));
+        child.stderr.on('data', (c) => (stderr += c));
+        child.stdin.end(call(1, 'preset_get', { presetId: 'p_big' }));
+        const code = await new Promise((resolve, reject) => {
+            const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('MCP child did not exit')); }, 10000);
+            child.on('error', reject);
+            child.on('close', (c) => { clearTimeout(timer); resolve(c); });
+        });
+        assert.equal(code, 0, stderr);
+        const lines = stdout.split('\n').filter(Boolean);
+        assert.equal(lines.length, 1);
+        const message = JSON.parse(lines[0]);
+        const result = JSON.parse(message.result.content[0].text);
+        assert.equal(result.id, 'p_big');
+        assert.equal(result.blob.length, blob.length);
+        assert.equal(result.blob, blob);
     } finally { await f.close(); }
 });

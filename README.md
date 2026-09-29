@@ -223,22 +223,27 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 
 `mcp/server.js` is a zero-dependency Node MCP server (stdio transport:
 newline-delimited JSON-RPC 2.0 — `initialize`, `notifications/initialized`,
-`ping`, `tools/list`, `tools/call`). Each tool is one REST row: the
+`ping`, `tools/list`, `tools/call`). It supports protocol `2025-06-18`;
+an unsupported version negotiates down to that version and malformed
+initialization parameters are rejected. Each tool is one REST row: the
 arguments become the path parameters, the query string and the JSON body of
 one request, and the JSON response is the result (`content: [{type: 'text',
-text: <JSON>}]`). An HTTP error is a result with `isError: true` and the text
-`{status, error, …}` (the plugin's own error body). There is no logic in the
-wrapper: every rule lives in the plugin, so a tool behaves exactly like the
-UI and the REST call.
+text: <JSON>}]`). Empty and dot-segment path arguments are rejected before
+HTTP. An HTTP error is a result with `isError: true` and the text `{status,
+error, …}` (the plugin's own error body). There is no logic in the wrapper:
+every rule lives in the plugin, so a tool behaves exactly like the UI and
+the REST call.
 
 - **Config** (env): `ST_URL` (default `http://127.0.0.1:8002`); `ST_USER` and
   `ST_PASSWORD` for a multi-user ST (`POST /api/users/login`).
 - **Session**: at start (and lazily when that failed) `GET /csrf-token` gives
   the session and the request token. Both are sent on every call and kept
   in memory only. On a 403 the server fetches a fresh session once and
-  retries once. The server never reads `settings.json` or any cookie file,
-  and no session value appears in a tool argument, a result or a log line.
-  Logs go to stderr; stdout carries only JSON-RPC.
+  retries once; staggered failures from the same old session share the
+  completed refresh. The server never reads `settings.json` or any cookie
+  file, and no session value appears in a tool argument, a result or a log
+  line. Logs go to stderr; stdout carries only JSON-RPC and is drained before
+  the process exits on stdin EOF.
 - **Register in omp** (`.omp/mcp.json`):
   `{"st-preset-manager": {"command": "node", "args": ["<repo>/mcp/server.js"], "env": {"ST_URL": "http://127.0.0.1:8002"}}}`.
 - **Smoke**: `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"0"}}}' | node mcp/server.js`.
