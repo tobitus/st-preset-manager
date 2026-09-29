@@ -185,6 +185,47 @@ function label(doc, leaf) {
 }
 
 /**
+ * A section's or group's displayed name. When the container HAS a heading
+ * block, its name IS that block's name (the stored `name` can be stale in
+ * older documents and is only re-synced on the next rename); a headerless
+ * group, or one headed by a ghost, shows its stored name ('' when unset).
+ * @param {any} doc
+ * @param {any} row a `section` or `group` row
+ * @returns {string}
+ */
+export function containerName(doc, row) {
+    const hdr = row?.header;
+    if (hdr?.kind === 'block') {
+        const name = doc?.blocks?.[hdr.ref]?.name;
+        if (name) return name;
+    }
+    return row?.name ?? '';
+}
+
+/**
+ * Keep every stored section/group `name` equal to the heading block's name
+ * after a rename of block `identifier`. A no-op when the block has no name
+ * or heads nothing.
+ * @param {any} doc
+ * @param {string} identifier
+ */
+export function syncHeadingNames(doc, identifier) {
+    const name = doc.blocks?.[identifier]?.name;
+    if (!name) return;
+    const walk = (/** @type {any[]} */ rows) => {
+        for (const row of rows ?? []) {
+            if (row?.kind === 'section' || row?.kind === 'group') {
+                if (row.header?.kind === 'block' && row.header.ref === identifier) {
+                    row.name = name;
+                }
+                if (row.kind === 'section') walk(row.rows);
+            }
+        }
+    };
+    for (const seq of doc.sequences ?? []) walk(seq.rows);
+}
+
+/**
  * Re-derive every sequence's structure from its flat leaf sequence (v1
  * `derive_structure`). Run after import: the nested rows become EXACTLY what
  * `rebuildSeq(flattenSeq(rows))` produces, so every rank op is byte-exact
@@ -320,6 +361,55 @@ export function demote(doc, key) {
     } else {
         throw new OutlineError('row is already an option (bottom of the ladder)');
     }
+    seq.rows = rebuildSeq(entries);
+    return leaf;
+}
+
+/**
+ * A plain item becomes a section heading directly, named after its block:
+ * the rows below it up to the next section heading become its children.
+ * One atomic op, the exact inverse of unmakeSection — a completed
+ * makeSection∘unmakeSection round trip leaves the doc byte-identical.
+ * Options, group headings, section headings, markers and ghosts are
+ * refused. The block's content, name and enabled bit are untouched (an
+ * empty heading is suppressed from the compiled slot as before).
+ * @param {any} doc
+ * @param {string} key
+ * @returns {any} the row's leaf
+ */
+export function makeSection(doc, key) {
+    const { seq, entries, i } = findSeq(doc, key);
+    const e = entries[i];
+    const leaf = e.leaf;
+    checkRankable(leaf);
+    if (e.rank === 'section') {
+        throw new OutlineError('row is already a section heading');
+    }
+    if (e.rank !== 'item') {
+        throw new OutlineError(`Make section heading works on a plain row — make it a plain row first (this row is ${e.rank === 'option' ? 'a group option' : 'a group heading'})`);
+    }
+    e.rank = 'section';
+    e.sname = label(doc, leaf);
+    seq.rows = rebuildSeq(entries);
+    return leaf;
+}
+
+/**
+ * A section heading becomes a plain item directly: its rows rejoin the
+ * section above (or the top level). One atomic op, the exact inverse of
+ * makeSection. The block's content, name and enabled bit are untouched.
+ * @param {any} doc
+ * @param {string} key
+ * @returns {any} the row's leaf
+ */
+export function unmakeSection(doc, key) {
+    const { seq, entries, i } = findSeq(doc, key);
+    const e = entries[i];
+    const leaf = e.leaf;
+    if (e.rank !== 'section') {
+        throw new OutlineError('row is not a section heading');
+    }
+    e.rank = 'item';
     seq.rows = rebuildSeq(entries);
     return leaf;
 }

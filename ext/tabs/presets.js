@@ -14,7 +14,7 @@
  * order-only "ghost" rows can't be duplicated or deleted; the buttons stay
  * enabled but visually disabled and clicking them just toasts why.
  *
- * The outline's per-section collapse state persists per preset in
+ * The outline's per-section/group collapse state persists per preset in
  * localStorage (`pm.collapsed.<id>`); the set of open tabs and the active
  * one persist across reloads in `pm.presets.open`, restored on creation
  * (silently dropping presets that no longer exist). The tab strip also
@@ -35,7 +35,7 @@ import { createOutline } from './outline.js';
 import { createEditor } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
-import { findLeaf, searchMatches } from '../outline-model.js';
+import { findLeaf, headingAction, searchMatches } from '../outline-model.js';
 import { createEditGuard } from '../dirty.js';
 
 /**
@@ -48,8 +48,10 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLSelectElement} picker loadout picker
  * @property {HTMLInputElement} loadoutName typed loadout name
  * @property {HTMLButtonElement} deleteBtn two-click-armed loadout delete
- * @property {HTMLButtonElement[]} rankButtons promote/demote/move up/down
+ * @property {HTMLButtonElement[]} rankButtons promote/demote/move up/down/make section/make group
  * @property {HTMLButtonElement} shelfSaveBtn 'Save to shelf' button
+ * @property {HTMLButtonElement} makeSectionBtn 'Make/Unmake section heading' button
+ * @property {HTMLButtonElement} makeGroupBtn 'Make/Unmake group heading' button
  * @property {HTMLTextAreaElement} notes preset notes textarea
  * @property {HTMLElement} insertMenu the `.pm-insert-menu` popup
  * @property {HTMLButtonElement} dupBtn 'Duplicate' button
@@ -58,7 +60,7 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLElement} searchCount the `.pm-search-count` match counter
  * @property {HTMLInputElement} searchFilter the `.pm-search-filter` checkbox
  * @property {{ query: string, filter: boolean, index: number }} search
- * @property {Set<string>} collapsed section node keys collapsed in the outline
+ * @property {Set<string>} collapsed section/group node keys collapsed in the outline
  * @property {string|null} delArmedKey key the block delete confirmation is armed for
  * @property {any} delTimer restore-'Delete' timer for delArmedKey
  * @property {AbortController} ac aborts this view's document-level listeners
@@ -266,6 +268,8 @@ export function createPresetsTab(pane, bridge) {
                 <button class="pm-rank-demote menu_button" title="Demote the selected row">Demote (Shift+Tab)</button>
                 <button class="pm-move-up menu_button" title="Move the selected row up">↑ (Alt+↑)</button>
                 <button class="pm-move-down menu_button" title="Move the selected row down">↓ (Alt+↓)</button>
+                <button class="pm-rank-make-section menu_button" title="Turn the selected plain row into a section heading (the rows below it become its children)">Make section heading (Alt+S)</button>
+                <button class="pm-rank-make-group menu_button" title="Turn the selected plain row into a group heading">Make group heading (Alt+G)</button>
                 <button class="pm-shelf-save menu_button" title="Save the selected block to the shelf">Save to shelf</button>
                 <button class="pm-shelf-toggle menu_button" title="Show the shelf list (drag blocks into this preset)">Shelf ▸</button>
             </div>
@@ -317,8 +321,10 @@ export function createPresetsTab(pane, bridge) {
             picker: q('.pm-loadout-picker'),
             loadoutName: q('.pm-loadout-name'),
             deleteBtn: q('.pm-loadout-delete'),
-            rankButtons: [q('.pm-rank-promote'), q('.pm-rank-demote'), q('.pm-move-up'), q('.pm-move-down')],
+            rankButtons: [q('.pm-rank-promote'), q('.pm-rank-demote'), q('.pm-move-up'), q('.pm-move-down'), q('.pm-rank-make-section'), q('.pm-rank-make-group')],
             shelfSaveBtn: q('.pm-shelf-save'),
+            makeSectionBtn: q('.pm-rank-make-section'),
+            makeGroupBtn: q('.pm-rank-make-group'),
             notes: q('.pm-preset-notes'),
             insertMenu: q('.pm-insert-menu'),
             dupBtn: q('.pm-block-duplicate'),
@@ -345,6 +351,7 @@ export function createPresetsTab(pane, bridge) {
                     } catch { /* storage unavailable/full — best effort */ }
                     refreshView();
                 },
+                onHeading: (/** @type {'section'|'group'} */ kind) => headingOp(id, kind),
             }),
             editor: createEditor(editorEl, {
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
@@ -381,6 +388,8 @@ export function createPresetsTab(pane, bridge) {
         q('.pm-rank-demote').addEventListener('click', () => rankOp(id, 'demote'));
         q('.pm-move-up').addEventListener('click', () => rankOp(id, 'moveLeaf', -1));
         q('.pm-move-down').addEventListener('click', () => rankOp(id, 'moveLeaf', 1));
+        q('.pm-rank-make-section').addEventListener('click', () => headingOp(id, 'section'));
+        q('.pm-rank-make-group').addEventListener('click', () => headingOp(id, 'group'));
         q('.pm-shelf-save').addEventListener('click', () => void saveToShelf(nextView));
         q('.pm-shelf-toggle').addEventListener('click', () => {
             shelfOpen = !shelfOpen;
@@ -446,6 +455,20 @@ export function createPresetsTab(pane, bridge) {
         const key = selected.get(id);
         if (!key) return;
         void runOps(id, [op === 'moveLeaf' ? { op, key, delta } : { op, key }]).catch(() => {});
+    }
+
+    /** @param {'section'|'group'} kind */
+    function headingOp(/** @type {string} */ id, kind) {
+        const key = selected.get(id);
+        const doc = docs.get(id);
+        if (!key || !doc) return;
+        const a = headingAction(doc, key, kind);
+        if (a.refuse) {
+            toast('warning', a.refuse);
+            setStatus(a.refuse, true);
+            return;
+        }
+        if (a.op) void runOps(id, [a.op]).catch(() => {});
     }
 
     /**
@@ -631,6 +654,30 @@ export function createPresetsTab(pane, bridge) {
     }
 
     /**
+     * Make/Unmake section/group heading button label + refuse-disabled
+     * state (still clickable when refused, so the click handler's toast
+     * explains why — same pattern as `updateBlockActionButtons`).
+     */
+    function updateHeadingButtons(/** @type {PresetView} */ v, /** @type {any} */ doc, /** @type {string|null} */ key) {
+        for (const [btn, kind, shortcut, normalTitle, unmakeTitle] of /** @type {[HTMLButtonElement, 'section'|'group', string, string, string][]} */ ([
+            [v.makeSectionBtn, 'section', 'Alt+S', 'Turn the selected plain row into a section heading (the rows below it become its children)', 'Turn the selected section heading back into a plain row'],
+            [v.makeGroupBtn, 'group', 'Alt+G', 'Turn the selected plain row into a group heading', 'Turn the selected group heading back into a plain row'],
+        ])) {
+            const a = headingAction(doc, key, kind);
+            btn.textContent = `${a.label} (${shortcut})`;
+            if (a.refuse) {
+                btn.classList.add('pm-disabled');
+                btn.setAttribute('aria-disabled', 'true');
+                btn.title = a.refuse;
+            } else {
+                btn.classList.remove('pm-disabled');
+                btn.setAttribute('aria-disabled', 'false');
+                btn.title = a.label.startsWith('Unmake') ? unmakeTitle : normalTitle;
+            }
+        }
+    }
+
+    /**
      * Rebuild the picker options, keeping the user's selection when that
      * loadout still exists (else the active one); honour a just-created id.
      */
@@ -662,6 +709,7 @@ export function createPresetsTab(pane, bridge) {
         refreshLoadoutBar(doc);
         const key = selected.get(view.id) ?? null;
         for (const b of view.rankButtons) b.disabled = !key;
+        updateHeadingButtons(view, doc, key);
         view.shelfSaveBtn.disabled = !key;
         if (view.delArmedKey && view.delArmedKey !== key) disarmDelete();
         updateBlockActionButtons(view, doc, key);

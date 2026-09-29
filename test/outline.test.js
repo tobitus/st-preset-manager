@@ -222,12 +222,13 @@ test('ops: createGroup forms a group from existing leaves; renameGroup and setCa
     });
     assert.ok(res.groupKey);
     const grp = doc.sequences[0].rows.find((/** @type {any} */ r) => r.kind === 'group' && r.key === res.groupKey);
-    assert.equal(grp.name, 'Made by test');
+    assert.equal(grp.name, doc.blocks[items[0].leaf.ref].name, 'a headed group is named after its heading block (the given name is ignored)');
     assert.equal(grp.header.ref, items[0].leaf.ref);
     assert.equal(grp.options.length, 1); // second item became the option
     assert.equal(grp.guessed, false);
     applyDocOp(doc, 'renameGroup', { key: res.groupKey, name: 'Renamed' });
     assert.equal(grp.name, 'Renamed');
+    assert.equal(doc.blocks[items[0].leaf.ref].name, 'Renamed', 'renameGroup on a headed group renames its heading block too');
     applyDocOp(doc, 'setCardinality', { key: res.groupKey, cardinality: 'pick-one' });
     assert.equal(grp.cardinality, 'pick-one');
     assert.throws(() => applyDocOp(doc, 'setCardinality', { key: res.groupKey, cardinality: 'pick-two' }), OpError);

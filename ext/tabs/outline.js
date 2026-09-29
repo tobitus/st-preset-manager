@@ -6,15 +6,15 @@
  * coming back through re-render is the truth.
  *
  * `render`'s optional `opts` layers three display-only extras on top of that
- * base render, none of which touch the doc: section headings always carry a
- * `pm-caret` (▾/▸) that toggles `opts.collapsed` membership through
- * `handlers.onToggleCollapse`, hiding a collapsed section's `ul.pm-list` via
- * CSS — a collapsed section whose subtree holds a current search match is
- * shown anyway; `opts.search` highlights matching rows (`pm-match`,
- * `pm-match-current` on the current key) and, when `search.filter` is set,
- * hides (`pm-filtered-out`) every row whose own key and whole subtree miss
- * every search key; and a section/group heading whose header leaf has
- * non-blank content gets a `pm-sends-text` ⓘ marker.
+ * base render, none of which touch the doc: section and group headings
+ * always carry a `pm-caret` (▾/▸) that toggles `opts.collapsed` membership
+ * through `handlers.onToggleCollapse`, hiding a collapsed section's or
+ * group's `ul.pm-list` via CSS — a collapsed section whose subtree holds a
+ * current search match is shown anyway; `opts.search` highlights matching
+ * rows (`pm-match`, `pm-match-current` on the current key) and, when
+ * `search.filter` is set, hides (`pm-filtered-out`) every row whose own key
+ * and whole subtree miss every search key; and a section/group heading
+ * whose header leaf has non-blank content gets a `pm-sends-text` ⓘ marker.
  */
 import { buildOutline, dragOps, keyAction, pickOneOps } from '../outline-model.js';
 
@@ -98,7 +98,7 @@ function sendsTextSpan() {
     return span;
 }
 
-/** @returns {HTMLSpanElement} the collapse/expand caret for a section row (display-only; toggled by handlers.onToggleCollapse) */
+/** @returns {HTMLSpanElement} the collapse/expand caret for a section or group row (display-only; toggled by handlers.onToggleCollapse) */
 function caretSpan() {
     const span = document.createElement('span');
     span.className = 'pm-caret';
@@ -215,7 +215,8 @@ function leafLi(node, selectedKey, ctx) {
 /**
  * A group's row IS its header leaf when one exists, but the header never
  * gets a switch (only options do); headerless groups show the group name
- * and no handle.
+ * and no handle. Every group row carries a collapse/expand caret, same as
+ * sections.
  * @param {GroupNode} node
  * @param {string|null} selectedKey
  * @param {RenderCtx} ctx
@@ -231,6 +232,11 @@ function groupLi(node, selectedKey, ctx) {
     li.dataset.nodeKey = node.key;
     const row = document.createElement('div');
     row.className = 'pm-row pm-group-row' + selectedSuffix(key, selectedKey);
+    const caret = caretSpan();
+    const collapsedDisplay = !!ctx.collapsed?.has(node.key)
+        && !(ctx.searchActive && ctx.matches.get(node));
+    caret.textContent = collapsedDisplay ? '▸' : '▾';
+    row.append(caret);
     if (node.header) {
         row.append(handleSpan(), nameSpan(node.header.name));
         if (node.header.hasContent) row.append(sendsTextSpan());
@@ -241,6 +247,7 @@ function groupLi(node, selectedKey, ctx) {
     if (node.conflict) row.append(conflictSpan());
     if (node.pickOne) row.append(noneLabel(node));
     applySearchMatch(row, key, ctx);
+    if (collapsedDisplay) li.classList.add('pm-collapsed');
     li.append(row);
     const list = document.createElement('ul');
     list.className = 'pm-list';
@@ -388,7 +395,7 @@ export function dropAnchor(li) {
 
 /**
  * @param {HTMLElement} container the .pm-outline element
- * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void }} handlers
+ * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void }} handlers
  * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
  */
 export function createOutline(container, handlers) {
@@ -471,7 +478,14 @@ export function createOutline(container, handlers) {
     const onKeydown = (/** @type {KeyboardEvent} */ ev) => {
         const a = keyAction(ev);
         const key = selectedKey;
-        if (!a || !key) return;
+        if (!a) return;
+        if (a.op === 'heading') {
+            if (!key) return;
+            ev.preventDefault();
+            handlers.onHeading?.(a.kind);
+            return;
+        }
+        if (!key) return;
         ev.preventDefault(); // Tab must not move focus when it acts
         void handlers.onOps([{ ...a, key }]).catch(() => {});
     };

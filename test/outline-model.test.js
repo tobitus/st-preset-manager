@@ -105,7 +105,7 @@ test('buildOutline: conflict = pick-one with 2+ members on (heading counts); not
     const out = buildOutline(doc);
     const sec = out.sequences[0].nodes[2];
     assert.equal(sec.type, 'section');
-    assert.equal(sec.name, 'Sec');
+    assert.equal(sec.name, 'Heading', 'a headed section shows its heading block name (the stored "Sec" is stale)');
     assert.equal(sec.header.identifier, 'h');
     assert.equal(sec.header.switchType, 'checkbox');
     const grp = sec.nodes[1];

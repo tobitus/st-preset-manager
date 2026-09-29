@@ -318,8 +318,9 @@ export function makeRouter() {
     // ONE store-queue transaction per request: read the doc, apply the op,
     // validate, write — no interleaving with a queued /slot/panel or
     // /slot/load (review-3 rule). Exactly one typed event per mutation.
-    // Op set (Phase 2): outline ops (promote/demote/moveLeaf operate on
-    // sequence structure and never touch enabled bits), switches
+    // Op set (Phase 2): outline ops (promote/demote/moveLeaf/makeSection/
+    // unmakeSection operate on sequence structure and never touch enabled
+    // bits), switches
     // (toggle/setGroup — the only ops writing loadout bits; pick-one is
     // normalised here like every write path), group shape (createGroup/
     // renameGroup/setCardinality), options (addOption/removeOption), blocks
@@ -328,7 +329,7 @@ export function makeRouter() {
     // the active loadout), and settings/notes (setSettings/setNotes — notes
     // are library-only and never compiled).
     const OPS = /** @type {const} */ ([
-        'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'moveLeaf',
+        'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'makeSection', 'unmakeSection', 'moveLeaf',
         'createGroup', 'renameGroup', 'addOption', 'removeOption',
         'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'deleteBlock',
         'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock',

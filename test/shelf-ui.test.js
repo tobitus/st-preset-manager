@@ -41,7 +41,7 @@ test('sourceItems: one group row (whole-group copy) then its options; section he
         { kind: 'group', groupKey: 'grp:' + leaf.g.key, name: 'G', cardinality: 'pick-one', count: 3, depth: 0 },
         { kind: 'leaf', identifier: 'o1', leafKind: 'block', name: 'O1', depth: 1, heading: null },
         { kind: 'leaf', identifier: 'o2', leafKind: 'block', name: 'O2', depth: 1, heading: null },
-        { kind: 'leaf', identifier: 's1', leafKind: 'block', name: 'Sec', depth: 0, heading: 'section' },
+        { kind: 'leaf', identifier: 's1', leafKind: 'block', name: 'S1', depth: 0, heading: 'section' }, // heading block name, not the stored 'Sec'
         { kind: 'leaf', identifier: 'c', leafKind: 'block', name: 'C', depth: 1, heading: null },
         { kind: 'leaf', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', depth: 1, heading: null },
     ]);

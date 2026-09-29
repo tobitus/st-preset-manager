@@ -26,7 +26,7 @@
 import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
 import { stripConnectionKeys, compile } from '../shared/compile.js';
 import { normalize, completeOverride } from '../shared/groups.js';
-import { flattenSeq, rebuildSeq } from '../shared/outline.js';
+import { flattenSeq, rebuildSeq, syncHeadingNames } from '../shared/outline.js';
 import { reorderEntries } from '../shared/reorder.js';
 
 /**
@@ -229,7 +229,7 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
         const block = doc.blocks[id];
         let changed = false;
         if (cp.content !== undefined) { block.content = cp.content; changed = true; }
-        if (cp.name !== undefined) { block.name = cp.name; changed = true; }
+        if (cp.name !== undefined) { block.name = cp.name; syncHeadingNames(doc, id); changed = true; }
         if (cp.role !== undefined) { block.role = cp.role; changed = true; }
         for (const [k, v] of Object.entries(cp)) {
             if (k === 'identifier' || k === 'content' || k === 'name' || k === 'role' || k === 'deleted') continue;

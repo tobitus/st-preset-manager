@@ -383,7 +383,7 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 | POST | `/presets/:id/fork` | `{name, folder?}` → new doc (new id, block identifiers re-minted) |
 | POST | `/presets/:id/move` | `{folder?, name?}` |
 | PATCH | `/presets/:id/meta` | `{tags?, notes?, blockNotes?: {id: text}}` |
-| POST | `/presets/:id/ops` | `{op, ...args}` — `toggle`, `setGroup`, `setCardinality`, `promote`, `demote`, `moveLeaf`, `editBlock`, `addBlock`, `addSection {name, before}` (one atomic op: an empty section heading, ON in the active loadout; the rows below it up to the next section heading become its children; an anchor inside a group snaps above the group), `deleteBlock`, `copyBlock {fromPresetId|shelfId, identifier, before | after}` (`after` = a single block lands directly below that row in the row's own sequence: after an option it joins the group, after a group heading it lands below the whole group; Duplicate uses it), `renameBlock`, `setSettings` → `{doc, rev, result}` (`result` = the op's return value, e.g. `{identifier, key}` for addBlock/addSection) |
+| POST | `/presets/:id/ops` | `{op, ...args}` — `toggle`, `setGroup`, `setCardinality`, `promote`, `demote`, `makeSection {key}` / `unmakeSection {key}` (one atomic op each: a plain item becomes a section heading named after its block, the rows below up to the next section heading become its children; exact inverse; options, group headings, markers and ghosts refused), `moveLeaf`, `editBlock`, `addBlock`, `addSection {name, before}` (one atomic op: an empty section heading, ON in the active loadout; the rows below it up to the next section heading become its children; an anchor inside a group snaps above the group), `deleteBlock`, `copyBlock {fromPresetId|shelfId, identifier, before | after}` (`after` = a single block lands directly below that row in the row's own sequence: after an option it joins the group, after a group heading it lands below the whole group; Duplicate uses it), `renameBlock`, `setSettings` → `{doc, rev, result}` (`result` = the op's return value, e.g. `{identifier, key}` for addBlock/addSection). A section's or headed group's name is its heading block's name; renaming the block (`editBlock`/`renameBlock`) or a headed group (`renameGroup`) keeps both in sync. |
 | POST/PUT/DELETE | `/presets/:id/loadouts[/:lid]` | `{name, from?}` create (copies `from` or current) / rename / delete (not the last) |
 | POST | `/presets/:id/loadouts/:lid/activate` | → recompile if this preset is in the slot |
 | PUT/DELETE | `/presets/:id/loadouts/:lid/overrides/:modelId` | `{enabled:{…}}` |
@@ -442,12 +442,19 @@ prompt manager uses, `PromptManager.js:1919`; drivable headlessly via mouse even
 Fix round 1 additions to the Presets tab: an edit bar with **Insert ▾** (Section heading via
 ST's input popup → `addSection`; Block → `addBlock`), **Duplicate** (`copyBlock` from the
 same preset, landing directly below) and **Delete** (two-click confirmation bound to the
-selected row); markers/ghosts refuse both with a toast. Section rows carry a collapse caret
-(display-only, per preset in `pm.collapsed.<id>`; a collapsed section moves as one unit and
-no shelf drop lands inside it). A client-side search (names + content, case-insensitive)
-highlights matches with a count, Enter/Shift+Enter walk them, a Filter toggle keeps only
-matches and their ancestor headings, and a collapsed section holding a match opens while
-the search is active.
+selected row); markers/ghosts refuse both with a toast. Section and group rows carry a
+collapse caret (display-only, per preset in `pm.collapsed.<id>`; a collapsed section or group
+moves as one unit and no shelf drop lands inside it). A client-side search (names + content,
+case-insensitive) highlights matches with a count, Enter/Shift+Enter walk them, a Filter
+toggle keeps only matches and their ancestor headings, and a collapsed section or group
+holding a match opens while the search is active.
+Mini round (2026-09-29): the rank bar has **Make/Unmake section heading** (Alt+S;
+`makeSection`/`unmakeSection`, plain item ↔ section heading directly) and **Make/Unmake
+group heading** (Alt+G; the item→group `promote` / group→item `demote`); an option or the
+other kind of heading is refused with a toast ("make it a plain row first"). A section's or
+headed group's name IS its heading block's name (`containerName`, shared/outline.js) in the
+outline, the shelf list and group copies; `editBlock`/`renameBlock` (and a rename in ST's
+panel) re-sync the stored name, and `renameGroup` on a headed group renames the heading block.
 Diff tab: **one rendered two-column table in a single scroll container** (rows = matched
 pairs or one-sided rows in left order; moved rows carry a "moved from #n" badge); the bottom
 row is the line diff of the selected pair, shown Interleaved or Side by side (toggle

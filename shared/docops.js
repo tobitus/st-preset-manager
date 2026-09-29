@@ -16,7 +16,7 @@
  */
 import { CONNECTION_KEYS } from './st-keys.js';
 import { normalize } from './groups.js';
-import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError } from './outline.js';
+import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError, containerName, syncHeadingNames, makeSection, unmakeSection } from './outline.js';
 import { newId } from './util.js';
 import { newKey } from './canonical.js';
 
@@ -181,6 +181,9 @@ function opSetGroup(doc, a) {
 
 /**
  * Rename a group (its drawn name; guessed flips to false — it is now owned).
+ * On a HEADED group the group name drives the heading block's name: both
+ * end up equal (see syncHeadingNames). A headerless group only has a stored
+ * name.
  * @param {any} doc
  * @param {{ key?: string, name?: string }} a
  */
@@ -189,7 +192,14 @@ function opRenameGroup(doc, a) {
     if (typeof key !== 'string' || typeof name !== 'string') throw new OpError('renameGroup needs {key, name}');
     const grp = requireGroup(doc, key);
     const trimmed = name.trim();
-    if (trimmed) grp.name = trimmed;
+    if (trimmed) {
+        if (grp.header?.kind === 'block' && doc.blocks?.[grp.header.ref]) {
+            doc.blocks[grp.header.ref].name = trimmed;
+            syncHeadingNames(doc, grp.header.ref);
+        } else {
+            grp.name = trimmed;
+        }
+    }
     grp.guessed = false;
     return { key, name: grp.name };
 }
@@ -216,8 +226,10 @@ function opSetCardinality(doc, a) {
  * Create a group from existing leaves: `keys` (leaf keys) become its options,
  * `headerKey` (optional, non-marker) becomes the heading. The group lands at
  * the position of the first member (or before the `before` leaf key when
- * given). Markers refuse membership (a group always ends at a marker).
- * Enabled bits are untouched.
+ * given). Markers refuse membership (a group always ends at a marker). When
+ * `headerKey` names a block with a non-empty name, the stored group name is
+ * that block's name (given `name` is ignored); otherwise it's `name` (or
+ * blank). Enabled bits are untouched.
  * @param {any} doc
  * @param {{ keys?: string[], headerKey?: string|null, name?: string, cardinality?: string, before?: string|null }} a
  */
@@ -262,7 +274,8 @@ function opCreateGroup(doc, a) {
     const headerEntry = a?.headerKey ? host.flat.find((e) => e.leaf.key === a.headerKey) : null;
     if (a?.headerKey && !headerEntry) throw new OpError(`no row with key ${JSON.stringify(a.headerKey)}`, 404);
 
-    const gmeta = { name: a?.name ?? '', cardinality: a?.cardinality ?? 'pick-one-or-more', guessed: false };
+    const hdrName = headerEntry?.leaf.kind === 'block' ? (doc.blocks?.[headerEntry.leaf.ref]?.name || '') : '';
+    const gmeta = { name: hdrName || (a?.name ?? ''), cardinality: a?.cardinality ?? 'pick-one-or-more', guessed: false };
     /** @type {any[]} */
     const groupEntries = [];
     if (headerEntry) {
@@ -381,7 +394,7 @@ function opRenameBlock(doc, a) {
     }
     const block = doc.blocks?.[identifier];
     if (!block) throw new OpError(`no block ${JSON.stringify(identifier)}`, 404);
-    if (name.trim()) block.name = name.trim();
+    if (name.trim()) { block.name = name.trim(); syncHeadingNames(doc, identifier); }
     return { identifier, name: block.name };
 }
 
@@ -395,7 +408,7 @@ function opEditBlock(doc, a) {
     if (typeof identifier !== 'string') throw new OpError('editBlock needs {identifier, ...}');
     const block = doc.blocks?.[identifier];
     if (!block) throw new OpError(`no block ${JSON.stringify(identifier)}`, 404);
-    if (a?.name !== undefined) { if (!String(a.name).trim()) throw new OpError('name cannot be empty'); block.name = String(a.name).trim(); }
+    if (a?.name !== undefined) { if (!String(a.name).trim()) throw new OpError('name cannot be empty'); block.name = String(a.name).trim(); syncHeadingNames(doc, identifier); }
     if (a?.content !== undefined) block.content = String(a.content);
     if (a?.role !== undefined) block.role = String(a.role);
     if (a?.fields !== undefined) {
@@ -648,7 +661,7 @@ export function copyPayloadFromDoc(src, a) {
     if (!header && options.length === 0) throw new OpError('group has nothing to copy', 400);
     return {
         kind: 'group',
-        name: grp.name ?? '',
+        name: containerName(src, grp),
         cardinality: grp.cardinality ?? 'pick-one-or-more',
         header,
         options,
@@ -948,6 +961,18 @@ function dispatchOp(doc, op, a) {
             if (typeof a?.key !== 'string') throw new OpError('demote needs {key}');
             findRowKey(doc, a.key);
             demote(doc, a.key);
+            return { key: a.key };
+        }
+        case 'makeSection': {
+            if (typeof a?.key !== 'string') throw new OpError('makeSection needs {key}');
+            findRowKey(doc, a.key);
+            makeSection(doc, a.key);
+            return { key: a.key };
+        }
+        case 'unmakeSection': {
+            if (typeof a?.key !== 'string') throw new OpError('unmakeSection needs {key}');
+            findRowKey(doc, a.key);
+            unmakeSection(doc, a.key);
             return { key: a.key };
         }
         case 'moveLeaf': {

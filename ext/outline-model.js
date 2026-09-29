@@ -4,8 +4,11 @@
  * flags, keyboard mapping, pick-one/none click -> ops, drag -> moveLeaf op,
  * leaf lookup for the editor, and search matches.
  *
- * Pure module: no imports, no DOM, runs in node and browser.
+ * Pure module: imports only the pure shared/outline.js helper (containerName);
+ * no DOM, runs in node and browser.
  */
+
+import { containerName } from '../shared/outline.js';
 
 /**
  * A rendered leaf row.
@@ -31,7 +34,7 @@
  * @property {'group'} type
  * @property {string} key
  * @property {LeafNode|null} header
- * @property {string} name
+ * @property {string} name the heading block's name when the header is a block with a non-empty name, else the stored name
  * @property {'pick-one'|'pick-one-or-more'} cardinality
  * @property {boolean} guessed
  * @property {boolean} pickOne
@@ -47,7 +50,7 @@
  * @property {'section'} type
  * @property {string} key
  * @property {LeafNode|null} header
- * @property {string} name
+ * @property {string} name the heading block's name when the header is a block with a non-empty name, else the stored name
  * @property {Array<LeafNode|GroupNode|SectionNode>} nodes
  */
 
@@ -133,7 +136,7 @@ function groupNode(doc, enabled, row) {
         type: 'group',
         key: row.key,
         header,
-        name: row.name ?? '',
+        name: containerName(doc, row),
         cardinality: row.cardinality ?? 'pick-one-or-more',
         guessed: !!row.guessed,
         pickOne,
@@ -158,7 +161,7 @@ function rowNode(doc, enabled, row) {
             type: 'section',
             key: row.key,
             header: row.header ? leafNode(doc, enabled, row.header, false) : null,
-            name: row.name ?? '',
+            name: containerName(doc, row),
             nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, enabled, r)),
         };
     }
@@ -185,13 +188,16 @@ export function buildOutline(doc, loadoutId = doc.activeLoadoutId) {
 /**
  * Map a keyboard event on the outline to an op, or null when the key is not
  * ours. Any ctrl/meta combination is never ours; Tab must not carry alt;
- * arrow moves need alt and no shift.
+ * arrow moves need alt and no shift. Alt+S toggles the section heading and
+ * Alt+G the group heading on the selected row (by physical key, so macOS
+ * Option+S producing 'ß' still works).
  *
- * @param {{ key: string, shiftKey: boolean, altKey: boolean, ctrlKey: boolean, metaKey: boolean }} ev
- * @returns {{ op: 'promote' } | { op: 'demote' } | { op: 'moveLeaf', delta: -1|1 } | null}
+ * @param {{ key: string, code?: string, shiftKey: boolean, altKey: boolean, ctrlKey: boolean, metaKey: boolean }} ev
+ * @returns {{ op: 'promote' } | { op: 'demote' } | { op: 'moveLeaf', delta: -1|1 } | { op: 'heading', kind: 'section'|'group' } | null}
  */
 export function keyAction(ev) {
     if (ev.ctrlKey || ev.metaKey) return null;
+    if (ev.altKey && !ev.shiftKey && (ev.code === 'KeyS' || ev.code === 'KeyG')) return { op: 'heading', kind: ev.code === 'KeyS' ? 'section' : 'group' };
     if (ev.key === 'Tab') {
         if (ev.altKey) return null;
         return ev.shiftKey ? { op: 'demote' } : { op: 'promote' };
@@ -201,6 +207,34 @@ export function keyAction(ev) {
         return { op: 'moveLeaf', delta: ev.key === 'ArrowUp' ? -1 : 1 };
     }
     return null;
+}
+
+/**
+ * The label, op and refusal for the "Make/Unmake section/group heading"
+ * button on the selected row. A plain item becomes a heading directly
+ * (makeSection/promote) and a heading reverts to a plain item directly
+ * (unmakeSection/demote); an option or the other container kind's heading
+ * must first become a plain row.
+ *
+ * @param {any} doc
+ * @param {string|null} key selected leaf key
+ * @param {'section'|'group'} kind
+ * @returns {{ label: string, op: { op: string, key: string }|null, refuse: string|null }}
+ */
+export function headingAction(doc, key, kind) {
+    const label = `Make ${kind} heading`;
+    const found = key ? findLeaf(doc, key) : null;
+    if (!found) return { label, op: null, refuse: null };
+    if (found.marker) return { label, op: null, refuse: "Markers are fixed SillyTavern slots: they can't be headings" };
+    if (found.leaf.kind === 'ghost') return { label, op: null, refuse: "Order-only entries have no block: they can't be headings" };
+    if (kind === 'section') {
+        if (found.rank === 'item') return { label: 'Make section heading', op: { op: 'makeSection', key }, refuse: null };
+        if (found.rank === 'section') return { label: 'Unmake section heading', op: { op: 'unmakeSection', key }, refuse: null };
+        return { label: 'Make section heading', op: null, refuse: 'Make section heading works on a plain row — make it a plain row first' };
+    }
+    if (found.rank === 'item') return { label: 'Make group heading', op: { op: 'promote', key }, refuse: null };
+    if (found.rank === 'group') return { label: 'Unmake group heading', op: { op: 'demote', key }, refuse: null };
+    return { label: 'Make group heading', op: null, refuse: 'Make group heading works on a plain row — make it a plain row first' };
 }
 
 /**

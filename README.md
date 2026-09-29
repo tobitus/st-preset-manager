@@ -308,13 +308,28 @@ Chromium on ST).
   block; *Duplicate* copies the selected block directly below it (`copyBlock`
   from the same preset, fresh identifier); *Delete* needs a second click on
   the SAME row. Markers and order-only rows refuse both (toast).
-- **Collapse**: section rows have a caret; the state is display-only, per
-  preset (`pm.collapsed.<presetId>`). A collapsed section moves as one unit
+- **Collapse**: section AND group rows (headerless "(options)" groups too)
+  have a caret; the state is display-only, per preset
+  (`pm.collapsed.<presetId>`). A collapsed section or group moves as one unit
   and no shelf drop lands inside it.
+- **Make / Unmake heading** (rank bar): *Make section heading* (Alt+S) turns
+  the selected plain row into a section heading directly (one `makeSection`
+  op; the rows below it up to the next section heading become its children)
+  and *Unmake section heading* reverses it exactly (`unmakeSection`). *Make
+  group heading* (Alt+G) is the item→group promote, *Unmake group heading*
+  the demote back. Content, name and switch are untouched (an empty heading
+  is still left out of the slot). Options and the other kind of heading are
+  refused with a toast ("make it a plain row first"), as are markers and
+  order-only rows.
+- **Container names**: a section's or group's name IS its heading block's
+  name (outline, shelf list, copies). Renaming the heading block (*Save
+  content*, `editBlock`/`renameBlock`, or a rename in ST's panel) or a headed
+  group (`renameGroup`, which renames the heading block) keeps the stored
+  name in sync; a headerless group keeps its own name.
 - **Search**: names + content, case-insensitive, client-side over the loaded
   document; a match count, Enter / Shift+Enter walk the matches (the editor
   follows), *Filter* keeps only matches and their ancestor headings, and a
-  collapsed section holding a match opens while the search is active.
+  collapsed section or group holding a match opens while the search is active.
 - **Empty headings are not sent**: a section/group heading whose content is
   empty or whitespace-only is left out of the working-slot compile (ST's
   prompt list and `prompt_order`); its switch is library-only. Headings with

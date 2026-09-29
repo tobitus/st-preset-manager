@@ -339,7 +339,7 @@ test('copyPayloadFromDoc: marker and ghost members of a group are skipped, never
     assert.equal(p.header.name, 'G');
     assert.deepEqual(p.options.map((/** @type {any} */ b) => b.name), ['O1', 'O2']);
     assert.equal(p.cardinality, 'pick-one');
-    assert.equal(p.name, 'Mixed');
+    assert.equal(p.name, 'G', 'a headed group copies under its heading block name, not its stale stored "Mixed"');
 });
 
 // ---------------------------------------------------------------- macros (v1 token_warnings)
