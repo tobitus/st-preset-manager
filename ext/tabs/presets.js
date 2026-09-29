@@ -35,7 +35,7 @@ import { createOutline } from './outline.js';
 import { createEditor } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
-import { findLeaf, searchMatches, duplicateAnchor } from '../outline-model.js';
+import { findLeaf, searchMatches } from '../outline-model.js';
 import { createEditGuard } from '../dirty.js';
 
 /**
@@ -540,11 +540,9 @@ export function createPresetsTab(pane, bridge) {
         if (!doc) return;
         const g = guardEditableSelection(id, doc);
         if (!g) return;
-        const anchor = duplicateAnchor(doc, g.key);
-        if (!anchor) return;
         try {
             const res = await bridge.edit(() => api('POST', `/presets/${id}/ops`, {
-                op: 'copyBlock', fromPresetId: id, identifier: g.found.identifier, before: anchor.before, outsideGroup: anchor.outsideGroup,
+                op: 'copyBlock', fromPresetId: id, identifier: g.found.identifier, after: g.key,
             }));
             setDoc(id, res.doc);
             const newKey = res.keys?.[0] ?? null;

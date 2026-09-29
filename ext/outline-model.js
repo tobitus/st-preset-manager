@@ -2,8 +2,7 @@
  * ext/outline-model.js — the pure view model behind the Presets tab outline
  * (sub-phase 2b): doc -> render tree with switch types and pick-one conflict
  * flags, keyboard mapping, pick-one/none click -> ops, drag -> moveLeaf op,
- * leaf lookup for the editor, search matches, and the duplicate-copy
- * anchor.
+ * leaf lookup for the editor, and search matches.
  *
  * Pure module: no imports, no DOM, runs in node and browser.
  */
@@ -406,29 +405,3 @@ export function searchMatches(doc, query) {
     return matches;
 }
 
-/**
- * The copyBlock anchor that lands a copy of row `key` directly below it: the
- * key of the next row in the same sequence's outline order (null to append
- * at the end), and whether that copy must land outside a group — true only
- * when a plain row (not itself a group heading or option) is immediately
- * followed by a headerless option run, since a bare `before` there would
- * otherwise drop the copy inside that group.
- *
- * @param {any} doc
- * @param {string} key
- * @returns {{ before: string|null, outsideGroup: boolean }|null}
- */
-export function duplicateAnchor(doc, key) {
-    for (const list of flatLeaves(doc)) {
-        const index = list.findIndex((e) => e.leaf.key === key);
-        if (index === -1) continue;
-        const sel = list[index];
-        const next = list[index + 1];
-        if (!next) return { before: null, outsideGroup: false };
-        return {
-            before: next.leaf.key,
-            outsideGroup: next.rank === 'option' && sel.rank !== 'option' && sel.rank !== 'group',
-        };
-    }
-    return null;
-}

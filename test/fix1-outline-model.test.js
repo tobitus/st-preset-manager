@@ -2,13 +2,11 @@
  * Fix round 1, pure outline-model helpers:
  *   - searchMatches (item 9): leaf keys whose name or content contains the
  *     query, case-insensitively, in outline order;
- *   - duplicateAnchor (item 8): the copyBlock {before, outsideGroup} that
- *     lands a copy directly below the selected row;
  *   - buildOutline leaf nodes carry `hasContent` (item 3's ⓘ marker).
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOutline, searchMatches, duplicateAnchor } from '../ext/outline-model.js';
+import { buildOutline, searchMatches } from '../ext/outline-model.js';
 
 const B = (/** @type {string} */ id, /** @type {string} */ name, /** @type {string} */ content) => ({ identifier: id, name, content, role: 'system', fields: {}, notes: '' });
 const leaf = (/** @type {string} */ id) => ({ kind: 'block', ref: id, key: `k-${id}` });
@@ -67,26 +65,6 @@ test('searchMatches: an empty or blank query matches nothing; surrounding blanks
     assert.deepEqual(searchMatches(mkDoc(), '   '), []);
     assert.deepEqual(searchMatches(mkDoc(), '  quick '), ['k-a', 'k-o1']);
     assert.deepEqual(searchMatches(mkDoc(), 'zzz-nothing'), []);
-});
-
-test('duplicateAnchor: the copy lands before the next row in outline order', () => {
-    const doc = mkDoc();
-    assert.deepEqual(duplicateAnchor(doc, 'k-a'), { before: 'k-s', outsideGroup: false });
-    assert.deepEqual(duplicateAnchor(doc, 'k-s'), { before: 'k-b', outsideGroup: false });
-    assert.deepEqual(duplicateAnchor(doc, 'k-b'), { before: 'k-g', outsideGroup: false });
-    assert.deepEqual(duplicateAnchor(doc, 'k-g'), { before: 'k-o1', outsideGroup: false });
-    assert.deepEqual(duplicateAnchor(doc, 'k-o1'), { before: 'k-o2', outsideGroup: false });
-    assert.deepEqual(duplicateAnchor(doc, 'k-o2'), { before: 'k-c', outsideGroup: false });
-    assert.deepEqual(duplicateAnchor(doc, 'k-p2'), { before: 'k-h', outsideGroup: false });
-});
-
-test('duplicateAnchor: an item followed by a headerless option run lands outside that group', () => {
-    assert.deepEqual(duplicateAnchor(mkDoc(), 'k-c'), { before: 'k-p1', outsideGroup: true });
-});
-
-test('duplicateAnchor: the last row appends (before null); an unknown key is null', () => {
-    assert.deepEqual(duplicateAnchor(mkDoc(), 'k-d'), { before: null, outsideGroup: false });
-    assert.equal(duplicateAnchor(mkDoc(), 'nope'), null);
 });
 
 test('buildOutline: leaf nodes carry hasContent (non-blank block content)', () => {

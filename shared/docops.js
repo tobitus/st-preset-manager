@@ -694,26 +694,35 @@ function snapAboveGroup(entries, idx) {
 
 /**
  * Land a copy payload in `doc` at `before` (a leaf row key; null/undefined =
- * end of the first sequence). Every copied block gets a freshly minted
- * identifier and row key — never the source's — and starts off in every
- * loadout. Landing rules (`before` = the key of the row the drop landed
- * above):
+ * end of the first sequence) or, for a single block, at `opts.after` (a
+ * leaf row key in its own sequence — the copy lands right after its
+ * source). Every copied block gets a freshly minted identifier and row key
+ * — never the source's — and starts off in every loadout. Landing rules
+ * (`before` = the key of the row the drop landed above):
  *   single block  anchor option -> an option of that group at that position
  *                 anything else -> an item at that position
  *   whole group   anchor option -> snaps above the anchor's group (never
  *                                  splits it)
  *                 anything else -> right above the anchor
+ * `opts.after` (single block only; mutually exclusive with `before`) lands
+ * directly below the named row, in the row's own sequence:
+ *   anchor option  -> an option of that group, right after the anchor
+ *   anchor group   -> an item right after the group's option run
+ *   anchor section
+ *   or item        -> an item right after the anchor
  * A group landing is refused (400) when it would merge into a neighbouring
  * group's options. All validation runs before any mutation of `doc`.
  * @param {any} doc
  * @param {CopyPayload} payload
  * @param {string|null|undefined} before
- * @param {{ outsideGroup?: boolean }} [opts] `outsideGroup`: for a BLOCK
- *   payload anchored on an option, land as a plain item above the anchor's
- *   whole group instead of joining it — the drop point was outside the
- *   anchor's group (dropAnchor reached the anchor by descending into a
- *   headerless container). No effect on a group payload or a non-option
- *   anchor.
+ * @param {{ outsideGroup?: boolean, after?: string }} [opts] `outsideGroup`:
+ *   for a BLOCK payload anchored on an option, land as a plain item above
+ *   the anchor's whole group instead of joining it — the drop point was
+ *   outside the anchor's group (dropAnchor reached the anchor by
+ *   descending into a headerless container). No effect on a group payload
+ *   or a non-option anchor. `after`: for a BLOCK payload, land directly
+ *   below this leaf key instead of at `before`; takes precedence and
+ *   cannot be combined with a non-null `before`.
  */
 export function copyIntoDoc(doc, payload, before, opts = {}) {
     if (opts.outsideGroup !== undefined && typeof opts.outsideGroup !== 'boolean') {
@@ -722,8 +731,17 @@ export function copyIntoDoc(doc, payload, before, opts = {}) {
     if (before !== null && before !== undefined && typeof before !== 'string') {
         throw new OpError('copyBlock before must be a leaf key');
     }
+    if (opts.after !== undefined && typeof opts.after !== 'string') {
+        throw new OpError('copyBlock after must be a leaf key');
+    }
+    if (opts.after !== undefined && before !== null && before !== undefined) {
+        throw new OpError('copyBlock takes before or after, not both');
+    }
     if (payload?.kind !== 'block' && payload?.kind !== 'group') {
         throw new OpError('copyBlock needs a block or group payload');
+    }
+    if (opts.after !== undefined && payload.kind !== 'block') {
+        throw new OpError('copyBlock after is for a single block');
     }
 
     /** @type {{ seq: any, idx: number }|null} */
@@ -732,7 +750,14 @@ export function copyIntoDoc(doc, payload, before, opts = {}) {
     let host;
     /** @type {any[]} */
     let entries;
-    if (before != null) {
+    if (opts.after !== undefined) {
+        for (const seq of doc.sequences ?? []) {
+            const flat = flattenSeq(seq.rows ?? []);
+            const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === opts.after);
+            if (idx !== -1) { anchor = { seq, idx }; host = seq; entries = flat; break; }
+        }
+        if (!anchor) throw new OpError(`no row with key ${JSON.stringify(opts.after)}`, 404);
+    } else if (before != null) {
         for (const seq of doc.sequences ?? []) {
             const flat = flattenSeq(seq.rows ?? []);
             const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === before);
@@ -753,7 +778,30 @@ export function copyIntoDoc(doc, payload, before, opts = {}) {
 
     /** @type {any[]} */
     let newEntries;
-    if (payload.kind === 'block') {
+    if (payload.kind === 'block' && opts.after !== undefined) {
+        const i = anchor.idx;
+        const A = entries[i];
+        let at;
+        let rank;
+        let gmeta;
+        if (A.rank === 'option') {
+            at = i + 1;
+            rank = 'option';
+            gmeta = { ...A.gmeta };
+        } else if (A.rank === 'group') {
+            let j = i + 1;
+            while (j < entries.length && entries[j].rank === 'option') j++;
+            at = j;
+            rank = 'item';
+            gmeta = null;
+        } else {
+            at = i + 1;
+            rank = 'item';
+            gmeta = null;
+        }
+        newEntries = [{ leaf: { kind: 'block', ref: ids[0], key: keys[0] }, rank, gmeta, sname: null }];
+        entries.splice(at, 0, ...newEntries);
+    } else if (payload.kind === 'block') {
         const A = anchor ? entries[anchor.idx] : null;
         let at = anchor ? anchor.idx : entries.length;
         let rank = A?.rank === 'option' ? 'option' : 'item';
