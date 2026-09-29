@@ -218,3 +218,67 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   from the outline into the shelf list is not supported (use *Save to
   shelf*).
 - Check: `node dev/check-phase6.mjs` (resets dev data).
+
+## Phase 7: MCP wrapper
+
+`mcp/server.js` is a zero-dependency Node MCP server (stdio transport:
+newline-delimited JSON-RPC 2.0 — `initialize`, `notifications/initialized`,
+`ping`, `tools/list`, `tools/call`). Each tool is one REST row: the
+arguments become the path parameters, the query string and the JSON body of
+one request, and the JSON response is the result (`content: [{type: 'text',
+text: <JSON>}]`). An HTTP error is a result with `isError: true` and the text
+`{status, error, …}` (the plugin's own error body). There is no logic in the
+wrapper: every rule lives in the plugin, so a tool behaves exactly like the
+UI and the REST call.
+
+- **Config** (env): `ST_URL` (default `http://127.0.0.1:8002`); `ST_USER` and
+  `ST_PASSWORD` for a multi-user ST (`POST /api/users/login`).
+- **Session**: at start (and lazily when that failed) `GET /csrf-token` gives
+  the session and the request token. Both are sent on every call and kept
+  in memory only. On a 403 the server fetches a fresh session once and
+  retries once. The server never reads `settings.json` or any cookie file,
+  and no session value appears in a tool argument, a result or a log line.
+  Logs go to stderr; stdout carries only JSON-RPC.
+- **Register in omp** (`.omp/mcp.json`):
+  `{"st-preset-manager": {"command": "node", "args": ["<repo>/mcp/server.js"], "env": {"ST_URL": "http://127.0.0.1:8002"}}}`.
+- **Smoke**: `printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"x","version":"0"}}}' | node mcp/server.js`.
+
+| Tool | REST |
+|---|---|
+| `health` | `GET /health` |
+| `library_list` `{tag?}` · `library_rescan` | `GET /library` · `POST /rescan` |
+| `preset_get` · `preset_export {format?}` | `GET /presets/:id` · `GET /presets/:id/export` |
+| `preset_import` · `preset_save {doc}` · `preset_delete` | `POST /presets` · `PUT /presets/:id` · `DELETE /presets/:id` |
+| `preset_fork` · `preset_move` · `preset_set_meta` | `POST …/fork` · `POST …/move` · `PATCH …/meta` |
+| `preset_op {op, …op args}` | `POST /presets/:id/ops` (every op, `copyBlock` included) |
+| `loadout_create` · `loadout_update` · `loadout_delete` · `loadout_activate` | `POST/PATCH/DELETE /presets/:id/loadouts[/:lid]`, `POST …/activate` |
+| `loadout_set_override` · `loadout_patch_override` · `loadout_delete_override` | `PUT/PATCH/DELETE …/loadouts/:lid/overrides/:modelId` |
+| `tuning_override_set {tuning}` · `tuning_override_patch` · `tuning_override_delete` | `PUT/PATCH/DELETE /presets/:id/tuning-overrides/:modelId` |
+| `models_list` · `models_replace {registry}` | `GET /models` · `PUT /models` |
+| `models_set_tuning {tuning}` · `models_patch_tuning` | `PUT/PATCH /models/:modelId/tuning` |
+| `models_rename` · `models_merge` · `models_seed` | `POST /models/rename` · `/merge` · `/seed` |
+| `profiles_list` · `profiles_backup` | `GET /profiles` · `POST /profiles/backup` |
+| `slot_get` · `slot_load` · `slot_set_model` | `GET /slot` · `POST /slot/load` · `POST /slot/model` |
+| `diff_presets` · `diff_blocks` | `POST /diff` · `POST /diff/blocks` |
+| `revisions_list` · `revision_get` · `revision_create` · `revision_restore` | `GET/POST /presets/:id/revisions[/:rev]` · `POST /presets/:id/restore` |
+| `shelf_list` · `shelf_get` · `shelf_add` · `shelf_update` · `shelf_remove` | `GET/POST/PATCH/DELETE /shelf[/:id]` |
+
+Path parameters are named `presetId`, `loadoutId`, `modelId`, `rev` and
+`shelfId`. Tools whose REST body is a whole object take it as one argument
+(`doc`, `registry`, `tuning`).
+
+**Left out, on purpose:**
+
+- `GET /events`: a Server-Sent Events stream for the ST tab, not a request
+  with a result.
+- `POST /slot/panel`: the tab's write-back protocol. Its body is a projection
+  of ST's live panel (`clientId`, `baseRev`, `base`, `snapshot`) that only the
+  tab can produce; a hand-made call would bypass the bridge.
+- `loadout_list` (named in PLAN §1.7): no REST row lists loadouts. The loadouts
+  are in `library_list` (`loadouts: [{id, name}]`) and in `preset_get`, and
+  adding a projection here would be logic in the wrapper.
+
+Tests: `test/mcp.test.js` (framing, error codes, the argument → HTTP map,
+and the session flow against a fake ST). Check: `node dev/check-phase7.mjs`
+(resets dev data; spawns the server behind a recording proxy and a headless
+Chromium on ST).

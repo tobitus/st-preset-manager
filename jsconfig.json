@@ -12,5 +12,5 @@
         "alwaysStrict": true,
         "skipLibCheck": true
     },
-    "include": ["index.js", "ext/**/*.js", "plugin/**/*.js", "shared/**/*.js", "test/**/*.js", "shared/*.d.ts", "node_modules/@types"]
+    "include": ["index.js", "ext/**/*.js", "plugin/**/*.js", "shared/**/*.js", "mcp/**/*.js", "test/**/*.js", "shared/*.d.ts", "node_modules/@types"]
 }
