@@ -367,3 +367,40 @@ override; nothing is ever switched off.
 
 Tests: `test/cardinality.test.js`. Check: `node dev/check-cardinality.mjs`
 (resets dev data; real mouse clicks on the badges in the v2 window).
+
+## Library Delete
+
+Each Library row has a **Delete** button. It asks for confirmation in an ST
+popup, then removes the preset file and its revision history. If the preset
+is in the working slot, the slot becomes empty (ST keeps the prompts it is
+showing; nothing is re-applied). An open Presets tab for it closes.
+
+Check: `node dev/check-nemo-delete.mjs` (resets dev data; covers Delete
+cancel/confirm and the Nemo import in the v2 window).
+
+## Nemo recognizer
+
+Presets whose blocks carry ST macro-comment tags `{{// @section-header true }}`
+or `{{// @mutual-exclusive-group X }}` are recognized as Nemo (checked before
+dem/sola/ff5/casus). Every section-header block opens a section (flat, no
+nesting). Each contiguous run (2 or more) of one mutual-exclusive-group value
+becomes a headerless pick-one group named by the tag value
+(`guessed:false`); a run of 1 stays a plain block. Prompt order never
+changes, so a group split into several runs is listed in the import notes
+(`nemo: group 'X' spans N non-contiguous run(s) ...`). Other tags are
+ignored. `source.recognizer.kind` is reported when every sequence picked the
+same recognizer.
+
+A group that directly follows another group is headed by its own first member
+(two adjacent headerless groups would merge in the outline model); the import
+notes say `nemo: group 'X' directly follows group 'Y'; ...`.
+
+In the outline of a Nemo-imported preset (`source.recognizer.kind` is
+`nemo`), a pick-one group heading whose block sends text shows its own radio:
+it is a pick-one member, so choosing it turns the options off, and 'none'
+clears it. Empty headings and pick-many headings have no switch. Other
+presets (FF/DEM/Sola) keep switchless headings: their content headings are
+informational text. This is a contained, temporary rule until roadmap 16
+replaces the outline's group model.
+
+Tests: `test/nemo.test.js`, `test/group-heading-switch.test.js`.

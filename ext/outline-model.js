@@ -25,9 +25,15 @@ import { containerName } from '../shared/outline.js';
  */
 
 /**
- * A rendered group row. Its header (if any) is shown without a switch (v1:
- * headings are not choosable). `noneOn` tallies options only; `conflict`
- * still counts an enabled heading, because compile's pick-one normalize
+ * A rendered group row. Its header (if any) is a pick-one member with its own
+ * radio (`headerSwitch`) only in a Nemo-imported document
+ * (`source.recognizer.kind === 'nemo'`), on a pick-one group, when it is a
+ * block that sends text: there a group directly following another group is
+ * headed by its own first member. Elsewhere (FF/DEM/Sola) content headings
+ * are informational text and stay switchless, as do empty and pick-many
+ * headings. Temporary, contained rule until roadmap 16 replaces this area.
+ * `noneOn` tallies options plus a switched header; `conflict` counts an
+ * enabled heading regardless, because compile's pick-one normalize
  * (shared/groups.js) treats it as a member and would collapse the pair.
  *
  * @typedef {Object} GroupNode
@@ -39,6 +45,7 @@ import { containerName } from '../shared/outline.js';
  * @property {boolean} guessed
  * @property {boolean} pickOne
  * @property {boolean} conflict
+ * @property {boolean} headerSwitch true when the header renders a radio (Nemo doc, pick-one, block, sends text)
  * @property {boolean} noneOn
  * @property {LeafNode[]} options
  */
@@ -75,6 +82,7 @@ import { containerName } from '../shared/outline.js';
  * @property {boolean} [guessed]
  * @property {boolean} [pickOne]
  * @property {boolean} [conflict]
+ * @property {boolean} [headerSwitch]
  * @property {boolean} [noneOn]
  * @property {LeafNode[]} [options]
  * @property {Node[]} [nodes]
@@ -132,6 +140,9 @@ function groupNode(doc, enabled, row) {
     const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, enabled, o, pickOne));
     const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
     const headerOn = header?.enabled ? 1 : 0;
+    // Nemo only (see the GroupNode typedef): FF/DEM/Sola content headings are informational
+    const headerSwitch = doc.source?.recognizer?.kind === 'nemo'
+        && pickOne && header !== null && header.leafKind === 'block' && header.hasContent;
     return {
         type: 'group',
         key: row.key,
@@ -141,7 +152,8 @@ function groupNode(doc, enabled, row) {
         guessed: !!row.guessed,
         pickOne,
         conflict: pickOne && on + headerOn >= 2,
-        noneOn: pickOne && on === 0,
+        headerSwitch,
+        noneOn: pickOne && on + (headerSwitch ? headerOn : 0) === 0,
         options,
     };
 }

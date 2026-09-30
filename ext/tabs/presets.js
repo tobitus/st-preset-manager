@@ -941,7 +941,10 @@ export function createPresetsTab(pane, bridge) {
             let fresh;
             try {
                 fresh = await api('GET', `/presets/${id}`);
-            } catch { /* transient — keep the current doc */ }
+            } catch (err) {
+                if (/** @type {any} */ (err)?.status === 404) { closeTab(id); continue; }
+                /* transient — keep the current doc */
+            }
             if (!fresh || !openIds.includes(id)) continue;
             if (JSON.stringify(docs.get(id)) !== JSON.stringify(fresh)) {
                 docs.set(id, fresh);

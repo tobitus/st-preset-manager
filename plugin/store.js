@@ -562,7 +562,10 @@ export class Store {
         return { saved, desired };
     }
 
-    /** @param {string} id */
+    /**
+     * @param {string} id
+     * @returns {Promise<{wasDesired: boolean}>}
+     */
     async deletePreset(id) {
         return this.enqueue(async () => {
             const entry = this.index.get(id);
@@ -570,7 +573,19 @@ export class Store {
             await fsp.rm(entry.path, { force: true });
             await fsp.rm(path.join(this.revisionsDir, id), { recursive: true, force: true });
             this.index.delete(id);
-            await this._bumpRev();
+            // a dangling slot preset id makes /slot/panel 409 forever; clear it
+            // (mirrors the loadout delete route). The state write bumps rev itself.
+            const wasDesired = this.state.presetId === id;
+            if (wasDesired) {
+                this._markSlotChanged();
+                await this._mutateStateNow((/** @type {any} */ st) => {
+                    st.presetId = null;
+                    st.loadoutId = null;
+                });
+            } else {
+                await this._bumpRev();
+            }
+            return { wasDesired };
         });
     }
 

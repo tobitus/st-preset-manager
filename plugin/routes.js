@@ -204,9 +204,9 @@ export function makeRouter() {
 
     router.delete('/presets/:id', async (req, res, next) => {
         try {
-            await req.pm.store.deletePreset(req.params.id);
-            broadcast(req, 'preset', req.params.id);
-            res.json({ ok: true });
+            const { wasDesired } = await req.pm.store.deletePreset(req.params.id);
+            broadcast(req, wasDesired ? 'slot' : 'preset', wasDesired ? null : req.params.id);
+            res.json({ ok: true, wasDesired });
         } catch (err) { next(err); }
     });
 

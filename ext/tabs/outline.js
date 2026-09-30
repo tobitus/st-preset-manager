@@ -215,10 +215,11 @@ function leafLi(node, selectedKey, ctx) {
 }
 
 /**
- * A group's row IS its header leaf when one exists, but the header never
- * gets a switch (only options do); headerless groups show the group name
- * and no handle. Every group row carries a collapse/expand caret, same as
- * sections.
+ * A group's row IS its header leaf when one exists. A pick-one header whose
+ * block sends text (`node.headerSwitch`) gets a radio like the options (it is
+ * a pick-one member); empty and pick-many headings stay switchless. Headerless
+ * groups show the group name and no handle. Every group row carries a
+ * collapse/expand caret, same as sections.
  * @param {GroupNode} node
  * @param {string|null} selectedKey
  * @param {RenderCtx} ctx
@@ -240,7 +241,9 @@ function groupLi(node, selectedKey, ctx) {
     caret.textContent = collapsedDisplay ? '▸' : '▾';
     row.append(caret);
     if (node.header) {
-        row.append(handleSpan(), nameSpan(node.header.name));
+        row.append(handleSpan());
+        if (node.headerSwitch) row.append(makeSwitch(node.header));
+        row.append(nameSpan(node.header.name));
         if (node.header.hasContent) row.append(sendsTextSpan());
     } else {
         row.append(nameSpan(node.name || '(options)'));

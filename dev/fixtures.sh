@@ -9,4 +9,7 @@ mkdir -p "$REPO/dev/fixtures/presets"
 cp "$LIVE_DATA/OpenAI Settings/"*.json "$REPO/dev/fixtures/presets/"
 # corpus presets (Sola V1.2, FF4-fork-Lydia, FrankenSIM, Casus Chatfill, …)
 cp "$HOME/projects/sillysystem/presets/"*.json "$REPO/dev/fixtures/presets/" 2>/dev/null || true
+# the Nemo Engine presets (presets/Nemo/; the other presets/ subfolders hold
+# variants of files already copied above and would overwrite them)
+cp "$HOME/projects/sillysystem/presets/Nemo/"*.json "$REPO/dev/fixtures/presets/" 2>/dev/null || true
 echo "[fixtures] $(ls "$REPO/dev/fixtures/presets" | wc -l) files in dev/fixtures/presets"

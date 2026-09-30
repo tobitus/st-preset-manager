@@ -229,6 +229,124 @@ function runDemStructural(rows, byid) {
     return [out, notes];
 }
 
+// ------------------------------------------------------------------ nemo
+
+/** Nemo Engine ST macro-comment tag: `{{// @tag value }}`. */
+export const NEMO_TAG = /\{\{\/\/\s*@([a-z-]+)(?:\s+([^}]*?))?\s*\}\}/g;
+
+/**
+ * Every Nemo tag in `content` -> trimmed value ('' when it has none).
+ * @param {any} content
+ * @returns {Map<string, string>}
+ */
+export function nemoTags(content) {
+    /** @type {Map<string, string>} */
+    const tags = new Map();
+    for (const m of String(content ?? '').matchAll(NEMO_TAG)) tags.set(m[1], (m[2] ?? '').trim());
+    return tags;
+}
+
+function isNemoRow(prompt) {
+    const tags = nemoTags(prompt?.content);
+    return tags.get('section-header') === 'true' || (tags.get('mutual-exclusive-group') ?? '') !== '';
+}
+
+/**
+ * Close a Nemo group: >=2 options -> group; 1 option -> plain leaf. Records the run.
+ * A group directly after another group takes its first row as heading, because
+ * the store's rebuildSeq merges adjacent headerless groups.
+ * @param {any} state
+ * @param {any[]} container
+ * @param {Map<string, any[][]>} runs
+ * @param {{ singles: number, groups: number }} counts
+ * @param {string[]} notes
+ * @param {(row: any) => string} nameOf
+ */
+function closeNemoGroup(state, container, runs, counts, notes, nameOf) {
+    if (state === null) return;
+    const list = runs.get(state.name) ?? [];
+    list.push(state.options);
+    runs.set(state.name, list);
+    if (state.options.length >= 2) {
+        const prev = container[container.length - 1];
+        const headed = prev?.kind === 'group';
+        if (headed) {
+            notes.push(
+                `nemo: group '${state.name}' directly follows group '${prev.name}'; ` +
+                    `its first member '${nameOf(state.options[0])}' heads it ` +
+                    `(adjacent headerless groups would merge; the heading is a pick-one member)`,
+            );
+        }
+        container.push({
+            kind: 'group',
+            key: newKey('grp'),
+            name: state.name,
+            cardinality: 'pick-one',
+            guessed: false,
+            header: headed ? state.options[0] : null,
+            options: headed ? state.options.slice(1) : state.options,
+        });
+        counts.groups += 1;
+    } else {
+        container.push(...state.options);
+        counts.singles += 1;
+    }
+}
+
+function runNemo(rows, byid) {
+    let /** @type {any} */ section = null;
+    let /** @type {any} */ group = null;
+    /** @type {any[]} */
+    const out = [];
+    /** @type {string[]} */
+    const notes = [];
+    /** @type {Map<string, any[][]>} */
+    const runs = new Map();
+    const counts = { singles: 0, groups: 0 };
+    let sections = 0;
+    const container = () => (section ? section.rows : out);
+    const pushLeaf = (row) => container().push(row);
+    const nameOf = (row) => (row.kind === 'ghost' ? '' : (byid.get(row.ref)?.name ?? '')) || '';
+    for (const row of rows) {
+        const tags = row.kind === 'block' ? nemoTags(byid.get(row.ref)?.content) : new Map();
+        const groupName = tags.get('mutual-exclusive-group') ?? '';
+        if (tags.get('section-header') === 'true') {
+            closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+            group = null;
+            flushSection(section, out);
+            section = { name: nameOf(row).trim(), header: row, rows: [] };
+            sections += 1;
+        } else if (groupName !== '') {
+            if (group !== null && group.name === groupName) {
+                group.options.push(row);
+            } else {
+                closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+                group = new GroupState(null, groupName, 'pick-one', false);
+                group.options.push(row);
+            }
+        } else {
+            closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+            group = null;
+            pushLeaf(row);
+        }
+    }
+    closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+    flushSection(section, out);
+    for (const [name, list] of runs) {
+        if (list.length < 2) continue;
+        const members = list.flat().map(nameOf).join(', ');
+        notes.push(
+            `nemo: group '${name}' spans ${list.length} non-contiguous run(s) ` +
+                `(kept in prompt order; runs of 1 stay plain): ${members}`,
+        );
+    }
+    notes.push(
+        `nemo: ${sections} sections, ${counts.groups} pick-one groups from @mutual-exclusive-group ` +
+            `(${counts.singles} single-row runs left plain)`,
+    );
+    return [out, notes];
+}
+
 function groupBareOptionRuns(out, notes, nameByKey) {
     /** Within each section, fold contiguous 「 」 option runs (>=2) into
      * pick-one-or-more groups (the NARRATIVE STYLES pattern). */
@@ -473,6 +591,7 @@ export function pickRecognizer(rows, byid) {
     const names = rowsToNamed(rows, byid)
         .filter(([r]) => r.kind === 'marker' || r.kind === 'block')
         .map(([, n]) => n);
+    if (rows.some((r) => r.kind === 'block' && isNemoRow(byid.get(r.ref)))) return 'nemo';
     if (names.some((n) => PICK_HEADER.test(n))) return 'dem';
     if (names.some((n) => SOLA_SECTION.test(n))) return 'sola';
     if (names.some((n) => isFf5Header(n))) return 'ff5';
@@ -481,6 +600,7 @@ export function pickRecognizer(rows, byid) {
 }
 
 const RECOGNIZERS = {
+    nemo: runNemo,
     dem: runDem,
     sola: runSola,
     ff5: runFf5,
@@ -528,17 +648,20 @@ export function importStPreset(data, name, ids = {}) {
     const notes = [];
     /** @type {any[]} */
     const sequences = [];
-    let presetKind = 'flat';
+    /** @type {string[]} */
+    const picked = [];
 
     for (const seq of data.prompt_order ?? []) {
         const kind = `seq${seq?.character_id}`;
         const rows = seqRows(data, seq?.order ?? [], byid, kind);
         const recognizer = pickRecognizer(rows, byid);
-        if ((data.prompt_order ?? []).length === 1) presetKind = recognizer;
+        picked.push(recognizer);
         const [structured, seqNotes] = RECOGNIZERS[recognizer](rows, byid);
         notes.push(...seqNotes);
         sequences.push({ character_id: seq?.character_id, rows: structured });
     }
+    const presetKind =
+        picked.length > 0 && (picked.length === 1 || picked.every((k) => k === picked[0])) ? picked[0] : 'flat';
 
     return {
         format: 'st-preset-manager/library',

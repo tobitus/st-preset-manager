@@ -376,3 +376,62 @@ test('store: /slot/panel state guard — slotChangedRev rejects pre-load panel p
     const fresh = (store.slotChangedRev ?? 0) > store.rev;
     assert.equal(fresh, false); // -> proceed with delta routing
 });
+
+test('store: deletePreset removes the file, its revisions and the index entry; second delete is 404', async () => {
+    const { store, doc } = await storeWithDoc();
+    doc.notes = 'edited';
+    await store.savePreset(doc); // writes revision 1
+    const entryPath = store.index.get(doc.id).path;
+    const revDir = path.join(store.revisionsDir, doc.id);
+    assert.ok(fs.existsSync(entryPath));
+    assert.ok(fs.existsSync(revDir));
+    const res = await store.deletePreset(doc.id);
+    assert.deepEqual(res, { wasDesired: false });
+    assert.equal(fs.existsSync(entryPath), false);
+    assert.equal(fs.existsSync(revDir), false);
+    assert.equal(store.listLibrary().length, 0);
+    await assert.rejects(() => store.deletePreset(doc.id), (err) => /** @type {any} */ (err).status === 404);
+    // a restarted store does not resurrect it
+    const again = new Store(store.root);
+    await again.init();
+    assert.equal(again.listLibrary().length, 0);
+});
+
+test('store: deleting the slot-bound preset empties the desired slot in the same transaction (restart-safe)', async () => {
+    const { store, doc } = await storeWithDoc();
+    await store.mutateState((st) => {
+        store._markSlotChanged();
+        st.presetId = doc.id;
+        st.loadoutId = doc.activeLoadoutId;
+    });
+    assert.ok(store.state.loadoutId);
+    const revBefore = store.rev;
+    const res = await store.deletePreset(doc.id);
+    assert.deepEqual(res, { wasDesired: true });
+    assert.equal(store.state.presetId, null);
+    assert.equal(store.state.loadoutId, null);
+    assert.equal(store.slotChangedRev, store.rev);
+    assert.ok(store.rev > revBefore);
+    const again = new Store(store.root);
+    await again.init();
+    assert.equal(again.state.presetId, null);
+    assert.equal(again.state.loadoutId, null);
+    assert.equal(again.slotChangedRev, store.rev);
+});
+
+test('store: deleting a preset that is not in the slot leaves the slot alone', async () => {
+    const { store, doc } = await storeWithDoc();
+    const other = await store.importPreset({ st: sampleSt(), name: 'Other' });
+    await store.mutateState((st) => {
+        store._markSlotChanged();
+        st.presetId = doc.id;
+        st.loadoutId = doc.activeLoadoutId;
+    });
+    const slotRev = store.slotChangedRev;
+    const res = await store.deletePreset(other.id);
+    assert.deepEqual(res, { wasDesired: false });
+    assert.equal(store.state.presetId, doc.id);
+    assert.equal(store.state.loadoutId, doc.activeLoadoutId);
+    assert.equal(store.slotChangedRev, slotRev);
+    assert.equal(store.listLibrary().length, 1);
+});

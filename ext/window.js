@@ -16,7 +16,7 @@
  * Library tab marks the preset in ST's working slot with a live badge that
  * follows slot changes without a manual refresh.
  */
-import { api, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
+import { api, ctx, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
 import { switchToModel, unlinkProfilePreset } from './connection.js';
 import { createPresetsTab } from './tabs/presets.js';
 import { createDiffTab } from './tabs/diff.js';
@@ -341,10 +341,10 @@ function wireModelPicker(root, bridge) {
 /**
  * Render the Library tab.
  * @param {HTMLElement} root .pm-root element
- * @param {import('./bridge.js').Bridge} _bridge
+ * @param {import('./bridge.js').Bridge} bridge
  * @param {{ items?: any[], desired?: any, onOpen?: (presetId: string) => void, filter?: string }} [state]
  */
-export function renderLibrary(root, _bridge, state = {}) {
+export function renderLibrary(root, bridge, state = {}) {
     root.innerHTML = `
         <div class="pm-library">
             <div class="pm-library-toolbar">
@@ -364,14 +364,14 @@ export function renderLibrary(root, _bridge, state = {}) {
         const filtered = tag ? items.filter((i) => i.tags.includes(tag)) : items;
         slotState.textContent = state.desired?.presetId ? `slot: ${SLOT_NAME}` : 'slot: empty';
         list.replaceChildren(...filtered.map((item) => libraryRow(item, state.desired?.presetId, () => {
-            void refresh(root, _bridge, state);
-        }, state.onOpen)));
+            void refresh(root, bridge, state);
+        }, state.onOpen, bridge)));
     };
     filter.addEventListener('input', render);
     render();
 }
 
-function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredId, /** @type {() => void} */ onChange, /** @type {((presetId: string) => void)|undefined} */ onOpen) {
+function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredId, /** @type {() => void} */ onChange, /** @type {((presetId: string) => void)|undefined} */ onOpen, /** @type {import('./bridge.js').Bridge} */ bridge) {
     const row = document.createElement('div');
     row.className = 'pm-library-row' + (item.id === desiredId ? ' pm-in-slot' : '');
     row.dataset.presetId = item.id;
@@ -389,12 +389,32 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
         <span class="pm-row-actions">${loadouts}
             <button class="menu_button pm-open" title="Open in the Presets tab">Open</button>
             <button class="menu_button pm-load" title="Load into working slot">Load</button>
+            <button class="menu_button pm-delete" title="Delete from the library">Delete</button>
         </span>`;
     row.querySelector('.pm-open')?.addEventListener('click', () => onOpen?.(item.id));
     row.querySelector('.pm-load')?.addEventListener('click', async () => {
         const lid = /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.value ?? undefined;
         await api('POST', '/slot/load', { presetId: item.id, ...(lid ? { loadoutId: lid } : {}) });
         onChange();
+    });
+    row.querySelector('.pm-delete')?.addEventListener('click', async () => {
+        let text = `Delete "${item.name}" from the library? Its revision history is removed too.`;
+        if (item.id === desiredId) text += ` It is in SillyTavern's working slot: the slot becomes empty; ST keeps the prompts it currently shows.`;
+        const p = document.createElement('p');
+        p.textContent = text;
+        const res = await ctx().callGenericPopup(p, ctx().POPUP_TYPE.CONFIRM);
+        if (res !== ctx().POPUP_RESULT.AFFIRMATIVE) return;
+        try {
+            await bridge.edit(() => api('DELETE', `/presets/${item.id}`));
+            onChange();
+        } catch (err) {
+            const host = /** @type {HTMLElement} */ (row.closest('.pm-library-list') ?? row);
+            host.querySelector(':scope > .pm-error')?.remove();
+            const div = document.createElement('div');
+            div.className = 'pm-error';
+            div.textContent = `Preset Manager: ${/** @type {Error} */ (err).message}`;
+            host.prepend(div);
+        }
     });
     /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.addEventListener('change', (ev) => {
         const lid = /** @type {HTMLSelectElement} */ (ev.target).value;

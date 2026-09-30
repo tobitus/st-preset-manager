@@ -21,7 +21,7 @@ interface PmHandle {
         getPreset(id: string): unknown;
         importPreset(body: unknown): Promise<unknown>;
         savePreset(doc: Record<string, unknown>, opts?: { label?: string }): Promise<unknown>;
-        deletePreset(id: string): Promise<void>;
+        deletePreset(id: string): Promise<{ wasDesired: boolean }>;
         listRevisions(presetId: string): { rev: number; at: string; label: string | null }[];
         getRevision(presetId: string, rev: number): unknown;
         snapshotRevision(presetId: string, label: unknown): Promise<{ rev: number; at: string; label: string | null }>;

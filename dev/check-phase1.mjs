@@ -277,8 +277,16 @@ async function main() {
         const onDisk = fs.readdirSync(path.join(PM_DIR, 'presets')).filter((f) => f.endsWith('.json')).length;
         // 4+4 pick-one/pick-one-or-more: import collapses the guessed echo
         // pairs (recognizer parity 7+1 is locked by test/recognizers.test.js)
-        const pass = lib.length === 27 && groups.length === 8 && pick1 === 4 && conns.length === 0 && onDisk === 27;
-        report('2 import+groups', !!pass, `library=${lib.length} groups=${groups.length} (pick-one=${pick1}) connKeys=${conns.length} files=${onDisk}`);
+        // every Chat Completion preset among the fixtures imports (27 before
+        // the Nemo fixtures were added; derived so new fixtures don't break it)
+        const fixDir = path.join(REPO, 'dev', 'fixtures', 'presets');
+        const expected = fs.readdirSync(fixDir).filter((f) => {
+            if (!f.endsWith('.json')) return false;
+            const d = JSON.parse(fs.readFileSync(path.join(fixDir, f), 'utf8'));
+            return Array.isArray(d?.prompts) && Array.isArray(d?.prompt_order);
+        }).length;
+        const pass = lib.length === expected && groups.length === 8 && pick1 === 4 && conns.length === 0 && onDisk === expected;
+        report('2 import+groups', !!pass, `library=${lib.length}/${expected} groups=${groups.length} (pick-one=${pick1}) connKeys=${conns.length} files=${onDisk}`);
     }
 
     // ------------------------------------------------------------------ 2b
