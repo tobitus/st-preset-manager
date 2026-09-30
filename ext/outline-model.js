@@ -9,6 +9,7 @@
  */
 
 import { containerName } from '../shared/outline.js';
+import { isCommentOnly } from '../shared/groups.js';
 
 /**
  * A rendered leaf row.
@@ -21,7 +22,8 @@ import { containerName } from '../shared/outline.js';
  * @property {string} name
  * @property {boolean} enabled
  * @property {'checkbox'|'radio'|'readonly'} switchType
- * @property {boolean} hasContent true when a block leaf's content is non-blank
+ * @property {boolean} hasContent true when a block leaf's content is non-blank and not comment-only
+ * @property {boolean} commentOnly content is only {{// }} comments and {{trim}}: sends no text; heading rows render no switch
  */
 
 /**
@@ -33,8 +35,9 @@ import { containerName } from '../shared/outline.js';
  * are informational text and stay switchless, as do empty and pick-many
  * headings. Temporary, contained rule until roadmap 16 replaces this area.
  * `noneOn` tallies options plus a switched header; `conflict` counts an
- * enabled heading regardless, because compile's pick-one normalize
- * (shared/groups.js) treats it as a member and would collapse the pair.
+ * enabled heading, except a comment-only one (it sends no text and is no
+ * pick-one member), because compile's pick-one normalize
+ * (shared/groups.js) treats a heading as a member and would collapse the pair.
  *
  * @typedef {Object} GroupNode
  * @property {'group'} type
@@ -74,6 +77,7 @@ import { containerName } from '../shared/outline.js';
  * @property {string} [identifier]
  * @property {'block'|'marker'|'ghost'} [leafKind]
  * @property {boolean} [hasContent]
+ * @property {boolean} [commentOnly] content is only {{// }} comments and {{trim}}: sends no text; heading rows render no switch
  * @property {string} [name]
  * @property {boolean} [enabled]
  * @property {'checkbox'|'radio'|'readonly'} [switchType]
@@ -113,6 +117,8 @@ function switchType(leaf, pickOne) {
  */
 function leafNode(doc, enabled, leaf, pickOne) {
     const identifier = leaf.ref ?? leaf.identifier;
+    const content = String(doc.blocks?.[identifier]?.content ?? '');
+    const commentOnly = leaf.kind === 'block' && isCommentOnly(content);
     return {
         type: 'leaf',
         key: leaf.key,
@@ -121,7 +127,8 @@ function leafNode(doc, enabled, leaf, pickOne) {
         name: leaf.kind === 'block' ? (doc.blocks?.[identifier]?.name || identifier) : identifier,
         enabled: !!enabled?.[identifier],
         switchType: switchType(leaf, pickOne),
-        hasContent: leaf.kind === 'block' && String(doc.blocks?.[identifier]?.content ?? '').trim() !== '',
+        hasContent: leaf.kind === 'block' && content.trim() !== '' && !commentOnly,
+        commentOnly,
     };
 }
 
@@ -139,7 +146,7 @@ function groupNode(doc, enabled, row) {
     const header = row.header ? leafNode(doc, enabled, row.header, pickOne) : null;
     const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, enabled, o, pickOne));
     const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
-    const headerOn = header?.enabled ? 1 : 0;
+    const headerOn = header?.enabled && !header.commentOnly ? 1 : 0;
     // Nemo only (see the GroupNode typedef): FF/DEM/Sola content headings are informational
     const headerSwitch = doc.source?.recognizer?.kind === 'nemo'
         && pickOne && header !== null && header.leafKind === 'block' && header.hasContent;
@@ -266,6 +273,7 @@ export function pickOneOps(group, identifier) {
     /** @type {Array<Object>} */
     const ops = [];
     for (const m of members) {
+        if (m === group.header && m.commentOnly) continue;
         if (m.enabled) ops.push({ op: 'toggle', identifier: m.identifier, value: false });
     }
     return ops;

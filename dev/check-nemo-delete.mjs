@@ -9,12 +9,22 @@
  *
  * Checks:
  *   n1 REST: the imported "Nemo Engine 11.5.2 - Default RP" has, in
- *      sequences[0], 49 sections and 29 groups; every group in every
- *      sequence is pick-one and guessed:false; source.recognizer.kind is
- *      'nemo'; a note names the split group 'World-Logic'
+ *      sequences[0], 18 sections (only `=== … ===` headers) and 45 groups
+ *      (30 pick-one, 15 pick-one-or-more under sub headers); every group is
+ *      guessed:false; source.recognizer.kind is 'nemo'; a note names the
+ *      split group 'World-Logic' and the moved sub header '<Vex Personas>'
  *   n2 UI: Library -> Open on the Nemo row; the first sequence's outline
- *      renders 49 section and 29 group rows; the `Format` group's member
+ *      renders 18 section and 45 group rows; the `Format` group's member
  *      switches are all radios and its badge reads 1
+ *   n4 UI: the `=== 🎭 Vex Personality ===` section row has no switch (its
+ *      heading is comment-only); its first child is the group headed
+ *      `<Vex Personas>` (no switch, badge 1, a click selects the row) with
+ *      31 radios, the first `📋 Default: Vex`; then 4 plain rows with
+ *      checkboxes. Indentation: the group heading's handle lines up with
+ *      its sibling rows' handles, and an option's handle starts right of
+ *      the heading's name
+ *   n5 UI: the same indentation rule on a DEM outline (a section holding a
+ *      plain row and a group)
  *   n3 UI: a folded-apart group (`Tense`, else `Tracker-Theme`) is headed by
  *      its first member; its heading row renders a radio switch. A real click
  *      on it makes the doc enable the heading and disable every option (and
@@ -27,7 +37,8 @@
  *      desired preset and compiled output are null, the Library says
  *      `slot: empty`, the Presets tab closes the deleted preset's tab, no
  *      popup remains, and ST's prompt manager still lists its prompts
- * Screenshots (dev/shots/): nemo-outline.png, nemo-heading-radio.png, delete-confirm.png.
+ * Screenshots (dev/shots/): nemo-outline.png, nemo-vex-section.png,
+ * dem-outline-indent.png, nemo-heading-radio.png, delete-confirm.png.
  *
  * Environment: the dev container st-pm-dev on 127.0.0.1:8002 with the plugin
  * (dev/up.sh); NEVER :8001. It RESETS the dev data (dev/reset.sh) first.
@@ -45,6 +56,7 @@ import {
 
 const TAB = 'chknd';
 const NEMO = 'Nemo Engine 11.5.2 - Default RP';
+const DEM = 'DEUS.EX.MACHINA.V2.5.ST';
 const SHOTS = path.join(REPO, 'dev', 'shots');
 const PM_DIR = path.join(REPO, 'dev', 'data', 'default-user', 'preset-manager');
 
@@ -55,7 +67,7 @@ onExit(() => probe.kill());
 process.on('exit', () => cleanupTabs([TAB]));
 
 const J = (/** @type {any} */ v) => JSON.stringify(v);
-const ids = { nemo: '', ff: '' };
+const ids = { nemo: '', ff: '', dem: '' };
 
 // ------------------------------------------------------------------ page helpers
 
@@ -158,15 +170,40 @@ async function check(/** @type {string} */ name, /** @type {() => Promise<string
 }
 const must = (/** @type {any} */ cond, /** @type {string} */ msg) => { if (!cond) throw new Error(msg); };
 
+/** Scroll the first element matching `sel` to the top of its scroller. */
+const scrollTo = (/** @type {string} */ sel) => probe.eval(`(() => { const el = document.querySelector(${J(sel)}); if (!el) return false; el.scrollIntoView({ block: 'start' }); return true; })()`);
+
+/** Left x of `part` ('.pm-drag-handle' | '.pm-name' | 'input.pm-switch') in the row of each li selector. */
+const partX = (/** @type {string[]} */ lis, /** @type {string} */ part) => probe.eval(`${J(lis)}.map((s) => {
+    const el = document.querySelector(s + ' > .pm-row > ' + ${J(part)});
+    return el ? Math.round(el.getBoundingClientRect().left * 10) / 10 : null;
+})`);
+
+/**
+ * Indentation rule for one container li: `groupLi` (a headed group) and
+ * `leafLi` (a plain row) are siblings; their handles line up, and the
+ * group's first option's handle starts right of the group heading's name.
+ */
+async function indentOk(/** @type {string} */ groupLi, /** @type {string} */ leafLi) {
+    const optLi = `${groupLi} > ul.pm-list > li.pm-node`;
+    const [gh, lh, oh] = await partX([groupLi, leafLi, optLi], '.pm-drag-handle');
+    const [gn] = await partX([groupLi], '.pm-name');
+    must(gh !== null && lh !== null && oh !== null && gn !== null, `indent probe missing a part: ${J({ gh, lh, oh, gn })}`);
+    must(Math.abs(gh - lh) <= 1, `group heading handle x=${gh} vs sibling row handle x=${lh}: not aligned`);
+    must(oh > gn, `option handle x=${oh} is not right of the group heading's name x=${gn}`);
+    return `handles heading=${gh} sibling=${lh}; heading name=${gn} < option handle=${oh}`;
+}
+
 // ------------------------------------------------------------------ check helpers
 
 /** Count section and group rows in a row tree (sections nest their rows). */
-function walk(/** @type {any[]} */ rows, /** @type {{sections: number, groups: number, bad: string[]}} */ acc = { sections: 0, groups: 0, bad: [] }) {
+function walk(/** @type {any[]} */ rows, /** @type {{sections: number, groups: number, one: number, many: number, bad: string[]}} */ acc = { sections: 0, groups: 0, one: 0, many: 0, bad: [] }) {
     for (const r of rows) {
         if (r.kind === 'section') { acc.sections++; walk(r.rows ?? [], acc); }
         else if (r.kind === 'group') {
             acc.groups++;
-            if (r.cardinality !== 'pick-one' || r.guessed !== false) acc.bad.push(`${r.name}:${r.cardinality}/guessed=${r.guessed}`);
+            if (r.cardinality === 'pick-one') acc.one++; else acc.many++;
+            if (r.guessed !== false) acc.bad.push(`${r.name}:${r.cardinality}/guessed=${r.guessed}`);
         }
     }
     return acc;
@@ -232,12 +269,12 @@ async function main() {
     execFileSync(path.join(REPO, 'dev', 'reset.sh'), { stdio: 'inherit' });
     await primeSession();
     execFileSync(path.join(REPO, 'dev', 'import-fixtures.sh'),
-        ['^(Nemo Engine 11\\.5\\.2 - Default RP|Freaky Frankenstein 5\\.4 Internal States \\(2\\))$'],
+        ['^(Nemo Engine 11\\.5\\.2 - Default RP|Freaky Frankenstein 5\\.4 Internal States \\(2\\)|DEUS\\.EX\\.MACHINA\\.V2\\.5\\.ST)$'],
         { stdio: 'pipe' });
     const library = (await api('GET', '/library')).json ?? [];
     const idOf = (/** @type {string} */ n) => library.find((/** @type {any} */ e) => e.name === n)?.id ?? '';
-    ids.nemo = idOf(NEMO); ids.ff = idOf(FF);
-    if (!ids.nemo || !ids.ff) fatal('setup', `fixtures missing: ${J(library.map((/** @type {any} */ e) => e.name))}`);
+    ids.nemo = idOf(NEMO); ids.ff = idOf(FF); ids.dem = idOf(DEM);
+    if (!ids.nemo || !ids.ff || !ids.dem) fatal('setup', `fixtures missing: ${J(library.map((/** @type {any} */ e) => e.name))}`);
     if (!fs.existsSync(ffFile)) fatal('setup', `precondition: FF file missing at ${ffFile}`);
 
     await probe.start();
@@ -254,39 +291,41 @@ async function main() {
     } catch (err) {
         fatal('setup', /** @type {Error} */ (err).message);
     }
-    report('setup: reset, Nemo + FF imported, window open on the Library tab, clean pm.* localStorage', true,
-        `nemo=${ids.nemo} ff=${ids.ff}`);
+    report('setup: reset, Nemo + FF + DEM imported, window open on the Library tab, clean pm.* localStorage', true,
+        `nemo=${ids.nemo} ff=${ids.ff} dem=${ids.dem}`);
 
     const nemoDoc = await getDoc(ids.nemo);
 
     // ------------------------------------------------------------------ n1
-    await check('n1 REST: Nemo imports as 49 sections + 29 pick-one groups, kind nemo, World-Logic noted', async () => {
+    await check('n1 REST: Nemo imports as 18 sections + 45 groups (30 pick-one, 15 pick-many), kind nemo, World-Logic + moved <Vex Personas> noted', async () => {
         const seq0 = walk(nemoDoc.sequences[0].rows);
-        must(seq0.sections === 49, `sequences[0] has ${seq0.sections} sections, want 49`);
-        must(seq0.groups === 29, `sequences[0] has ${seq0.groups} groups, want 29`);
+        must(seq0.sections === 18, `sequences[0] has ${seq0.sections} sections, want 18`);
+        must(seq0.groups === 45 && seq0.one === 30 && seq0.many === 15, `sequences[0] has ${seq0.groups} groups (${seq0.one} pick-one, ${seq0.many} pick-many), want 45 (30, 15)`);
         let groupsAll = 0;
         for (const [i, seq] of nemoDoc.sequences.entries()) {
             const w = walk(seq.rows);
             groupsAll += w.groups;
-            must(!w.bad.length, `sequences[${i}] groups not pick-one/guessed:false: ${J(w.bad.slice(0, 5))}`);
+            must(!w.bad.length, `sequences[${i}] groups not guessed:false: ${J(w.bad.slice(0, 5))}`);
         }
         const kind = nemoDoc.source?.recognizer?.kind;
         must(kind === 'nemo', `source.recognizer.kind is ${J(kind)}, want "nemo"`);
         const notes = nemoDoc.source?.recognizer?.notes ?? [];
         const note = notes.find((/** @type {any} */ n) => String(n).includes(`group 'World-Logic'`));
         must(note, `no note includes "group 'World-Logic'" (notes: ${J(notes.slice(0, 5))})`);
-        return `sequences[0]: ${seq0.sections} sections, ${seq0.groups} groups; ${nemoDoc.sequences.length} sequences, ${groupsAll} groups in total, all pick-one guessed:false; kind=${kind}; note ${J(String(note).slice(0, 80))}`;
+        const moved = notes.find((/** @type {any} */ n) => String(n).includes(`moved sub header '<Vex Personas>'`));
+        must(moved, `no note says "moved sub header '<Vex Personas>'"`);
+        return `sequences[0]: ${seq0.sections} sections, ${seq0.groups} groups (${seq0.one} pick-one, ${seq0.many} pick-many); ${nemoDoc.sequences.length} sequences, ${groupsAll} groups in total, all guessed:false; kind=${kind}; notes ${J(String(note).slice(0, 60))}, ${J(String(moved).slice(0, 70))}`;
     });
 
     // ------------------------------------------------------------------ n2
-    await check('n2 UI: Nemo outline renders 49 sections + 29 groups in its first sequence; Format is radios with badge 1', async () => {
+    await check('n2 UI: Nemo outline renders 18 sections + 45 groups in its first sequence; Format is radios with badge 1', async () => {
         await openFromLibrary(ids.nemo);
         const seq0 = `${view(ids.nemo)} .pm-outline ul.pm-list[data-list="seq"][data-seq-index="0"]`;
         await until(async () => (await count(`${seq0} li.pm-node[data-kind="group"]`)) > 0, 10000, 'first sequence rendered');
         const sections = await count(`${seq0} li.pm-node[data-kind="section"]`);
         const groups = await count(`${seq0} li.pm-node[data-kind="group"]`);
-        must(sections === 49, `UI shows ${sections} section rows in the first sequence, want 49`);
-        must(groups === 29, `UI shows ${groups} group rows in the first sequence, want 29`);
+        must(sections === 18, `UI shows ${sections} section rows in the first sequence, want 18`);
+        must(groups === 45, `UI shows ${groups} group rows in the first sequence, want 45`);
         const fmt = findGroupByName(nemoDoc.sequences[0].rows, 'Format');
         must(fmt?.key, `no group named Format in sequences[0] (REST doc)`);
         const fli = `${seq0} li.pm-node[data-kind="group"][data-node-key="${fmt.key}"]`;
@@ -298,6 +337,66 @@ async function main() {
         must(b === '1', `Format badge ${J(b)}, want "1"`);
         const out = await shot('nemo-outline.png');
         return `first sequence: ${sections} section rows, ${groups} group rows; Format (${types.length} members) all radio, badge ${b}; screenshot ${out}`;
+    });
+
+    // ------------------------------------------------------------------ n4
+    await check('n4 UI: Vex section = [<Vex Personas> pick-one heading (selectable, no switch) + 31 radios, 4 plain checkboxes]; indentation', async () => {
+        const seq0 = `${view(ids.nemo)} .pm-outline ul.pm-list[data-list="seq"][data-seq-index="0"]`;
+        const vexRow = nemoDoc.sequences[0].rows.find((/** @type {any} */ r) => r.kind === 'section' && r.name === '=== 🎭 Vex Personality ===');
+        must(vexRow, 'no Vex Personality section in sequences[0] (REST doc)');
+        const sli = `${seq0} > li.pm-node[data-kind="section"][data-node-key="${vexRow.key}"]`;
+        must(await exists(sli), `no Vex section row ${vexRow.key} in the outline`);
+        must((await count(`${sli} > .pm-row input.pm-switch`)) === 0, 'the Vex section heading row renders a switch (its heading is comment-only)');
+        const kids = await probe.eval(`[...document.querySelectorAll(${J(`${sli} > ul.pm-list > li.pm-node`)})].map((li) => ({
+            kind: li.dataset.kind, nodeKey: li.dataset.nodeKey,
+            name: li.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '',
+            own: [...li.querySelectorAll(':scope > .pm-row input.pm-switch')].map((i) => i.type),
+            opts: [...li.querySelectorAll(':scope > ul.pm-list > li.pm-node > .pm-row input.pm-switch')].map((i) => i.type),
+            firstOpt: li.querySelector(':scope > ul.pm-list > li.pm-node .pm-name')?.textContent ?? '',
+        }))`);
+        must(kids.length === 5, `Vex section has ${kids.length} child rows, want 5: ${J(kids.map((/** @type {any} */ k) => k.name))}`);
+        const [g, ...plain] = kids;
+        must(g.kind === 'group' && g.name === '<Vex Personas>', `first child is ${J([g.kind, g.name])}, want the group headed <Vex Personas>`);
+        must(g.own.length === 0, `<Vex Personas> heading row renders switches ${J(g.own)}, want none`);
+        must(g.opts.length === 31 && g.opts.every((/** @type {string} */ t) => t === 'radio'), `<Vex Personas> options: ${g.opts.length} switches ${J([...new Set(g.opts)])}, want 31 radios`);
+        must(g.firstOpt === '📋 Default: Vex', `first option ${J(g.firstOpt)}, want "📋 Default: Vex"`);
+        const gli = `${sli} > ul.pm-list > li.pm-node[data-node-key="${g.nodeKey}"]`;
+        const badge = await badgeText(gli);
+        must(badge === '1', `<Vex Personas> badge ${J(badge)}, want "1"`);
+        must(J(plain.map((/** @type {any} */ k) => [k.kind, k.name, k.own])) === J([
+            ['leaf', '♠️ Midnight Courier Vex', ['checkbox']], ['leaf', '💬 Vex Commentary', ['checkbox']],
+            ['leaf', '💭 Vex Meta-Commentary', ['checkbox']], ['leaf', '📦 Core Assembler', ['checkbox']],
+        ]), `rows after the group: ${J(plain.map((/** @type {any} */ k) => [k.kind, k.name, k.own]))}`);
+        // the heading row is selectable: a real click on its name selects it
+        await scrollTo(sli);
+        await mouseClickSel(`${gli} > .pm-row .pm-name`);
+        await until(() => exists(`${gli} > .pm-row.pm-selected`), 5000, '<Vex Personas> row selected after a click');
+        const leafLi = `${sli} > ul.pm-list > li.pm-node[data-kind="leaf"]`;
+        const indent = await indentOk(gli, leafLi);
+        await scrollTo(sli);
+        const out = await shot('nemo-vex-section.png');
+        return `section row: no switch; <Vex Personas> group: no heading switch, badge 1, 31 radios from "📋 Default: Vex", selected by a click; 4 plain checkboxes; ${indent}; screenshot ${out}`;
+    });
+
+    // ------------------------------------------------------------------ n5
+    await check('n5 UI: DEM outline indentation: a group heading lines up with its sibling rows, its options sit right of its name', async () => {
+        const demDoc = await getDoc(ids.dem);
+        // a section with a plain block row and a headed group row among its direct rows
+        const sec = demDoc.sequences[0].rows.find((/** @type {any} */ r) => r.kind === 'section'
+            && r.rows.some((/** @type {any} */ c) => c.kind === 'block') && r.rows.some((/** @type {any} */ c) => c.kind === 'group' && c.header));
+        must(sec, 'no DEM section with both a plain row and a headed group');
+        const grp = sec.rows.find((/** @type {any} */ c) => c.kind === 'group' && c.header);
+        await openFromLibrary(ids.dem);
+        const seq0 = `${view(ids.dem)} .pm-outline ul.pm-list[data-list="seq"][data-seq-index="0"]`;
+        const sli = `${seq0} > li.pm-node[data-kind="section"][data-node-key="${sec.key}"]`;
+        await until(() => exists(sli), 10000, 'DEM section rendered');
+        const gli = `${sli} > ul.pm-list > li.pm-node[data-node-key="${grp.key}"]`;
+        const leafLi = `${sli} > ul.pm-list > li.pm-node[data-kind="leaf"]`;
+        const indent = await indentOk(gli, leafLi);
+        await scrollTo(sli);
+        const out = await shot('dem-outline-indent.png');
+        await openFromLibrary(ids.nemo);
+        return `DEM section ${J(sec.name)}, group ${J(grp.name)}: ${indent}; screenshot ${out}`;
     });
 
     // ------------------------------------------------------------------ n3

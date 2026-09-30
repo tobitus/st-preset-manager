@@ -15,7 +15,7 @@
  * (Phase 2 Must-NOT). Notes are library-only and never compiled.
  */
 import { CONNECTION_KEYS } from './st-keys.js';
-import { normalize } from './groups.js';
+import { normalize, pickOneMembers } from './groups.js';
 import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError, containerName, syncHeadingNames, makeSection, unmakeSection } from './outline.js';
 import { newId } from './util.js';
 import { newKey } from './canonical.js';
@@ -205,14 +205,15 @@ function opRenameGroup(doc, a) {
 }
 
 /**
- * Identifiers of the group's members (heading + options) that are on in an
- * enabled map.
+ * Identifiers of the group's pick-one members (heading + options; a
+ * comment-only heading is no member) that are on in an enabled map.
+ * @param {any} doc
  * @param {any} grp
  * @param {any} enabled
  * @returns {string[]}
  */
-function onMembers(grp, enabled) {
-    const members = [...(grp.header ? [grp.header] : []), ...(grp.options ?? [])];
+function onMembers(doc, grp, enabled) {
+    const members = pickOneMembers(doc, grp);
     return members.map((leaf) => identOf(leaf)).filter((id) => id && enabled?.[id]);
 }
 
@@ -220,8 +221,8 @@ function onMembers(grp, enabled) {
  * Change a group's kind (pick-one | pick-one-or-more). Never changes enabled
  * bits. Switching to pick-one is refused (409) while any loadout's base map or
  * per-Model override effective map has 2+ of the group's members on (an
- * enabled heading counts), so normalize never silently collapses after a
- * switch.
+ * enabled heading counts, a comment-only heading does not), so normalize
+ * never silently collapses after a switch.
  * @param {any} doc
  * @param {{ key?: string, cardinality?: string }} a
  */
@@ -239,7 +240,7 @@ function opSetCardinality(doc, a) {
         /** @type {any[]} */
         const loadouts = [...(active ? [active] : []), ...Object.values(doc.loadouts ?? {}).filter((l) => l !== active)];
         const refuse = (/** @type {any} */ enabled, /** @type {string} */ where) => {
-            const on = onMembers(grp, enabled);
+            const on = onMembers(doc, grp, enabled);
             if (on.length < 2) return;
             const heading = headId && on.includes(headId) ? ' (the group heading counts)' : '';
             throw new OpError(`more than one option currently selected${where}${heading}`, 409);

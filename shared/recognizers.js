@@ -9,6 +9,7 @@
  */
 import { isStMarkerIdentifier, CONNECTION_KEYS } from './st-keys.js';
 import { newKey } from './canonical.js';
+import { isCommentOnly } from './groups.js';
 
 export const PICK_HEADER = /^🔻PICK:\s*(.+?)\s*🔻$/;
 export const SECTION_HEADER = /^🔹🔹\s*(.+?)\s*🔹🔹$/;
@@ -293,6 +294,20 @@ function closeNemoGroup(state, container, runs, counts, notes, nameOf) {
     }
 }
 
+/**
+ * Nemo outline. A header block (`@section-header true`) whose name looks like
+ * `=== … ===` opens a section; every other header is a SUB header and never a
+ * section. A sub header directly before an `@mutual-exclusive-group T` run
+ * heads that run as a pick-one group (a comment-only sub header sitting
+ * inside the run is first moved to the run's head; a sub header that sends
+ * text and every content block never move). A sub header
+ * before a run of plain blocks heads them as a pick-one-or-more group; any
+ * other sub header stays a plain leaf. Headerless exclusive runs of >=2 are
+ * pick-one groups, runs of 1 stay plain.
+ * @param {any[]} rows
+ * @param {Map<string, any>} byid
+ * @returns {[any[], string[]]}
+ */
 function runNemo(rows, byid) {
     let /** @type {any} */ section = null;
     let /** @type {any} */ group = null;
@@ -302,26 +317,103 @@ function runNemo(rows, byid) {
     const notes = [];
     /** @type {Map<string, any[][]>} */
     const runs = new Map();
-    const counts = { singles: 0, groups: 0 };
+    const counts = { singles: 0, groups: 0, many: 0 };
     let sections = 0;
     const container = () => (section ? section.rows : out);
     const pushLeaf = (row) => container().push(row);
     const nameOf = (row) => (row.kind === 'ghost' ? '' : (byid.get(row.ref)?.name ?? '')) || '';
-    for (const row of rows) {
-        const tags = row.kind === 'block' ? nemoTags(byid.get(row.ref)?.content) : new Map();
-        const groupName = tags.get('mutual-exclusive-group') ?? '';
+    /** @returns {{ type: 'top'|'sub'|'excl'|'plain'|'other', tag: string }} */
+    const classify = (row) => {
+        if (row.kind !== 'block') return { type: 'other', tag: '' };
+        const tags = nemoTags(byid.get(row.ref)?.content);
         if (tags.get('section-header') === 'true') {
+            return { type: /^\s*=+.*=+\s*$/.test(nameOf(row)) ? 'top' : 'sub', tag: '' };
+        }
+        const tag = tags.get('mutual-exclusive-group') ?? '';
+        return tag !== '' ? { type: 'excl', tag } : { type: 'plain', tag: '' };
+    };
+
+    // Pre-pass: a comment-only sub header (sends no text) inside an exclusive
+    // run moves to the run's head; a sub header that sends text never moves.
+    const ordered = rows.slice();
+    for (let i = 0; i < ordered.length; i++) {
+        if (classify(ordered[i]).type !== 'sub' || i + 1 >= ordered.length) continue;
+        if (!isCommentOnly(byid.get(ordered[i].ref)?.content)) continue;
+        const next = classify(ordered[i + 1]);
+        if (next.type !== 'excl') continue;
+        let j = i;
+        while (j > 0) {
+            const c = classify(ordered[j - 1]);
+            if (c.type === 'excl' && c.tag === next.tag) j -= 1;
+            else break;
+        }
+        if (j === i || (j > 0 && classify(ordered[j - 1]).type === 'sub')) continue;
+        const [header] = ordered.splice(i, 1);
+        ordered.splice(j, 0, header);
+        notes.push(
+            `nemo: moved sub header '${nameOf(header)}' up ${i - j} row(s) to head its '${next.tag}' run ` +
+                `(it split the run; the heading sends no text)`,
+        );
+    }
+
+    for (let i = 0; i < ordered.length; i++) {
+        const row = ordered[i];
+        const cls = classify(row);
+        if (cls.type === 'top') {
             closeNemoGroup(group, container(), runs, counts, notes, nameOf);
             group = null;
             flushSection(section, out);
             section = { name: nameOf(row).trim(), header: row, rows: [] };
             sections += 1;
-        } else if (groupName !== '') {
-            if (group !== null && group.name === groupName) {
+        } else if (cls.type === 'sub') {
+            closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+            group = null;
+            const next = i + 1 < ordered.length ? classify(ordered[i + 1]) : { type: 'other', tag: '' };
+            if (next.type === 'excl') {
+                let k = i + 1;
+                while (k < ordered.length) {
+                    const c = classify(ordered[k]);
+                    if (c.type === 'excl' && c.tag === next.tag) k += 1;
+                    else break;
+                }
+                const options = ordered.slice(i + 1, k);
+                const list = runs.get(next.tag) ?? [];
+                list.push(options);
+                runs.set(next.tag, list);
+                container().push({
+                    kind: 'group',
+                    key: newKey('grp'),
+                    name: next.tag,
+                    cardinality: 'pick-one',
+                    guessed: false,
+                    header: row,
+                    options,
+                });
+                counts.groups += 1;
+                i = k - 1;
+            } else if (next.type === 'plain') {
+                let k = i + 1;
+                while (k < ordered.length && classify(ordered[k]).type === 'plain') k += 1;
+                container().push({
+                    kind: 'group',
+                    key: newKey('grp'),
+                    name: nameOf(row).trim(),
+                    cardinality: 'pick-one-or-more',
+                    guessed: false,
+                    header: row,
+                    options: ordered.slice(i + 1, k),
+                });
+                counts.many += 1;
+                i = k - 1;
+            } else {
+                pushLeaf(row);
+            }
+        } else if (cls.type === 'excl') {
+            if (group !== null && group.name === cls.tag) {
                 group.options.push(row);
             } else {
                 closeNemoGroup(group, container(), runs, counts, notes, nameOf);
-                group = new GroupState(null, groupName, 'pick-one', false);
+                group = new GroupState(null, cls.tag, 'pick-one', false);
                 group.options.push(row);
             }
         } else {
@@ -342,7 +434,7 @@ function runNemo(rows, byid) {
     }
     notes.push(
         `nemo: ${sections} sections, ${counts.groups} pick-one groups from @mutual-exclusive-group ` +
-            `(${counts.singles} single-row runs left plain)`,
+            `(${counts.singles} single-row runs left plain), ${counts.many} pick-many groups under sub headers`,
     );
     return [out, notes];
 }

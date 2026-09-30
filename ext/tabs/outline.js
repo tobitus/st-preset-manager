@@ -207,7 +207,10 @@ function leafLi(node, selectedKey, ctx) {
     li.dataset.nodeKey = node.key;
     const row = document.createElement('div');
     row.className = 'pm-row' + selectedSuffix(node.key, selectedKey);
-    row.append(handleSpan(), makeSwitch(node), nameSpan(node.name));
+    const spacer = document.createElement('span');
+    spacer.className = 'pm-caret-spacer';
+    spacer.setAttribute('aria-hidden', 'true');
+    row.append(spacer, handleSpan(), makeSwitch(node), nameSpan(node.name));
     applySearchMatch(row, node.key, ctx);
     li.append(row);
     if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
@@ -265,8 +268,10 @@ function groupLi(node, selectedKey, ctx) {
 
 /**
  * Sections show the section name (or header name when unnamed); handle and
- * switch exist only when a header leaf exists. Every section row carries a
- * collapse/expand caret (display-only, never affects the doc).
+ * switch exist only when a header leaf exists, and a comment-only heading
+ * (only `{{// }}` comments + `{{trim}}`: sends no text) gets no switch. Every
+ * section row carries a collapse/expand caret (display-only, never affects
+ * the doc).
  * @param {import('../outline-model.js').SectionNode} node
  * @param {string|null} selectedKey
  * @param {RenderCtx} ctx
@@ -288,7 +293,8 @@ function sectionLi(node, selectedKey, ctx) {
     caret.textContent = collapsedDisplay ? '▸' : '▾';
     row.append(caret);
     if (node.header) {
-        row.append(handleSpan(), makeSwitch(node.header));
+        row.append(handleSpan());
+        if (!node.header.commentOnly) row.append(makeSwitch(node.header));
     }
     row.append(nameSpan(node.name || node.header?.name || '(section)'));
     if (node.header?.hasContent) row.append(sendsTextSpan());

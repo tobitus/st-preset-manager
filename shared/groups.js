@@ -35,9 +35,44 @@ function walk(rows, out) {
 }
 
 /**
+ * True when `content` is non-blank but holds nothing besides `{{// … }}` ST
+ * comments and `{{trim}}` macros (Nemo's `{{// … }}{{trim}}` headings).
+ * Blank or missing content is NOT comment-only.
+ * @param {any} content
+ * @returns {boolean}
+ */
+export function isCommentOnly(content) {
+    const s = String(content ?? '');
+    if (s.trim() === '') return false;
+    return s.replace(/\{\{\/\/[\s\S]*?\}\}/g, '').replace(/\{\{trim\}\}/gi, '').trim() === '';
+}
+
+/**
+ * The leaves that count toward a pick-one group's "at most one on" rule: the
+ * heading (if any) followed by all options. A comment-only heading (Nemo's
+ * `{{// … }}{{trim}}` headings) sends no text, so it is no pick-one member.
+ * @param {any} doc
+ * @param {any} grp
+ * @returns {any[]}
+ */
+export function pickOneMembers(doc, grp) {
+    /** @type {any[]} */
+    const members = [];
+    const h = grp.header;
+    if (h) {
+        const id = h.ref ?? h.identifier;
+        const silent = h.kind === 'block' && isCommentOnly(doc.blocks?.[id]?.content);
+        if (!silent) members.push(h);
+    }
+    for (const opt of grp.options ?? []) members.push(opt);
+    return members;
+}
+
+/**
  * Leaf identifier -> the owning group row (first group that lists the leaf
- * as a heading or option). Headings count as members for cardinality: a
- * pick-one group whose heading is enabled pins the heading choice.
+ * as a member). Headings count as members for cardinality, except
+ * comment-only headings: a pick-one group whose heading is enabled pins the
+ * heading choice.
  * @param {any} doc
  * @returns {Map<string, any>} identifier -> group
  */
@@ -45,9 +80,7 @@ export function groupOfLeaf(doc) {
     /** @type {Map<string, any>} */
     const m = new Map();
     for (const grp of collectGroups(doc)) {
-        const members = [];
-        if (grp.header) members.push(grp.header);
-        for (const opt of grp.options ?? []) members.push(opt);
+        const members = pickOneMembers(doc, grp);
         for (const leaf of members) {
             const ident = leaf.ref ?? leaf.identifier;
             if (ident != null && !m.has(ident)) m.set(ident, grp);
@@ -78,9 +111,7 @@ export function normalize(doc, enabled, changedOut = undefined, preferred = null
     const seen = new Set();
     for (const grp of collectGroups(doc)) {
         if (grp.cardinality !== 'pick-one') continue;
-        const members = [];
-        if (grp.header) members.push(grp.header);
-        for (const opt of grp.options ?? []) members.push(opt);
+        const members = pickOneMembers(doc, grp);
         const idents = members
             .map((leaf) => leaf.ref ?? leaf.identifier)
             .filter((id) => id != null && !seen.has(id));
@@ -154,7 +185,8 @@ function walkLeaves(rows, out) {
  * Complete a per-Model loadout override: for every pick-one group, if a
  * member's override value is `true`, its siblings are forced `false` (the
  * last-in-`enabled`-key-order winner if more than one is on). Members of
- * non-pick-one groups and plain blocks are left exactly as given.
+ * non-pick-one groups and plain blocks are left exactly as given. A
+ * comment-only heading is no member (see pickOneMembers).
  * @param {any} doc
  * @param {Record<string, boolean>} enabled override map (not mutated)
  * @returns {Record<string, boolean>} a new map
@@ -164,9 +196,7 @@ export function completeOverride(doc, enabled) {
     const out = { ...enabled };
     for (const grp of collectGroups(doc)) {
         if (grp.cardinality !== 'pick-one') continue;
-        const members = [];
-        if (grp.header) members.push(grp.header);
-        for (const opt of grp.options ?? []) members.push(opt);
+        const members = pickOneMembers(doc, grp);
         const idents = members
             .map((leaf) => leaf.ref ?? leaf.identifier)
             .filter((id) => id != null);

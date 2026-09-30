@@ -19,7 +19,7 @@ import path from 'node:path';
 import { validateDoc, validateRegistry, nativeShapeErrors } from '../shared/schema.js';
 import { copyPayloadFromDoc, copyIntoDoc } from '../shared/docops.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
-import { ensureAllLeaves, completeOverride, iterLeaves, collectGroups } from '../shared/groups.js';
+import { ensureAllLeaves, completeOverride, iterLeaves, collectGroups, pickOneMembers } from '../shared/groups.js';
 import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
 import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
 import { resolveModel, seedFromProfiles, mergeModels } from '../shared/models.js';
@@ -994,9 +994,7 @@ export class Store {
                     // is left as-is.
                     for (const grp of collectGroups(doc)) {
                         if (grp.cardinality !== 'pick-one') continue;
-                        const members = [];
-                        if (grp.header) members.push(grp.header);
-                        for (const opt of grp.options ?? []) members.push(opt);
+                        const members = pickOneMembers(doc, grp);
                         const ids = members.map((leaf) => leaf.ref ?? leaf.identifier).filter((id) => id != null);
                         let winner;
                         let decided = false;

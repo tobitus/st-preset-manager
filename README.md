@@ -311,7 +311,11 @@ Chromium on ST).
 - **Collapse**: section AND group rows (headerless "(options)" groups too)
   have a caret; the state is display-only, per preset
   (`pm.collapsed.<presetId>`). A collapsed section or group moves as one unit
-  and no shelf drop lands inside it.
+  and no shelf drop lands inside it. Every row keeps the same leading caret
+  column (plain rows get an empty spacer), so a heading's handle, switch and
+  name line up with its sibling rows, and children indent past the caret
+  column (`calc(1.2em + 6px + 12px)`): a child's handle starts right of its
+  heading's name.
 - **Make / Unmake heading** (rank bar): *Make section heading* (Alt+S) turns
   the selected plain row into a section heading directly (one `makeSection`
   op; the rows below it up to the next section heading become its children)
@@ -382,10 +386,29 @@ cancel/confirm and the Nemo import in the v2 window).
 
 Presets whose blocks carry ST macro-comment tags `{{// @section-header true }}`
 or `{{// @mutual-exclusive-group X }}` are recognized as Nemo (checked before
-dem/sola/ff5/casus). Every section-header block opens a section (flat, no
-nesting). Each contiguous run (2 or more) of one mutual-exclusive-group value
-becomes a headerless pick-one group named by the tag value
-(`guessed:false`); a run of 1 stays a plain block. Prompt order never
+dem/sola/ff5/casus). Nemo has two heading levels, both tagged
+`@section-header true`:
+
+- A TOP header (block name `=== … ===`, e.g. `=== 🎭 Vex Personality ===`)
+  opens a section (flat, no nesting).
+- Every other header is a SUB header (`<Vex Personas>`, `<Core: Speech>`,
+  `<Action & Adventure Authors>`) and never becomes a section. It heads the
+  run directly after it: an exclusive run (`@mutual-exclusive-group T`)
+  becomes a pick-one group named `T` headed by it; a run of plain blocks
+  becomes a pick-one-or-more group named after it (both `guessed:false`);
+  anything else (a header, a marker, the end) leaves it a plain block. When
+  the blocks directly before it carry the same `T` (the run is split by the
+  sub header, e.g. `📋 Default: Vex` above `<Vex Personas>`), the sub header
+  moves up to the start of that run so the whole run is its options. Only a
+  comment-only sub header moves (it sends no text); a sub header that sends
+  text and every content block stay put (it then heads the run after it), and
+  the import notes list every move
+  (`nemo: moved sub header '<Vex Personas>' up 1 row(s) …`).
+
+Everything after a headed run stays in the enclosing section: each other
+contiguous run (2 or more) of one mutual-exclusive-group value becomes a
+headerless pick-one group named by the tag value (`guessed:false`); a run of
+1 stays a plain block. Apart from moved sub headers prompt order never
 changes, so a group split into several runs is listed in the import notes
 (`nemo: group 'X' spans N non-contiguous run(s) ...`). Other tags are
 ignored. `source.recognizer.kind` is reported when every sequence picked the
@@ -394,6 +417,13 @@ same recognizer.
 A group that directly follows another group is headed by its own first member
 (two adjacent headerless groups would merge in the outline model); the import
 notes say `nemo: group 'X' directly follows group 'Y'; ...`.
+
+Comment-only headings: a section/group heading whose content is only
+`{{// … }}` comments and `{{trim}}` (every Nemo heading) sends no text. It is
+no pick-one member (normalize, the per-Model override merge, the ⚠ conflict
+and the 1/N refusal ignore it, and "none" leaves it alone) and its heading
+row shows no switch. Blank headings keep the older rules; the slot compile
+and the ST export are unchanged.
 
 In the outline of a Nemo-imported preset (`source.recognizer.kind` is
 `nemo`), a pick-one group heading whose block sends text shows its own radio:

@@ -114,12 +114,16 @@ test('buildOutline: conflict = pick-one with 2+ members on (heading counts); not
     assert.equal(grp.conflict, true, 'b and c both on in a pick-one group');
     assert.deepEqual(grp.options.map((o) => o.enabled), [true, true], 'the model shows both, never collapses');
     assert.deepEqual(doc, snapshot, 'buildOutline does not mutate the document');
-    // heading counts as a member
+    // a heading that sends text counts as a member; FF's comment-only POV
+    // heading ({{//Keep toggled off}}{{trim}}) does not
     const ff = ffDoc();
     const povRow = ff.sequences[0].rows.find((/** @type {any} */ r) => /POV/.test(r.name ?? ''));
     ff.loadouts[ff.activeLoadoutId].enabled[povRow.header.ref] = true; // heading + Hybrid on
-    const pov = buildOutline(ff).sequences[0].nodes.find((n) => n.type === 'group' && /POV/.test(n.name));
-    assert.equal(pov.conflict, true);
+    const povOf = () => buildOutline(ff).sequences[0].nodes.find((n) => n.type === 'group' && /POV/.test(n.name));
+    assert.equal(povOf().header.commentOnly, true);
+    assert.equal(povOf().conflict, false);
+    ff.blocks[povRow.header.ref].content = 'Pick one POV.';
+    assert.equal(povOf().conflict, true);
 });
 
 test('buildOutline: loadout argument selects whose bits are shown; default = activeLoadoutId', () => {
@@ -135,8 +139,8 @@ test('buildOutline: loadout argument selects whose bits are shown; default = act
 
 test('buildOutline: leaf fields — key, identifier, kind, name fallbacks, ghost is a checkbox', () => {
     const nodes = buildOutline(tinyDoc()).sequences[0].nodes;
-    assert.deepEqual(nodes[0], { type: 'leaf', key: 'k-m', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', enabled: true, switchType: 'readonly', hasContent: false });
-    assert.deepEqual(nodes[1], { type: 'leaf', key: 'k-g', identifier: 'gone', leafKind: 'ghost', name: 'gone', enabled: false, switchType: 'checkbox', hasContent: false });
+    assert.deepEqual(nodes[0], { type: 'leaf', key: 'k-m', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', enabled: true, switchType: 'readonly', hasContent: false, commentOnly: false });
+    assert.deepEqual(nodes[1], { type: 'leaf', key: 'k-g', identifier: 'gone', leafKind: 'ghost', name: 'gone', enabled: false, switchType: 'checkbox', hasContent: false, commentOnly: false });
     const b = nodes[2].nodes[1].options[0];
     assert.equal(b.name, 'b', 'empty block name falls back to the identifier');
     assert.equal(b.switchType, 'radio');
@@ -193,9 +197,13 @@ test('pickOneOps: choosing a member -> one setGroup; none -> toggles off every m
     const ff = ffDoc();
     const povRow = ff.sequences[0].rows.find((/** @type {any} */ r) => /POV/.test(r.name ?? ''));
     ff.loadouts[ff.activeLoadoutId].enabled[povRow.header.ref] = true;
-    const pov = buildOutline(ff).sequences[0].nodes.find((n) => n.type === 'group' && /POV/.test(n.name));
+    const povOf = () => buildOutline(ff).sequences[0].nodes.find((n) => n.type === 'group' && /POV/.test(n.name));
     const hybrid = povRow.options[3].ref;
-    assert.deepEqual(pickOneOps(pov, null), [
+    assert.deepEqual(pickOneOps(povOf(), null), [
+        { op: 'toggle', identifier: hybrid, value: false },
+    ], 'a comment-only heading is left alone');
+    ff.blocks[povRow.header.ref].content = 'Pick one POV.';
+    assert.deepEqual(pickOneOps(povOf(), null), [
         { op: 'toggle', identifier: povRow.header.ref, value: false },
         { op: 'toggle', identifier: hybrid, value: false },
     ], 'heading first, then options, in outline order');

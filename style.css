@@ -264,7 +264,7 @@ ul.pm-list {
 }
 
 ul.pm-list ul.pm-list {
-    padding-left: 18px;
+    padding-left: calc(1.2em + 6px + 12px);
 }
 
 .pm-row {
@@ -1123,10 +1123,15 @@ li.pm-node.pm-filtered-out {
 }
 
 /* collapsible section headings (item 2) */
-.pm-caret {
+.pm-caret,
+.pm-caret-spacer {
     display: inline-block;
     width: 1.2em;
+    flex: none;
     text-align: center;
+}
+
+.pm-caret {
     cursor: pointer;
     user-select: none;
     opacity: 0.8;
