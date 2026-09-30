@@ -19,7 +19,9 @@
  * one persist across reloads in `pm.presets.open`, restored on creation
  * (silently dropping presets that no longer exist). The tab strip also
  * tracks SillyTavern's current working-slot preset (via `GET /slot`, re-read
- * on every slot event) and marks its tab with a "slot" badge; on creation it
+ * on every slot event) and marks its tab with a "● Active" marker; a view of
+ * a preset that is not (fully) active shows a notice with a "Make active"
+ * button. On creation it
  * auto-opens that preset and activates it only when no saved active tab
  * remains.
  *
@@ -30,7 +32,8 @@
  * updated. Every write goes through `bridge.edit`; reads (GET) may be
  * direct.
  */
-import { api, ctx, slotPath } from '../st.js';
+import { api, ctx, slotPath, loadSlot } from '../st.js';
+import { activeNotice } from '../active.js';
 import { createOutline } from './outline.js';
 import { createEditor } from './editor.js';
 import { createModelPanel } from './model-panel.js';
@@ -59,6 +62,9 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLInputElement} searchInput the `.pm-search-input` box
  * @property {HTMLElement} searchCount the `.pm-search-count` match counter
  * @property {HTMLInputElement} searchFilter the `.pm-search-filter` checkbox
+ * @property {HTMLElement} notActiveEl the `.pm-not-active` notice
+ * @property {HTMLElement} notActiveText its text span
+ * @property {HTMLButtonElement} makeActiveBtn the notice's "Make active" button
  * @property {{ query: string, filter: boolean, index: number }} search
  * @property {Set<string>} collapsed section/group node keys collapsed in the outline
  * @property {string|null} delArmedKey key the block delete confirmation is armed for
@@ -95,6 +101,7 @@ export function createPresetsTab(pane, bridge) {
     let destroyed = false;
     let shelfSource = 'shelf';
     let /** @type {string|null} */ slotPresetId = null;
+    let /** @type {string|null} */ slotLoadoutId = null;
 
     pane.innerHTML = `
         <div class="pm-preset-tabs"></div>
@@ -147,11 +154,11 @@ export function createPresetsTab(pane, bridge) {
             name.textContent = docs.get(id)?.name ?? id;
             tab.append(name);
             if (id === slotPresetId) {
-                const badge = document.createElement('span');
-                badge.className = 'pm-slot-badge';
-                badge.title = "In SillyTavern's working slot";
-                badge.textContent = 'slot';
-                tab.append(badge);
+                const marker = document.createElement('span');
+                marker.className = 'pm-active-marker';
+                marker.title = 'SillyTavern is running this preset';
+                marker.textContent = '● Active';
+                tab.append(marker);
             }
             const close = document.createElement('span');
             close.className = 'pm-preset-tab-close';
@@ -254,6 +261,7 @@ export function createPresetsTab(pane, bridge) {
         root.className = 'pm-preset-view';
         root.dataset.presetId = id;
         root.innerHTML = `
+            <div class="pm-not-active" hidden><span class="pm-not-active-text"></span><button class="pm-make-active menu_button" title="Load this preset with its active loadout into SillyTavern (same as Library → Load)">Make active</button></div>
             <div class="pm-loadout-bar">
                 <label class="pm-loadout-label">Loadout</label>
                 <select class="pm-loadout-picker text_pole" title="loadout"></select>
@@ -318,6 +326,9 @@ export function createPresetsTab(pane, bridge) {
             outlineEl,
             editorEl,
             statusEl: q('.pm-status'),
+            notActiveEl: q('.pm-not-active'),
+            notActiveText: q('.pm-not-active-text'),
+            makeActiveBtn: q('.pm-make-active'),
             picker: q('.pm-loadout-picker'),
             loadoutName: q('.pm-loadout-name'),
             deleteBtn: q('.pm-loadout-delete'),
@@ -434,6 +445,19 @@ export function createPresetsTab(pane, bridge) {
         });
         nextView.notes.addEventListener('input', () => { nextView.notesGuard.edited(); });
         q('.pm-preset-notes-save').addEventListener('click', () => void saveNotes(nextView));
+        nextView.makeActiveBtn.addEventListener('click', async () => {
+            const doc = docs.get(id);
+            nextView.makeActiveBtn.disabled = true;
+            try {
+                await loadSlot(bridge, id, doc?.activeLoadoutId);
+                setStatus('');
+            } catch (err) {
+                setStatus(errText(err), true);
+            } finally {
+                nextView.makeActiveBtn.disabled = false;
+            }
+            await refreshSlot();
+        });
         host.replaceChildren(root);
         view = nextView;
         applyShelfOpen(nextView);
@@ -745,6 +769,15 @@ export function createPresetsTab(pane, bridge) {
         });
         view.editor.show(doc, key);
         view.modelPanel.render();
+        updateNotice();
+    }
+
+    /** Show/hide the "not active in SillyTavern" notice of the open view. */
+    function updateNotice() {
+        if (!view) return;
+        const text = activeNotice(view.id, docs.get(view.id), { presetId: slotPresetId, loadoutId: slotLoadoutId });
+        view.notActiveEl.hidden = text === null;
+        view.notActiveText.textContent = text ?? '';
     }
 
     async function newLoadout(/** @type {PresetView} */ v) {
@@ -916,8 +949,9 @@ export function createPresetsTab(pane, bridge) {
         try {
             const slot = await api('GET', slotPath());
             slotPresetId = slot?.desired?.presetId ?? null;
+            slotLoadoutId = slot?.desired?.loadoutId ?? null;
         } catch { /* transient — keep the last known value */ }
-        if (pane.isConnected) renderTabs();
+        if (pane.isConnected) { renderTabs(); updateNotice(); }
     }
 
     /**

@@ -336,6 +336,21 @@ export function slotPath(raw = currentRaw()) {
 }
 
 /**
+ * The Library "Load" action (POST /slot/load), shared with the Library
+ * loadout select and the Presets tab's "Make active" button. Runs as a
+ * `bridge.edit` op so unsent ST-panel edits are flushed to the OLD slot
+ * preset first; a bare POST would bump slotChangedRev ahead of that flush,
+ * whose stale base then gets a 409 and the edit is dropped.
+ * @param {import('./bridge.js').Bridge} bridge
+ * @param {string} presetId
+ * @param {string|null|undefined} [loadoutId]
+ * @returns {Promise<any>} the slot view
+ */
+export function loadSlot(bridge, presetId, loadoutId = undefined) {
+    return bridge.edit(() => api('POST', '/slot/load', { presetId, ...(loadoutId ? { loadoutId } : {}) }));
+}
+
+/**
  * The LIVE connection-manager profiles array (not a copy) — callers that
  * mutate it are editing settings.json directly (F-052: the tab owns it).
  * @returns {any[]}

@@ -299,8 +299,8 @@ Chromium on ST).
   saved on drag/resize end, clamped back on screen) and the open preset tabs
   plus the active one (`pm.presets.open`; ids no longer in the library are
   dropped silently). On open, the preset in ST's working slot auto-opens and
-  is activated only if nothing else was. Its tab and its Library row carry a
-  `slot` badge that follows slot changes live (SSE).
+  is activated only if nothing else was. Its tab and its Library row carry the
+  `● Active` marker (see *Active in SillyTavern* below).
 - **Presets tab edit bar**: *Insert ▾ → Section heading* asks for a name
   (default `New section`, stored as `== <Name> ==`) and runs ONE `addSection`
   op: an empty heading, ON in the active loadout, whose section takes the rows
@@ -381,6 +381,30 @@ showing; nothing is re-applied). An open Presets tab for it closes.
 
 Check: `node dev/check-nemo-delete.mjs` (resets dev data; covers Delete
 cancel/confirm and the Nemo import in the v2 window).
+
+## Active in SillyTavern
+
+The window's first line always says what ST is running:
+`Active in SillyTavern: <preset> · <loadout>` (or `Active in SillyTavern:
+none`), read from the working slot (`GET /slot` desired preset + loadout,
+a null loadout meaning the preset's active one) and updated live on slot
+events and on edits to that preset. The running preset's Library row and its
+Presets tab carry an accent-coloured `● Active` marker.
+
+A Presets tab whose preset is not the running one opens with the notice
+*Not active in SillyTavern* and a **Make active** button: exactly the Library
+**Load** action (`POST /slot/load`) with the preset's active loadout. When the
+preset is running but with a different loadout than its active one (loaded
+through the Library row's loadout select), the notice reads *Active in
+SillyTavern with loadout <X>* and Make active switches the slot to the active
+loadout. Names are always rendered as text. Library Load, the Library loadout
+select and Make active all run the load as one `bridge.edit` op, so an ST
+panel edit not yet written back is flushed to the previous preset first
+instead of being dropped.
+
+Tests: `test/active.test.js`. Check: `node dev/check-active.mjs` (resets dev
+data; Library Load, Make active and HTML-character names in the v2 window;
+screenshots `dev/shots/active-header.png`, `dev/shots/active-not-active-notice.png`).
 
 ## Nemo recognizer
 

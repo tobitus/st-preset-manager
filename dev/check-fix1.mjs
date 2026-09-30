@@ -12,9 +12,9 @@
  * Checks (ids follow the owner's item numbers):
  *   f10 floating button: a real click opens #pm-window; a drag moves it
  *       without opening; its position survives a reload
- *   f7  slot badge: DEM (the slot) auto-opens active with the badge; a
- *       REST slot_load of Sola moves the badge live (Library + tab); on
- *       reopen Sola's tab auto-opens with the badge, DEM stays active
+ *   f7  "● Active" marker: DEM (the slot) auto-opens active with the marker; a
+ *       REST slot_load of Sola moves the marker live (Library + tab); on
+ *       reopen Sola's tab auto-opens with the marker, DEM stays active
  *   f1  Insert ▾ → Section heading twice through ST's input popup: ONE
  *       addSection op each; empty content, rank section, ON in the active
  *       loadout; the rows below up to the next heading are its children
@@ -33,7 +33,7 @@
  *   f5  window rect + f6 open tabs: move/resize, close/reopen, reload: same
  *       rect, same tabs; an off-screen rect is clamped; a missing preset id
  *       is dropped silently
- * Screenshots (dev/shots/): fix1-float-button.png, fix1-slot-badge.png,
+ * Screenshots (dev/shots/): fix1-float-button.png, fix1-active-marker.png,
  * fix1-insert-menu.png, fix1-collapsed.png, fix1-search.png,
  * fix1-diff-side.png.
  *
@@ -189,6 +189,8 @@ async function reloadPage() {
     await sleep(1500);
     await until(() => probe.eval('(document.getElementById("settings_preset_openai")?.options.length ?? 0) > 1').catch(() => false), 60000, 'ST booted after reload');
     await until(() => exists('#pm-float-btn').catch(() => false), 30000, 'floating button after reload');
+    // ST's #preloader overlay fades out after boot and swallows real mouse clicks meanwhile
+    await until(async () => !(await exists('#preloader')), 30000, "ST's #preloader gone");
     await dismissPopups();
 }
 
@@ -204,8 +206,8 @@ async function closeWindow() {
 
 /** The Presets tab strip: [{id, active, slot, badge}]. */
 const tabsState = () => probe.eval(`[...document.querySelectorAll('#pm-window .pm-preset-tab')].map((t) => ({
-    id: t.dataset.presetId, active: t.classList.contains('pm-active'), slot: t.classList.contains('pm-slot'), badge: !!t.querySelector('.pm-slot-badge') }))`);
-const libBadges = () => probe.eval(`[...document.querySelectorAll('#pm-window .pm-library-row')].filter((r) => r.querySelector('.pm-slot-badge')).map((r) => r.dataset.presetId)`);
+    id: t.dataset.presetId, active: t.classList.contains('pm-active'), slot: t.classList.contains('pm-slot'), badge: t.querySelector('.pm-active-marker')?.textContent === '● Active' }))`);
+const libBadges = () => probe.eval(`[...document.querySelectorAll('#pm-window .pm-library-row')].filter((r) => r.querySelector('.pm-active-marker')?.textContent === '● Active').map((r) => r.dataset.presetId)`);
 
 /** Fill ST's input popup (POPUP_TYPE.INPUT) and confirm; returns the default it showed. */
 async function fillPopup(/** @type {string} */ value) {
@@ -330,7 +332,7 @@ async function main() {
     });
 
     // ------------------------------------------------------------------ f7
-    await check('f7 slot badge: the slot preset auto-opens active with the badge; a REST slot_load moves it live; on reopen the new slot preset auto-opens', async () => {
+    await check('f7 "● Active" marker: the slot preset auto-opens active with the marker; a REST slot_load moves it live; on reopen the new slot preset auto-opens', async () => {
         must((await ls('pm.presets.open')) === null, 'precondition: no saved open tabs');
         must((await getSlot()).desired?.presetId === ids.dem, 'precondition: DEM is the slot preset');
         await openWindow();
@@ -360,7 +362,7 @@ async function main() {
             const sola = t.find((/** @type {any} */ x) => x.id === ids.sola);
             return t.length === 2 && dem?.active && !dem.badge && sola && !sola.active && sola.slot && sola.badge ? t : null;
         }, 10000, 'reopen: DEM restored active, Sola auto-opened with the badge');
-        await shot('fix1-slot-badge.png');
+        await shot('fix1-active-marker.png');
         await click(`#pm-window .pm-preset-tab[data-preset-id="${ids.sola}"]`);
         await until(() => exists(`${view(ids.sola)} .pm-outline li.pm-node`), 10000, 'Sola view');
         return `open#1 ${J(t1)}; after REST slot_load Library badge -> Sola, DEM tab unbadged; reopen ${J(t2)}`;

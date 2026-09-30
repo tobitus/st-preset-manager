@@ -34,8 +34,8 @@
  *   d2 Delete, Confirm, on the slot-bound preset (also open in the Presets
  *      tab): popup also warns about the working slot; OK removes the row, the
  *      REST doc (404), the preset file and its revisions dir; the slot's
- *      desired preset and compiled output are null, the Library says
- *      `slot: empty`, the Presets tab closes the deleted preset's tab, no
+ *      desired preset and compiled output are null, the window header reads
+ *      `Active in SillyTavern: none`, the Presets tab closes the deleted preset's tab, no
  *      popup remains, and ST's prompt manager still lists its prompts
  * Screenshots (dev/shots/): nemo-outline.png, nemo-vex-section.png,
  * dem-outline-indent.png, nemo-heading-radio.png, delete-confirm.png.
@@ -482,7 +482,7 @@ async function main() {
         must(fs.existsSync(revDir), `precondition: revisions dir missing: ${revDir}`);
 
         await showTab('library');
-        await until(() => exists(`${libRow(ids.ff)} .pm-slot-badge`), 10000, 'FF row shows the slot badge');
+        await until(() => exists(`${libRow(ids.ff)} .pm-active-marker`), 10000, 'FF row shows the "● Active" marker');
         must(await click(`${libRow(ids.ff)} .pm-delete`), 'Delete click failed');
         const msg = await until(async () => {
             const t = await popupText();
@@ -501,13 +501,13 @@ async function main() {
         const slot = (await api('GET', '/slot')).json;
         must(slot.desired?.presetId === null, `GET /slot desired.presetId is ${J(slot.desired?.presetId)}, want null`);
         must(slot.compiled === null, 'GET /slot compiled is not null');
-        await until(async () => (await text('#pm-window .pm-slot-state'))?.trim() === 'slot: empty', 8000, '.pm-slot-state reads "slot: empty"');
+        await until(async () => (await text('#pm-window .pm-active-status'))?.trim() === 'Active in SillyTavern: none', 8000, 'header reads "Active in SillyTavern: none"');
         must(!(await exists('dialog[open]')), 'a dialog[open] remains after confirming');
         await until(async () => !(await exists(presetTab(ids.ff))), 8000, 'Presets tab for FF closed');
         must(!(await exists(view(ids.ff))), 'FF preset view still in the DOM');
         const promptsAfter = await count('#completion_prompt_manager_list li[data-pm-identifier]');
         must(promptsAfter > 0, 'ST prompt manager lists no prompts after the delete (wiped)');
-        return `row gone, GET 404, file + revisions dir gone, desired.presetId=null compiled=null, "slot: empty", no dialog, Presets tab closed, ST prompts ${promptsBefore} -> ${promptsAfter}`;
+        return `row gone, GET 404, file + revisions dir gone, desired.presetId=null compiled=null, header "Active in SillyTavern: none", no dialog, Presets tab closed, ST prompts ${promptsBefore} -> ${promptsAfter}`;
     });
 
     finish();

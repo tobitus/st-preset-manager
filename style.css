@@ -98,12 +98,6 @@
     flex: 1;
 }
 
-.pm-slot-state {
-    font-size: 12px;
-    opacity: 0.75;
-    white-space: nowrap;
-}
-
 .pm-library-row {
     display: flex;
     align-items: center;
@@ -113,7 +107,8 @@
 }
 
 .pm-library-row.pm-in-slot {
-    background: rgba(80, 160, 255, 0.12);
+    background: rgba(232, 163, 61, 0.14);
+    box-shadow: inset 3px 0 0 var(--SmartThemeQuoteColor, #e8a33d);
 }
 
 .pm-library-row .pm-name {
@@ -1158,22 +1153,63 @@ li.pm-node.pm-collapsed > .pm-row .pm-name::after {
     cursor: help;
 }
 
-/* working-slot badge (item 7) */
-.pm-slot-badge {
+/* "● Active" marker: the preset SillyTavern is running (library row + tab) */
+.pm-active-marker {
     display: inline-block;
-    margin-left: 4px;
-    padding: 0 5px;
-    font-size: 10px;
+    margin-left: 6px;
+    padding: 1px 8px;
+    font-size: 12px;
     font-weight: bold;
-    line-height: 1.5;
-    border-radius: 8px;
-    background: rgba(80, 160, 255, 0.35);
-    color: var(--SmartThemeBodyColor, #ddd);
+    line-height: 1.4;
+    border-radius: 10px;
+    background: var(--SmartThemeQuoteColor, #e8a33d);
+    color: #111;
+    white-space: nowrap;
     vertical-align: middle;
 }
 
 .pm-preset-tabs .pm-preset-tab.pm-slot {
-    border-color: rgba(80, 160, 255, 0.8);
+    border-color: var(--SmartThemeQuoteColor, #e8a33d);
+}
+
+/* window header: what SillyTavern is running now */
+#pm-window .pm-active-status {
+    padding: 6px 10px;
+    font-weight: bold;
+    font-size: 14px;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+    border-left: 4px solid var(--SmartThemeQuoteColor, #e8a33d);
+    background: rgba(232, 163, 61, 0.12);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+#pm-window .pm-active-status.pm-none {
+    border-left-color: var(--SmartThemeBorderColor, #666);
+    background: transparent;
+    opacity: 0.85;
+}
+
+/* per-tab notice: this preset is not what SillyTavern runs */
+.pm-not-active {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 10px;
+    margin-bottom: 6px;
+    border: 1px solid var(--SmartThemeQuoteColor, #e8a33d);
+    border-radius: 6px;
+    background: rgba(232, 163, 61, 0.10);
+    font-weight: bold;
+}
+
+.pm-not-active[hidden] {
+    display: none;
+}
+
+.pm-not-active .pm-make-active {
+    margin: 0;
 }
 
 /* block diff view toggle + side-by-side view (item 4) */

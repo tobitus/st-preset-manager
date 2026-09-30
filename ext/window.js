@@ -13,10 +13,12 @@
  * inside it so ST's body-level importer never sees them (see below). The
  * main window remembers its size and position across reloads (localStorage
  * key `pm.window.rect`, clamped back on screen via ext/layout.js), and the
- * Library tab marks the preset in ST's working slot with a live badge that
- * follows slot changes without a manual refresh.
+ * Library tab marks the preset in ST's working slot with a "● Active" marker,
+ * and a header above the toolbar names the preset and loadout SillyTavern is
+ * running; both follow slot changes without a manual refresh.
  */
-import { api, ctx, SLOT_NAME, currentRaw, connectionProfiles, slotPath } from './st.js';
+import { api, ctx, currentRaw, connectionProfiles, slotPath, loadSlot } from './st.js';
+import { activeLabel } from './active.js';
 import { switchToModel, unlinkProfilePreset } from './connection.js';
 import { createPresetsTab } from './tabs/presets.js';
 import { createDiffTab } from './tabs/diff.js';
@@ -124,6 +126,7 @@ export function openMainWindow(bridge) {
             clearTimeout(slotDebounce);
         },
         content: `
+            <div class="pm-active-status" title="The preset (and loadout) SillyTavern is running now">Active in SillyTavern: …</div>
             <div class="pm-toolbar">
                 <label class="pm-model-label">Model</label>
                 <select class="pm-model-picker text_pole" title="Switch SillyTavern's connection to this Model's profile"></select>
@@ -194,11 +197,21 @@ export function openMainWindow(bridge) {
         void presets.open(presetId);
     };
     const libRoot = /** @type {HTMLElement} */ (root.querySelector('.pm-root'));
+    const activeEl = /** @type {HTMLElement} */ (root.querySelector('.pm-active-status'));
+    /** @type {string|null} */
+    let activePresetId = null;
+    const onActive = (/** @type {{presetId: string|null, text: string}} */ label) => {
+        activePresetId = label.presetId;
+        activeEl.textContent = label.text;
+        activeEl.dataset.presetId = label.presetId ?? '';
+        activeEl.classList.toggle('pm-none', label.presetId === null);
+    };
+    const libState = { onOpen, onActive };
 
     io = createIoTab(
         /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="io"]')),
         bridge,
-        { onOpen, onLibraryChanged: () => void refresh(libRoot, bridge, { onOpen }) },
+        { onOpen, onLibraryChanged: () => void refresh(libRoot, bridge, libState) },
     );
 
     shelf = createShelfTab(
@@ -213,15 +226,16 @@ export function openMainWindow(bridge) {
 
     unwireModelPicker = wireModelPicker(root, bridge);
 
-    renderLibrary(libRoot, bridge, { onOpen });
-    void refresh(libRoot, bridge, { onOpen });
+    renderLibrary(libRoot, bridge, libState);
+    void refresh(libRoot, bridge, libState);
 
     unsubscribeSlot = /** @type {() => void} */ (bridge.onUpdate((/** @type {any} */ s) => {
         if (!root.isConnected) return;
-        if (!(s?.slot || s?.event?.kind === 'slot')) return;
+        const sid = s?.event?.presetId;
+        if (!(s?.slot || s?.event?.kind === 'slot' || (typeof sid === 'string' && sid === activePresetId))) return;
         clearTimeout(slotDebounce);
         slotDebounce = setTimeout(() => {
-            void refresh(libRoot, bridge, { onOpen });
+            void refresh(libRoot, bridge, libState);
         }, 150);
     }));
 
@@ -342,19 +356,17 @@ function wireModelPicker(root, bridge) {
  * Render the Library tab.
  * @param {HTMLElement} root .pm-root element
  * @param {import('./bridge.js').Bridge} bridge
- * @param {{ items?: any[], desired?: any, onOpen?: (presetId: string) => void, filter?: string }} [state]
+ * @param {{ items?: any[], desired?: any, onOpen?: (presetId: string) => void, onActive?: (label: {presetId: string|null, text: string}) => void, filter?: string }} [state]
  */
 export function renderLibrary(root, bridge, state = {}) {
     root.innerHTML = `
         <div class="pm-library">
             <div class="pm-library-toolbar">
                 <input class="pm-tag-filter text_input" type="text" placeholder="filter by tag…">
-                <span class="pm-slot-state"></span>
             </div>
             <div class="pm-library-list"></div>
         </div>`;
     const list = /** @type {HTMLElement} */ (root.querySelector('.pm-library-list'));
-    const slotState = /** @type {HTMLElement} */ (root.querySelector('.pm-slot-state'));
     const filter = /** @type {HTMLInputElement} */ (root.querySelector('.pm-tag-filter'));
     filter.value = state.filter ?? '';
 
@@ -362,7 +374,6 @@ export function renderLibrary(root, bridge, state = {}) {
         const items = state.items ?? [];
         const tag = filter.value.trim();
         const filtered = tag ? items.filter((i) => i.tags.includes(tag)) : items;
-        slotState.textContent = state.desired?.presetId ? `slot: ${SLOT_NAME}` : 'slot: empty';
         list.replaceChildren(...filtered.map((item) => libraryRow(item, state.desired?.presetId, () => {
             void refresh(root, bridge, state);
         }, state.onOpen, bridge)));
@@ -375,7 +386,7 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     const row = document.createElement('div');
     row.className = 'pm-library-row' + (item.id === desiredId ? ' pm-in-slot' : '');
     row.dataset.presetId = item.id;
-    const badge = item.id === desiredId ? ` <span class="pm-slot-badge" title="In SillyTavern's working slot">slot</span>` : '';
+    const badge = item.id === desiredId ? ` <span class="pm-active-marker" title="SillyTavern is running this preset">● Active</span>` : '';
     const tags = item.tags?.length
         ? ` <span class="pm-tags">${item.tags.map((/** @type {string} */ t) => `<span class="pm-tag">${escapeHtml(t)}</span>`).join('')}</span>`
         : '';
@@ -394,7 +405,7 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     row.querySelector('.pm-open')?.addEventListener('click', () => onOpen?.(item.id));
     row.querySelector('.pm-load')?.addEventListener('click', async () => {
         const lid = /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.value ?? undefined;
-        await api('POST', '/slot/load', { presetId: item.id, ...(lid ? { loadoutId: lid } : {}) });
+        await loadSlot(bridge, item.id, lid);
         onChange();
     });
     row.querySelector('.pm-delete')?.addEventListener('click', async () => {
@@ -418,18 +429,18 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     });
     /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.addEventListener('change', (ev) => {
         const lid = /** @type {HTMLSelectElement} */ (ev.target).value;
-        void api('POST', `/slot/load`, { presetId: item.id, loadoutId: lid }).then(onChange);
+        void loadSlot(bridge, item.id, lid).then(onChange);
     });
     return row;
 }
 
 /**
- * Re-fetch items + slot and re-render, keeping state (onOpen) wired through
+ * Re-fetch items + slot and re-render, keeping state (onOpen, onActive) wired through
  * every re-render, and the tag filter text across re-renders. On failure
  * the error stays visible in the library list.
  * @param {HTMLElement} root .pm-root element
  * @param {import('./bridge.js').Bridge} bridge
- * @param {{ onOpen?: (presetId: string) => void }} [state]
+ * @param {{ onOpen?: (presetId: string) => void, onActive?: (label: {presetId: string|null, text: string}) => void }} [state]
  */
 async function refresh(root, bridge, state = {}) {
     const filter = /** @type {HTMLInputElement|null} */ (root.querySelector('.pm-tag-filter'))?.value;
@@ -438,7 +449,8 @@ async function refresh(root, bridge, state = {}) {
             api('GET', '/library'),
             api('GET', slotPath()),
         ]);
-        renderLibrary(root, bridge, { onOpen: state.onOpen, items, desired: slot.desired, filter });
+        renderLibrary(root, bridge, { onOpen: state.onOpen, onActive: state.onActive, items, desired: slot.desired, filter });
+        state.onActive?.(activeLabel(items, slot.desired));
     } catch (err) {
         // error display moved here from index.js refreshLibrary
         const list = /** @type {HTMLElement|null} */ (root.querySelector('.pm-library-list'));
