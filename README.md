@@ -356,3 +356,14 @@ headings stay on the row they were above. Rules: PLAN §1.4.
 
 Tests: `test/reorder-writeback.test.js`. Check: `node dev/check-reorder.mjs`
 (resets dev data; real mouse drags in ST's panel on DEM).
+
+## Group cardinality toggle (temporary)
+
+The `1`/`N` badge on every group row is a click control: it flips the group
+between pick-one and pick-one-or-more (`setCardinality`). Switching to
+pick-one is refused, with an ST popup showing the server's text, while two or
+more members (the heading counts) are on in any loadout or per-Model
+override; nothing is ever switched off.
+
+Tests: `test/cardinality.test.js`. Check: `node dev/check-cardinality.mjs`
+(resets dev data; real mouse clicks on the badges in the v2 window).

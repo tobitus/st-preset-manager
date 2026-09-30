@@ -229,6 +229,9 @@ test('ops: createGroup forms a group from existing leaves; renameGroup and setCa
     applyDocOp(doc, 'renameGroup', { key: res.groupKey, name: 'Renamed' });
     assert.equal(grp.name, 'Renamed');
     assert.equal(doc.blocks[items[0].leaf.ref].name, 'Renamed', 'renameGroup on a headed group renames its heading block too');
+    // both FF items start enabled: switching to pick-one with 2 on is refused
+    // (test/cardinality.test.js), so turn the heading off first
+    doc.loadouts[doc.activeLoadoutId].enabled[items[0].leaf.ref] = false;
     applyDocOp(doc, 'setCardinality', { key: res.groupKey, cardinality: 'pick-one' });
     assert.equal(grp.cardinality, 'pick-one');
     assert.throws(() => applyDocOp(doc, 'setCardinality', { key: res.groupKey, cardinality: 'pick-two' }), OpError);

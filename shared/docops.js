@@ -205,8 +205,23 @@ function opRenameGroup(doc, a) {
 }
 
 /**
- * Change a group's kind (pick-one | pick-one-or-more). Does NOT collapse the
- * enabled bits — the compile/routing layer normalises pick-one conflicts.
+ * Identifiers of the group's members (heading + options) that are on in an
+ * enabled map.
+ * @param {any} grp
+ * @param {any} enabled
+ * @returns {string[]}
+ */
+function onMembers(grp, enabled) {
+    const members = [...(grp.header ? [grp.header] : []), ...(grp.options ?? [])];
+    return members.map((leaf) => identOf(leaf)).filter((id) => id && enabled?.[id]);
+}
+
+/**
+ * Change a group's kind (pick-one | pick-one-or-more). Never changes enabled
+ * bits. Switching to pick-one is refused (409) while any loadout's base map or
+ * per-Model override effective map has 2+ of the group's members on (an
+ * enabled heading counts), so normalize never silently collapses after a
+ * switch.
  * @param {any} doc
  * @param {{ key?: string, cardinality?: string }} a
  */
@@ -217,6 +232,31 @@ function opSetCardinality(doc, a) {
     }
     if (typeof key !== 'string') throw new OpError('setCardinality needs {key, cardinality}');
     const grp = requireGroup(doc, key);
+    if (cardinality === 'pick-one') {
+        const headId = grp.header ? identOf(grp.header) : undefined;
+        /** @type {any} */
+        const active = doc.loadouts?.[doc.activeLoadoutId];
+        /** @type {any[]} */
+        const loadouts = [...(active ? [active] : []), ...Object.values(doc.loadouts ?? {}).filter((l) => l !== active)];
+        const refuse = (/** @type {any} */ enabled, /** @type {string} */ where) => {
+            const on = onMembers(grp, enabled);
+            if (on.length < 2) return;
+            const heading = headId && on.includes(headId) ? ' (the group heading counts)' : '';
+            throw new OpError(`more than one option currently selected${where}${heading}`, 409);
+        };
+        for (const l of loadouts) {
+            const label = ` in loadout "${l.name ?? l.id}"`;
+            refuse(l.enabled ?? {}, l === active ? '' : label);
+            for (const [modelName, ov] of Object.entries(l.overrides ?? {})) {
+                /** @type {any} */
+                const eff = { ...l.enabled };
+                for (const [id, on] of Object.entries(/** @type {any} */ (ov)?.enabled ?? {})) {
+                    if (typeof on === 'boolean') eff[id] = on;
+                }
+                refuse(eff, `${label} for Model "${modelName}"`);
+            }
+        }
+    }
     grp.cardinality = cardinality;
     grp.guessed = false;
     return { key, cardinality };

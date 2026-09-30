@@ -300,12 +300,20 @@ ul.pm-list ul.pm-list {
 
 .pm-card {
     display: inline-block;
+    cursor: pointer;
+    background: none;
+    color: inherit;
+    font: inherit;
     font-size: 10px;
     line-height: 1;
     border: 1px solid var(--SmartThemeBorderColor, #555);
     border-radius: 8px;
     padding: 1px 5px;
     opacity: 0.85;
+}
+
+.pm-card:hover {
+    opacity: 1;
 }
 
 .pm-conflict {

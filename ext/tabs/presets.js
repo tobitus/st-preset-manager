@@ -352,6 +352,7 @@ export function createPresetsTab(pane, bridge) {
                     refreshView();
                 },
                 onHeading: (/** @type {'section'|'group'} */ kind) => headingOp(id, kind),
+                onCardinality: (/** @type {string} */ key, /** @type {'pick-one'|'pick-one-or-more'} */ c) => cardinalityOp(id, key, c),
             }),
             editor: createEditor(editorEl, {
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
@@ -469,6 +470,20 @@ export function createPresetsTab(pane, bridge) {
             return;
         }
         if (a.op) void runOps(id, [a.op]).catch(() => {});
+    }
+
+    /**
+     * Flip a group's cardinality from its 1/N badge. The outline never mutates
+     * locally: runOps re-renders from the server doc either way. Any failure
+     * (e.g. the 409 "more than one option currently selected" refusal) pops up
+     * the server's message.
+     */
+    function cardinalityOp(/** @type {string} */ id, /** @type {string} */ key, /** @type {'pick-one'|'pick-one-or-more'} */ cardinality) {
+        void runOps(id, [{ op: 'setCardinality', key, cardinality }]).catch((/** @type {any} */ err) => {
+            const msg = document.createElement('p');
+            msg.textContent = err?.body?.error ?? errText(err);
+            void ctx().callGenericPopup(msg, ctx().POPUP_TYPE.TEXT);
+        });
     }
 
     /**

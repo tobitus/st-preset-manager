@@ -80,13 +80,15 @@ function makeSwitch(sw) {
     return input;
 }
 
-/** @param {GroupNode} node @returns {HTMLSpanElement} '1' or 'N' cardinality badge */
+/** @param {GroupNode} node @returns {HTMLButtonElement} '1' or 'N' cardinality badge; click flips cardinality */
 function cardSpan(node) {
-    const span = document.createElement('span');
-    span.className = 'pm-card';
-    span.textContent = node.pickOne ? '1' : 'N';
-    span.title = node.cardinality;
-    return span;
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pm-card';
+    btn.textContent = node.pickOne ? '1' : 'N';
+    btn.dataset.next = node.pickOne ? 'pick-one-or-more' : 'pick-one';
+    btn.title = node.pickOne ? 'Pick one — click to allow many' : 'Pick many — click to allow one';
+    return btn;
 }
 
 /** @returns {HTMLSpanElement} the ⓘ marker for a heading whose leaf sends non-blank content to the model */
@@ -395,7 +397,7 @@ export function dropAnchor(li) {
 
 /**
  * @param {HTMLElement} container the .pm-outline element
- * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void }} handlers
+ * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void, onCardinality?(nodeKey: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
  * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
  */
 export function createOutline(container, handlers) {
@@ -454,6 +456,13 @@ export function createOutline(container, handlers) {
         if (t.closest('.pm-caret')) {
             const li = /** @type {HTMLElement|null} */ (t.closest('li.pm-node'));
             handlers.onToggleCollapse?.(li?.dataset.nodeKey ?? '');
+            return;
+        }
+        const card = /** @type {HTMLElement|null} */ (t.closest('.pm-card'));
+        if (card) {
+            const li = /** @type {HTMLElement|null} */ (card.closest('li.pm-node'));
+            const next = card.dataset.next;
+            if (li?.dataset.nodeKey && (next === 'pick-one' || next === 'pick-one-or-more')) handlers.onCardinality?.(li.dataset.nodeKey, next);
             return;
         }
         if (t.closest('.pm-drag-handle') || t.closest('label.pm-none-label')) return;
