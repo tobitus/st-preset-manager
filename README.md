@@ -10,8 +10,9 @@ survives with no browser tab open.
 The repository is both the extension and the plugin; you install it twice.
 
 1. **The extension**: SillyTavern → Extensions → *Install extension* → paste
-   this repository's Git URL. SillyTavern clones it into
-   `public/scripts/extensions/third-party/st-preset-manager`.
+   this repository's Git URL. In SillyTavern 1.19 it clones into
+   `data/<user>/extensions/st-preset-manager` (served at
+   `/scripts/extensions/third-party/st-preset-manager`).
 2. **The server plugin**: `git clone` the same repository into SillyTavern's
    `plugins/st-preset-manager` folder, set `enableServerPlugins: true` in
    `config.yaml`, then restart SillyTavern.
@@ -31,6 +32,17 @@ above, and does nothing else.
   its folder.
 - Plugin: `git pull` in `plugins/st-preset-manager`, then restart
   SillyTavern.
+
+## If a library file is damaged
+
+- A preset file in the library that cannot be read or fails validation is
+  skipped with a warning in the SillyTavern server log and left on disk
+  untouched; the rest of the library loads.
+- If `models.json` is unreadable or holds invalid Model entries, the plugin
+  starts with the valid entries (or none), logs an error, and copies the
+  original file to `models.json.corrupt-<timestamp>` next to it. `models.json`
+  itself is not rewritten at startup, but the next Model edit saves only the
+  loaded entries (restore from the backup if needed).
 
 ## Using it
 
@@ -59,7 +71,9 @@ above, and does nothing else.
 
 `manifest.json`'s `homePage` is empty until the repository has a public URL;
 set it (and `repository` in `package.json`) when the repository is pushed.
-Keep `manifest.json` and `package.json` versions equal.
+Keep `manifest.json` and `package.json` versions equal. The plugin reports
+`package.json`'s version in `/health` and `info`, and `test/fix-round.test.js`
+checks that `manifest.json` matches.
 
 ### Environment variables
 

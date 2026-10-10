@@ -45,6 +45,8 @@ export function rootOf(doc, loadoutId) {
  * per-Model override, then pick-one normalization preferring every id a layer
  * above the root turned on. `opts.raw` skips the normalization: the outline
  * shows the layered bits as stored so a pick-one conflict stays visible.
+ * After the collapse, an id it switched off is labelled with the source of
+ * the member its group kept.
  * @param {any} doc
  * @param {string} loadoutId
  * @param {string|null} [modelName]
@@ -79,7 +81,23 @@ export function effectiveEnabled(doc, loadoutId, modelName = null, opts = {}) {
     for (const id of Object.keys(enabled)) {
         if (source[id] !== 'root' && enabled[id] === true) preferred.add(id);
     }
-    normalize(doc, enabled, undefined, preferred);
+    /** @type {string[]} */
+    const changed = [];
+    normalize(doc, enabled, changed, preferred);
+    if (changed.length) {
+        const flipped = new Set(changed);
+        for (const grp of collectGroups(doc)) {
+            if (grp.cardinality !== 'pick-one') continue;
+            const ids = pickOneMembers(doc, grp)
+                .map((leaf) => leaf.ref ?? leaf.identifier)
+                .filter((id) => id != null);
+            const hit = ids.filter((id) => flipped.has(id));
+            if (!hit.length) continue;
+            const kept = ids.find((id) => enabled[id] === true);
+            if (kept === undefined) continue;
+            for (const id of hit) source[id] = source[kept];
+        }
+    }
     return { enabled, source };
 }
 

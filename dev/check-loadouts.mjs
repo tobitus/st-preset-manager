@@ -445,7 +445,7 @@ async function sectionL5() {
 // ------------------------------------------------------------------ l7
 
 async function sectionL7() {
-    await check('l7 named tunings: copy, edit, bind per loadout x Model; ST follows; ST\'s slider writes the tuning in effect', async () => {
+    await check('l7 named tunings: copy, edit, bind per loadout x Model, rename; ST follows; ST\'s slider writes the tuning in effect', async () => {
         const r0 = await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 0.8 } });
         must(r0.status === 200, `PATCH default tuning status ${r0.status} ${r0.text}`);
         await toolbarPick(mockName);
@@ -493,8 +493,21 @@ async function sectionL7() {
             return t.hot?.temperature === 1.25 ? t : null;
         }, 10000, 'hot.temperature 1.25 from ST slider');
         must(t4.default?.temperature === 0.8, `default.temperature ${t4.default?.temperature}`);
+
+        await setValue(`${p} .pm-tuning-new-name`, 'blazing', 'input');
+        must(await click(`${p} .pm-tuning-rename`), 'no .pm-tuning-rename');
+        await until(async () => {
+            const t = (await getModels())[mockName].tunings;
+            return t.blazing?.temperature === 1.25 && !t.hot ? t : null;
+        }, 8000, 'tuning hot renamed to blazing (temperature 1.25)');
+        await until(async () => (await getDoc(ids.sola)).loadouts[lo.P].overrides?.[mockName]?.tuning === 'blazing', 8000, 'P override tuning = blazing');
+        await until(async () => (await probe.eval(`document.querySelector(${J(`${p} .pm-tuning-name`)})?.value`)) === 'blazing', 8000, 'panel select = blazing');
+        const c5 = await until(async () => {
+            const c = await converged();
+            return c && c.s.temperature === 1.25 ? c : null;
+        }, 20000, 'ST temperature 1.25 after rename');
         await shot('loadouts-l7-tuning.png');
-        return `hot=${m1.hot.temperature}, default=${m1.default.temperature}; ST temp bound hot=${c1.s.temperature}, inherit=${c2.s.temperature}, hot again=${c3.s.temperature}; slider 1.25 -> hot=${t4.hot.temperature}, default=${t4.default.temperature}`;
+        return `hot=${m1.hot.temperature}, default=${m1.default.temperature}; ST temp bound hot=${c1.s.temperature}, inherit=${c2.s.temperature}, hot again=${c3.s.temperature}; slider 1.25 -> hot=${t4.hot.temperature}, default=${t4.default.temperature}; rename hot -> blazing: override tuning=blazing, ST temp=${c5.s.temperature}`;
     });
 }
 

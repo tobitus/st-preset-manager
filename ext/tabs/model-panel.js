@@ -1,7 +1,7 @@
 /**
  * Model panel (Phase 4, roadmap items 16/21): lets the user pick which
  * registry Model they are editing, edit that Model's named tunings (select,
- * create, delete, set the default, edit values), pick a named tuning for
+ * create, rename, delete, set the default, edit values), pick a named tuning for
  * the open loadout's per-Model override, and edit that override's enabled
  * bits.
  *
@@ -103,8 +103,9 @@ export function createModelPanel(el, opts) {
                     <select class="pm-tuning-name text_pole" title="Named tuning of this Model"></select>
                     <button class="pm-tuning-default menu_button" title="Use this tuning wherever no loadout override picks one">Set as default</button>
                     <button class="pm-tuning-delete menu_button" title="Delete this tuning">Delete tuning</button>
-                    <input class="pm-tuning-new-name text_pole" type="text" placeholder="new tuning name…">
+                    <input class="pm-tuning-new-name text_pole" type="text" placeholder="tuning name…">
                     <button class="pm-tuning-new menu_button" title="Create a tuning copied from the selected one">New tuning</button>
+                    <button class="pm-tuning-rename menu_button" title="Rename the selected tuning to the name typed (loadout overrides that use it follow)">Rename tuning</button>
                 </div>
                 ${KEYS.map((k) => `
                 <div class="pm-tuning-row" data-key="${k}">
@@ -141,6 +142,7 @@ export function createModelPanel(el, opts) {
             tuningDeleteBtn: q('.pm-tuning-delete'),
             tuningNewName: q('.pm-tuning-new-name'),
             tuningNewBtn: q('.pm-tuning-new'),
+            tuningRenameBtn: q('.pm-tuning-rename'),
             tuningInputs,
             tuningSrc,
             ovTitle: q('.pm-ov-title'),
@@ -163,6 +165,7 @@ export function createModelPanel(el, opts) {
         refs.tuningDefaultBtn.addEventListener('click', () => void onTuningDefault());
         refs.tuningDeleteBtn.addEventListener('click', () => void onTuningDelete());
         refs.tuningNewBtn.addEventListener('click', () => void onTuningNew());
+        refs.tuningRenameBtn.addEventListener('click', () => void onTuningRename());
         refs.ovTuningSelect.addEventListener('change', () => void onOvTuningChange(refs.ovTuningSelect.value));
         for (const k of KEYS) {
             refs.tuningInputs[k].addEventListener('change', () => void onTuningChange(k));
@@ -375,6 +378,34 @@ export function createModelPanel(el, opts) {
             // only now: a render in between (SSE refresh) with the old
             // registry would reset a name it does not list yet
             tuningSel = name;
+            setStatus('');
+        } catch (err) {
+            setStatus(errText(err), true);
+        }
+        render();
+    }
+
+    async function onTuningRename() {
+        const M = chosen;
+        const from = tuningSel;
+        if (!M || !registry || !from) return;
+        const to = refs.tuningNewName.value.trim();
+        if (to === '') {
+            setStatus('Tuning name is required', true);
+            return;
+        }
+        if (to === from) return;
+        if (Object.prototype.hasOwnProperty.call(registry.models[M].tunings, to)) {
+            setStatus(`tuning "${to}" already exists`, true);
+            return;
+        }
+        try {
+            await bridge.edit(() => api('POST', `/models/${encodeURIComponent(M)}/tunings/rename`, { from, to }));
+            refs.tuningNewName.value = '';
+            await afterWrite();
+            // only now: a render in between (SSE refresh) with the old
+            // registry would reset a name it does not list yet
+            tuningSel = to;
             setStatus('');
         } catch (err) {
             setStatus(errText(err), true);

@@ -258,10 +258,11 @@ async function main() {
     {
         const h = (await api('GET', '/health')).json;
         const log = containerLogs();
-        const pass = h?.version === '2.0.0-phase1' && typeof h?.rev === 'number'
+        const want = JSON.parse(fs.readFileSync(path.join(REPO, 'package.json'), 'utf8')).version;
+        const pass = h?.version === want && typeof h?.rev === 'number'
             && log.includes('Initializing plugin from') && log.includes('plugins/st-preset-manager/plugin/index.js')
             && log.includes('[st-preset-manager] plugin initialized');
-        report('1 health+plugin', !!pass, `version=${h?.version} rev=${h?.rev} log lines found`);
+        report('1 health+plugin', !!pass, `version=${h?.version} (want ${want}) rev=${h?.rev} log lines found`);
     }
 
     // ------------------------------------------------------------------ 2

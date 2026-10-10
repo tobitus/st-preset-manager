@@ -8,6 +8,7 @@
 import { Store } from './store.js';
 import { EventHub } from './events.js';
 import { registerRoutes } from './routes.js';
+import { VERSION } from './version.js';
 
 // ST's plugin-loader requires `info` to be an OBJECT with string
 // id/name/description (src/plugin-loader.js:187-196) and `init` a function.
@@ -15,7 +16,7 @@ export const info = {
     id: 'st-preset-manager',
     name: 'Preset Manager',
     description: 'Preset library + working slot for Chat Completion presets',
-    version: '2.0.0',
+    version: VERSION,
 };
 
 /** @param {import('express').Router} router */

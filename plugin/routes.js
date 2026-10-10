@@ -23,6 +23,7 @@ import { canonicalHash, ulid, newId } from '../shared/util.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
 import { lineHunks } from '../shared/diff.js';
 import { comparePresets } from '../shared/compare.js';
+import { VERSION } from './version.js';
 
 /**
  * Base = ST's own OpenAI Settings/Default.json from the user dir, read at
@@ -158,7 +159,7 @@ export function registerRoutes(router) {
 
     router.get('/health', (req, res) => {
         res.json({
-            version: '2.0.0-phase1',
+            version: VERSION,
             rev: req.pm.store.rev,
             libraryRoot: req.pm.store.root,
             clients: req.pm.hub.clientCount,

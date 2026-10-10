@@ -125,11 +125,17 @@ export function validateDoc(doc) {
                 }
             }
             for (const [m, ov] of Object.entries(l?.overrides ?? {})) {
-                const o = /** @type {any} */ (ov);
-                for (const k of Object.keys(o?.enabled ?? {})) {
-                    if (!leafIds.has(k)) fail(`loadouts.${lid}.overrides.${m}.enabled.${k} (unknown leaf)`);
+                if (typeof ov !== 'object' || ov === null || Array.isArray(ov)) {
+                    fail(`loadouts.${lid}.overrides.${m}`);
+                    continue;
                 }
-                if (o?.tuning !== null && (typeof o?.tuning !== 'string' || !o.tuning)) {
+                const o = /** @type {any} */ (ov);
+                if (typeof o.enabled !== 'object' || o.enabled === null) fail(`loadouts.${lid}.overrides.${m}.enabled`);
+                for (const [k, v] of Object.entries(o.enabled ?? {})) {
+                    if (!leafIds.has(k)) fail(`loadouts.${lid}.overrides.${m}.enabled.${k} (unknown leaf)`);
+                    if (typeof v !== 'boolean') fail(`loadouts.${lid}.overrides.${m}.enabled.${k}`);
+                }
+                if (o.tuning !== null && (typeof o.tuning !== 'string' || !o.tuning)) {
                     fail(`loadouts.${lid}.overrides.${m}.tuning`);
                 }
             }
@@ -254,21 +260,28 @@ export function validateRegistry(reg) {
  * Bring a pre-inheritance document up to the current shape, in place:
  * a loadout without `kind` becomes a complete root; an override without
  * `tuning` gets `tuning: null`; `tuningOverrides` is dropped. Idempotent;
- * a loadout that already has a `kind` is left alone.
+ * a loadout that already has a `kind` is left alone. A non-object loadout or
+ * override is skipped and left for validateDoc to report.
  * @param {any} doc
  * @returns {any} the same doc
  */
 export function upgradeDoc(doc) {
-    for (const loadout of Object.values(doc?.loadouts ?? {})) {
-        const l = /** @type {any} */ (loadout);
-        if (l.kind === undefined) {
-            l.kind = 'root';
-            l.parent = null;
-            ensureAllLeaves(doc, l.enabled);
-        }
-        for (const override of Object.values(l.overrides ?? {})) {
-            const o = /** @type {any} */ (override);
-            if (o.tuning === undefined) o.tuning = null;
+    const loadouts = doc?.loadouts;
+    if (typeof loadouts === 'object' && loadouts !== null) {
+        for (const loadout of Object.values(loadouts)) {
+            if (typeof loadout !== 'object' || loadout === null) continue;
+            const l = /** @type {any} */ (loadout);
+            if (l.kind === undefined) {
+                l.kind = 'root';
+                l.parent = null;
+                if (typeof l.enabled === 'object' && l.enabled !== null) ensureAllLeaves(doc, l.enabled);
+            }
+            if (typeof l.overrides !== 'object' || l.overrides === null) continue;
+            for (const override of Object.values(l.overrides)) {
+                if (typeof override !== 'object' || override === null) continue;
+                const o = /** @type {any} */ (override);
+                if (o.tuning === undefined) o.tuning = null;
+            }
         }
     }
     delete doc.tuningOverrides;
@@ -284,7 +297,9 @@ export function upgradeDoc(doc) {
  * @returns {any} the same registry
  */
 export function upgradeRegistry(reg) {
-    for (const model of Object.values(reg?.models ?? {})) {
+    if (typeof reg?.models !== 'object' || reg.models === null) return reg;
+    for (const model of Object.values(reg.models)) {
+        if (typeof model !== 'object' || model === null || Array.isArray(model)) continue;
         const m = /** @type {any} */ (model);
         if (m.tunings === undefined) {
             m.tunings = { default: m.tuning ?? {} };

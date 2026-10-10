@@ -164,7 +164,7 @@ export class Store {
             }, null, 2));
         }
         this.state = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
-        this.models = upgradeRegistry(JSON.parse(fs.readFileSync(this.modelsFile, 'utf8')));
+        this.models = this._loadModels();
         this.rev = this.state.rev ?? 0;
         this.slotChangedRev = this.state.slotChangedRev ?? 0;
         await this.rescan();
@@ -296,6 +296,51 @@ export class Store {
         this.rev = nextState.rev;
     }
 
+    /**
+     * Load models.json at boot. Rule: a file that fails to parse, is not an
+     * object, has `version !== 1`, or has a non-object `models` is wholly
+     * corrupt -> empty registry. Otherwise the registry is upgraded and each
+     * Model entry that fails validateRegistry is dropped. Whenever anything
+     * was dropped or the file was corrupt, the ORIGINAL bytes are copied to
+     * `models.json.corrupt-<timestamp>` under the store root and an error is
+     * logged; models.json itself is never rewritten here.
+     * @returns {any}
+     */
+    _loadModels() {
+        const raw = fs.readFileSync(this.modelsFile);
+        /** @type {string[]} */
+        const problems = [];
+        /** @type {Record<string, any>} */
+        const kept = {};
+        /** @type {any} */
+        let reg;
+        let corrupt = false;
+        try {
+            reg = JSON.parse(raw.toString('utf8'));
+        } catch (err) {
+            corrupt = true;
+            problems.push(`parse error: ${/** @type {Error} */ (err).message}`);
+        }
+        const isObj = (/** @type {any} */ v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+        if (!corrupt && (!isObj(reg) || reg.version !== 1 || !isObj(reg.models))) {
+            corrupt = true;
+            problems.push('not a version 1 registry object');
+        }
+        if (!corrupt) {
+            upgradeRegistry(reg);
+            for (const [name, m] of Object.entries(reg.models)) {
+                if (validateRegistry({ version: 1, models: { [name]: m } }).length === 0) kept[name] = m;
+                else problems.push(`dropped Model "${name}"`);
+            }
+        }
+        if (problems.length) {
+            console.error(`[preset-manager] models.json is invalid (${problems.join('; ')}); original saved as a models.json.corrupt-* backup`);
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+            fs.writeFileSync(path.join(this.root, `models.json.corrupt-${stamp}`), raw);
+        }
+        return { version: 1, models: kept };
+    }
+
     // ------------------------------------------------------------------ scan
 
     async rescan() {
@@ -318,23 +363,35 @@ export class Store {
                 }
                 if (!ent.name.endsWith('.json')) continue;
                 let doc;
+                /** @type {any} */
+                let legacyDoc;
                 try {
                     doc = JSON.parse(fs.readFileSync(full, 'utf8'));
                 } catch {
-                    continue; // unreadable entries are skipped, not fatal (v1 rule)
+                    continue; // unreadable or invalid entries are skipped, not fatal (v1 rule)
                 }
-                if (doc?.format !== 'st-preset-manager/library') continue;
-                // v1 `load_canonical`: derive structure on every load so
-                // rank ops are byte-exact invertible and hand-edited files
-                // normalize too (no-op for docs the store wrote itself).
-                deriveStructure(doc);
-                stripLeafEnabled(doc); // legacy files: bits belong to loadouts only
-                // pre-upgrade shape (post strip/derive), kept only when the
-                // upgrade changes something: the first save snapshots it as
-                // the revision, so the old bytes stay recoverable
-                const before = JSON.stringify(doc);
-                upgradeDoc(doc);
-                const legacyDoc = JSON.stringify(doc) === before ? undefined : JSON.parse(before);
+                try {
+                    if (doc?.format !== 'st-preset-manager/library') continue;
+                    // v1 `load_canonical`: derive structure on every load so
+                    // rank ops are byte-exact invertible and hand-edited files
+                    // normalize too (no-op for docs the store wrote itself).
+                    deriveStructure(doc);
+                    stripLeafEnabled(doc); // legacy files: bits belong to loadouts only
+                    // pre-upgrade shape (post strip/derive), kept only when the
+                    // upgrade changes something: the first save snapshots it as
+                    // the revision, so the old bytes stay recoverable
+                    const before = JSON.stringify(doc);
+                    upgradeDoc(doc);
+                    const errs = validateDoc(doc);
+                    if (errs.length) {
+                        console.warn('[preset-manager] skipping invalid library file', full, errs.join(', '));
+                        continue;
+                    }
+                    legacyDoc = JSON.stringify(doc) === before ? undefined : JSON.parse(before);
+                } catch (err) {
+                    console.warn('[preset-manager] skipping invalid library file', full, err);
+                    continue;
+                }
                 next.set(doc.id, {
                     legacyDoc,
                     id: doc.id,
@@ -734,7 +791,9 @@ export class Store {
      * playstyle (no children, existing other root as `parent`) keeps the
      * effective map: `enabled` becomes the keys that differ from the new
      * parent's. playstyle -> root materialises the complete effective map.
-     * A `parent` alone re-parents a playstyle (explicit sets kept).
+     * A `parent` id alone re-parents a playstyle (explicit sets kept);
+     * converting to a root goes through `{kind:'root'}` (`parent: null`
+     * without it is rejected).
      * @param {string} presetId
      * @param {string} lid
      * @param {{ name?: string, notes?: string, parent?: string|null, kind?: string }} patch
@@ -746,6 +805,7 @@ export class Store {
             const loadout = doc.loadouts?.[lid];
             if (!loadout) throw new StoreError(`no loadout ${lid}`, 404);
             const { name, notes, parent, kind } = patch ?? {};
+            if (parent === null && kind !== 'root') throw new StoreError('parent must be the id of a root loadout', 400);
             if (name !== undefined) {
                 if (typeof name !== 'string' || !name.trim()) throw new StoreError('name must be a non-empty string', 400);
                 if (Object.values(doc.loadouts).some((/** @type {any} */ l) => l.id !== lid && l.name === name.trim())) {
@@ -1752,3 +1812,4 @@ export function ensureDefaultLoadout(doc) {
 }
 
 export { newId };
+
