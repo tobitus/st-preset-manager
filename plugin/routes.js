@@ -11,7 +11,6 @@
  * /profiles GET, /profiles/backup, /shelf. The rest of the table lands
  * with its phase.
  */
-import { Router } from 'express';
 import fs from 'node:fs';
 import path from 'node:path';
 import { compile, stripConnectionKeys, exportSt } from '../shared/compile.js';
@@ -148,9 +147,12 @@ function docAt(store, side, label) {
     return { doc: store.getRevision(side.presetId, n).doc, rev: n };
 }
 
-/** @returns {Router} */
-export function makeRouter() {
-    const router = Router();
+/**
+ * Register every route on the router ST hands to the plugin's init(). The
+ * plugin imports no packages at runtime (`express` is ST's, not ours).
+ * @param {import('express').Router} router
+ */
+export function registerRoutes(router) {
 
     // -------------------------------------------------------------- health
 
@@ -996,8 +998,6 @@ export function makeRouter() {
             res.json({ ok: true });
         } catch (err) { next(err); }
     });
-
-    return router;
 }
 
 /**

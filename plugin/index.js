@@ -7,7 +7,7 @@
  */
 import { Store } from './store.js';
 import { EventHub } from './events.js';
-import { makeRouter } from './routes.js';
+import { registerRoutes } from './routes.js';
 
 // ST's plugin-loader requires `info` to be an OBJECT with string
 // id/name/description (src/plugin-loader.js:187-196) and `init` a function.
@@ -52,7 +52,7 @@ export async function init(router) {
         }
     });
 
-    router.use('/', makeRouter());
+    registerRoutes(router);
 
     // error forwarder: never swallow (PLAN §1.6)
     router.use((/** @type {any} */ err, _req, res, _next) => {
