@@ -16,10 +16,11 @@ import { fileURLToPath } from 'node:url';
 /** Repo root (the directory containing dev/). */
 export const REPO = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 /** SillyTavern base URL (override with ST_URL). */
-export const ST_URL = process.env.ST_URL ?? 'http://127.0.0.1:8002';
+export const ST_URL = process.env.ST_URL ?? `http://127.0.0.1:${process.env.PM_DEV_PORT ?? 8002}`;
 /** Plugin REST base on the dev container. */
 export const BASE = `${ST_URL}/api/plugins/st-preset-manager`;
-export const CHROME = '/usr/bin/chromium-browser';
+/** Chromium binary (override with PM_CHROME, e.g. dev/chromium-podman.sh when the host has none). */
+export const CHROME = process.env.PM_CHROME ?? '/usr/bin/chromium-browser';
 export const SLOT_NAME = '⟨PM⟩ working';
 export const FF = 'Freaky Frankenstein 5.4 Internal States (2)';
 
@@ -131,7 +132,7 @@ export function createApi({ jar, onFatal }) {
             const data = body === undefined ? null : Buffer.from(JSON.stringify(body));
             const req = http.request(`${BASE}${pathPart}`, {
                 method,
-                host: '127.0.0.1', port: 8002,
+                host: '127.0.0.1', port: Number(new URL(ST_URL).port),
                 headers: {
                     ...(data ? { 'content-type': 'application/json', 'content-length': data.length } : {}),
                     ...(csrfToken ? { 'x-csrf-token': csrfToken } : {}),

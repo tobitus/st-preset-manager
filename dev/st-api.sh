@@ -9,7 +9,7 @@
 set -euo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 JAR="$REPO/dev/.cookies.jar"
-BASE="${ST_URL:-http://127.0.0.1:8002}"
+BASE="${ST_URL:-http://127.0.0.1:${PM_DEV_PORT:-8002}}"
 METHOD="${1:?usage: st-api.sh METHOD PATH [body-file|--raw json]}"
 PATHPART="${2:?usage: st-api.sh METHOD PATH [body-file|--raw json]}"
 ARG3="${3:-}"

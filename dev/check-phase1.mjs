@@ -317,7 +317,7 @@ async function main() {
         // SSE hello arrives unbuffered (compression must not sit on it)
         const got = await new Promise((resolve) => {
             const chunks = [];
-            const req = http.request(`${BASE}/events`, { method: 'GET', host: '127.0.0.1', port: 8002, headers: { cookie: fs.readFileSync(path.join(REPO, 'dev', '.check-phase1.cookies.jar'), 'utf8').trim() } }, (res) => {
+            const req = http.request(`${BASE}/events`, { method: 'GET', host: '127.0.0.1', port: Number(new URL(BASE).port), headers: { cookie: fs.readFileSync(path.join(REPO, 'dev', '.check-phase1.cookies.jar'), 'utf8').trim() } }, (res) => {
                 res.on('data', (c) => chunks.push(c));
             });
             req.on('error', () => resolve(null));

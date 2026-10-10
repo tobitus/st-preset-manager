@@ -4,6 +4,7 @@ set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LIVE_DATA="$HOME/projects/sillysystem/st/data/default-user"
+PORT="${PM_DEV_PORT:-8002}"
 
 if podman ps --format '{{.Names}}' | grep -qx 'st-pm-dev'; then
     podman stop st-pm-dev >/dev/null
@@ -26,9 +27,9 @@ echo "[reset] data rebuilt: $count presets, fresh settings.json"
 podman start st-pm-dev >/dev/null
 
 for i in $(seq 1 60); do
-    code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8002/ || true)
+    code=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/" || true)
     [[ "$code" == "200" ]] && break
     sleep 1
 done
 [[ "$code" == "200" ]] || { echo "[reset] ERROR: ST did not come up" >&2; exit 1; }
-echo "[reset] st-pm-dev is up on :8002"
+echo "[reset] st-pm-dev is up on :$PORT"

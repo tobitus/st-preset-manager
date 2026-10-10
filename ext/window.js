@@ -3,7 +3,7 @@
  * toolbar. Library = preset list (load into slot, open in the Presets tab);
  * Presets = per-preset editor tabs (ext/tabs/*); Diff = 2x2 preset/revision/
  * block comparison (ext/tabs/diff.js); Import/Export = file import/export
- * (ext/tabs/io.js); Shelf = saved blocks (rename/notes/delete), dropped back
+ * (ext/tabs/io.js), mounted at the bottom of the Library pane; Shelf = saved blocks (rename/notes/delete), dropped back
  * into a preset from that tab's own shelf list (ext/tabs/shelf.js);
  * Settings = Model registry + connection profile tidy (ext/tabs/settings.js).
  * The toolbar above the tabs holds a Model picker that switches ST's live
@@ -136,16 +136,15 @@ export function openMainWindow(bridge) {
                 <button type="button" class="pm-tab menu_button pm-active" data-tab="library">Library</button>
                 <button type="button" class="pm-tab menu_button" data-tab="presets">Presets</button>
                 <button type="button" class="pm-tab menu_button" data-tab="diff">Diff</button>
-                <button type="button" class="pm-tab menu_button" data-tab="io">Import/Export</button>
                 <button type="button" class="pm-tab menu_button" data-tab="shelf">Shelf</button>
                 <button type="button" class="pm-tab menu_button" data-tab="settings">Settings</button>
             </div>
             <div class="pm-pane" data-pane="library">
                 <div class="pm-root"></div>
+                <div class="pm-io-section"></div>
             </div>
             <div class="pm-pane" data-pane="presets" hidden></div>
             <div class="pm-pane" data-pane="diff" hidden></div>
-            <div class="pm-pane" data-pane="io" hidden></div>
             <div class="pm-pane" data-pane="shelf" hidden></div>
             <div class="pm-pane" data-pane="settings" hidden></div>`,
     });
@@ -173,7 +172,7 @@ export function openMainWindow(bridge) {
             pane.hidden = pane.dataset.pane !== name;
         }
         if (name === 'diff') void diff.refresh();
-        if (name === 'io') void io.refresh();
+        if (name === 'library') void io.refresh();
         if (name === 'shelf') void shelf.refresh();
         if (name === 'settings') void settings.refresh();
     };
@@ -209,7 +208,7 @@ export function openMainWindow(bridge) {
     const libState = { onOpen, onActive };
 
     io = createIoTab(
-        /** @type {HTMLElement} */ (root.querySelector('.pm-pane[data-pane="io"]')),
+        /** @type {HTMLElement} */ (root.querySelector('.pm-io-section')),
         bridge,
         { onOpen, onLibraryChanged: () => void refresh(libRoot, bridge, libState) },
     );
@@ -228,6 +227,7 @@ export function openMainWindow(bridge) {
 
     renderLibrary(libRoot, bridge, libState);
     void refresh(libRoot, bridge, libState);
+    void io.refresh();
 
     unsubscribeSlot = /** @type {() => void} */ (bridge.onUpdate((/** @type {any} */ s) => {
         if (!root.isConnected) return;

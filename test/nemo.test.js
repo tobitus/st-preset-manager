@@ -541,15 +541,26 @@ test('pickRecognizer: a Nemo-tagged row beats a 🔻PICK: row', () => {
 });
 
 test('recognizer kind: multi-sequence preset reports the shared recognizer', () => {
+    // F-066: 100000 next to 100001 is dropped, so a second sequence needs another id
     const st = nemoSt();
-    st.prompt_order.push({ character_id: 100000, order: structuredClone(st.prompt_order[0].order) });
+    st.prompt_order.push({ character_id: 100002, order: structuredClone(st.prompt_order[0].order) });
     const doc = importStPreset(st, 'Nemo two orders');
     assert.equal(doc.sequences.length, 2);
     assert.equal(doc.source.recognizer.kind, 'nemo');
     // mixed recognizers across sequences -> flat (v1 rule kept)
     const mixed = nemoSt();
-    mixed.prompt_order.push({ character_id: 100000, order: [{ identifier: 'x', enabled: true }] });
+    mixed.prompt_order.push({ character_id: 100002, order: [{ identifier: 'x', enabled: true }] });
     assert.equal(importStPreset(mixed, 'mixed').source.recognizer.kind, 'flat');
+});
+
+test('F-066: a Nemo preset with 100000 + 100001 imports only 100001, with a note', () => {
+    const st = nemoSt();
+    st.prompt_order.unshift({ character_id: 100000, order: [{ identifier: 'pre', enabled: true }] });
+    const doc = importStPreset(st, 'Nemo two orders');
+    assert.equal(doc.sequences.length, 1);
+    assert.equal(doc.sequences[0].character_id, 100001);
+    assert.equal(doc.source.recognizer.kind, 'nemo');
+    assert.ok(doc.source.recognizer.notes.some((n) => n.includes('100000')));
 });
 
 test('nemo: real Nemo Engine 11.5.2 file (skips when absent)', () => {
@@ -557,7 +568,11 @@ test('nemo: real Nemo Engine 11.5.2 file (skips when absent)', () => {
     if (!st) return;
     const doc = importStPreset(st, 'Nemo real');
     assert.equal(doc.source.recognizer.kind, 'nemo');
-    assert.equal(doc.sequences.length, 2);
+    // F-066: the file carries 100000 + 100001; only 100001 is imported
+    assert.equal(doc.sequences.length, 1);
+    assert.equal(doc.sequences[0].character_id, 100001);
+    assert.ok(doc.source.recognizer.notes.some((n) => n.includes('dropped prompt_order 100000')));
+    const order100001 = st.prompt_order.find((/** @type {any} */ o) => o.character_id === 100001);
     const nameOf = (/** @type {any} */ leaf) => doc.blocks[leafId(leaf)]?.name;
     const byName = new Map(st.prompts.map((/** @type {any} */ p) => [p.name, p.identifier]));
     const subIds = new Set(st.prompts
@@ -571,7 +586,7 @@ test('nemo: real Nemo Engine 11.5.2 file (skips when absent)', () => {
         for (const sec of sections) assert.match(sec.name, /^\s*=+.*=+\s*$/);
         for (const g of groups) assert.equal(g.guessed, false);
         // order: unchanged except moved sub headers
-        const orig = st.prompt_order[i].order.map((/** @type {any} */ o) => o.identifier);
+        const orig = order100001.order.map((/** @type {any} */ o) => o.identifier);
         const now = flattenSeq(s.rows).map((e) => leafId(e.leaf));
         assert.deepEqual(now.filter((id) => !subIds.has(id)), orig.filter((/** @type {string} */ id) => !subIds.has(id)));
         assert.equal(now.length, orig.length);

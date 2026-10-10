@@ -743,7 +743,11 @@ export function importStPreset(data, name, ids = {}) {
     /** @type {string[]} */
     const picked = [];
 
-    for (const seq of data.prompt_order ?? []) {
+    // F-066: ST chat completion reads only 100001 when both 100000 and 100001 exist.
+    const orders = data.prompt_order ?? [];
+    const dropDefault = orders.some((s) => s?.character_id === 100000) && orders.some((s) => s?.character_id === 100001);
+    if (dropDefault) notes.push('dropped prompt_order 100000: ST chat completion reads only 100001 (F-066)');
+    for (const seq of dropDefault ? orders.filter((s) => s?.character_id !== 100000) : orders) {
         const kind = `seq${seq?.character_id}`;
         const rows = seqRows(data, seq?.order ?? [], byid, kind);
         const recognizer = pickRecognizer(rows, byid);

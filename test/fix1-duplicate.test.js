@@ -28,16 +28,17 @@ const IDS0 = ['a', 's', 'b', 'g', 'o1', 'o2', 'c', 'p1', 'p2'];
 const IDS1 = ['x', 'y', 'z'];
 
 /**
- * Two sequences. Sequence 0 (character 100000): a, s(section){ b, g{o1,o2},
- * c, (headerless){p1,p2} }. Sequence 1 (character 100001): x, y, z.
+ * Two sequences. Sequence 0 (character 100001): a, s(section){ b, g{o1,o2},
+ * c, (headerless){p1,p2} }. Sequence 1 (character 100002): x, y, z.
+ * (Not 100000 + 100001: F-066 drops 100000 when 100001 is present.)
  */
 function st() {
     const all = [...IDS0, ...IDS1];
     return {
         prompts: all.map((id) => ({ identifier: id, name: id.toUpperCase(), content: `content ${id}`, role: 'system', enabled: true })),
         prompt_order: [
-            { character_id: 100000, order: IDS0.map((id) => ({ identifier: id, enabled: true })) },
-            { character_id: 100001, order: IDS1.map((id) => ({ identifier: id, enabled: true })) },
+            { character_id: 100001, order: IDS0.map((id) => ({ identifier: id, enabled: true })) },
+            { character_id: 100002, order: IDS1.map((id) => ({ identifier: id, enabled: true })) },
         ],
     };
 }

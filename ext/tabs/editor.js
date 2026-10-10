@@ -110,7 +110,7 @@ export function createEditor(container, handlers) {
         content.rows = 14;
         content.value = block?.content ?? '';
 
-        const saveBtn = el('button', 'pm-block-save menu_button', 'Save content');
+        const saveBtn = el('button', 'pm-block-save menu_button', 'Save block');
 
         const notesLabel = el('label', 'pm-field-label', 'Notes (never sent to the model)');
         const notes = el('textarea', 'pm-block-notes text_pole');

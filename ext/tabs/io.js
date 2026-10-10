@@ -21,7 +21,7 @@ function countGroups(/** @type {any} */ doc) {
 }
 
 /**
- * @param {HTMLElement} pane .pm-pane[data-pane="io"]
+ * @param {HTMLElement} pane .pm-io-section in the Library pane
  * @param {import('../bridge.js').Bridge} bridge
  * @param {{ onOpen: (presetId: string) => void, onLibraryChanged: () => void }} callbacks
  * @returns {{ refresh(): Promise<void>, destroy(): void }}
@@ -77,9 +77,9 @@ export function createIoTab(pane, bridge, { onOpen, onLibraryChanged }) {
 
     /**
      * Prepend one result row to the log.
-     * @param {{ ok: boolean, name: string, text: string, presetId?: string, httpStatus?: number }} result
+     * @param {{ ok: boolean, name: string, text: string, presetId?: string, httpStatus?: number, notes?: string[] }} result
      */
-    function logResult({ ok, name, text, presetId, httpStatus }) {
+    function logResult({ ok, name, text, presetId, httpStatus, notes }) {
         const row = document.createElement('div');
         row.className = 'pm-io-result' + (ok ? '' : ' pm-error');
         row.dataset.status = ok ? 'ok' : 'error';
@@ -96,6 +96,12 @@ export function createIoTab(pane, bridge, { onOpen, onLibraryChanged }) {
             openBtn.textContent = 'Open';
             openBtn.addEventListener('click', () => onOpen(presetId));
             row.append(openBtn);
+            if (Array.isArray(notes) && notes.length > 0) {
+                const notesEl = document.createElement('div');
+                notesEl.className = 'pm-io-notes';
+                notesEl.textContent = notes.join('\n');
+                row.append(notesEl);
+            }
         }
         log.insertBefore(row, log.firstChild);
     }
@@ -110,6 +116,7 @@ export function createIoTab(pane, bridge, { onOpen, onLibraryChanged }) {
                 name,
                 presetId: doc.id,
                 text: `Imported "${doc.name}" — recognizer ${doc.source?.recognizer?.kind ?? 'native'}, ${countGroups(doc)} groups`,
+                notes: doc.source?.recognizer?.notes,
             });
             return true;
         } catch (err) {

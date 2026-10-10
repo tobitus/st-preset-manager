@@ -390,6 +390,17 @@ ul.pm-list ul.pm-list {
 }
 
 /* Import/Export pane (Phase 3) */
+.pm-io-section {
+    margin-top: 12px;
+    padding-top: 8px;
+    border-top: 1px solid var(--SmartThemeBorderColor, rgba(128, 128, 128, 0.4));
+}
+.pm-io-notes {
+    flex-basis: 100%;
+    white-space: pre-wrap;
+    font-size: 0.85em;
+    opacity: 0.7;
+}
 .pm-io {
     display: flex;
     flex-direction: column;

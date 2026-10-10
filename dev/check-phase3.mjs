@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Phase 3 acceptance (roadmap acceptance 9 export half, 10, 11) as one
- * repeatable real-browser script. Drives the ACTUAL Import/Export tab in a
+ * repeatable real-browser script. Drives the ACTUAL Import/Export section (bottom of the Library pane) in a
  * headless Chromium over raw CDP (file-input via CDP DOM.setFileInputFiles,
  * synthetic drag/drop, ST's own preset-import file input, real generation)
  * and cross-checks with the v1 parity script and the REST API — never only
@@ -376,8 +376,8 @@ async function main() {
                 await api('DELETE', `/presets/${presetIds.frank}`);
                 const lib1 = (await api('GET', '/library')).json ?? [];
                 if (lib1.some((/** @type {any} */ e) => e.id === presetIds.frank)) throw new Error('FrankenSIM still in library after delete');
-                await click('#pm-window .pm-tab[data-tab="io"]');
-                await until(() => exists('#pm-window .pm-pane[data-pane="io"]:not([hidden])'), 5000, 'io tab shown');
+                await click('#pm-window .pm-tab[data-tab="library"]');
+                await until(() => exists('#pm-window .pm-pane[data-pane="library"]:not([hidden]) .pm-io-section .pm-io-file'), 5000, 'library pane with the import section shown');
                 const absPath = path.join(REPO, 'dev', 'fixtures', 'presets', 'FrankenSIM.2.5.Release.1.json');
                 await setFileInput('#pm-window .pm-io-file', absPath);
                 const resultSel = '.pm-io-result[data-status="ok"][data-name="FrankenSIM.2.5.Release.1"]';
@@ -510,8 +510,8 @@ async function main() {
             const name = 'ui drop import (synthetic drop)';
             try {
                 const text = fs.readFileSync(path.join(REPO, 'dev', 'fixtures', 'presets', 'Sola V2 Flame.json'), 'utf8');
-                await click('#pm-window .pm-tab[data-tab="io"]');
-                await until(() => exists('#pm-window .pm-pane[data-pane="io"]:not([hidden])'), 5000, 'io tab shown');
+                await click('#pm-window .pm-tab[data-tab="library"]');
+                await until(() => exists('#pm-window .pm-pane[data-pane="library"]:not([hidden]) .pm-io-section .pm-io-file'), 5000, 'library pane with the import section shown');
                 // the drop must stay OURS: ST binds its own character/file import
                 // on document.body `drop` (public/scripts/dragdrop.js:56), which
                 // shows a "Could not import character" error toast for a preset
@@ -644,8 +644,8 @@ async function main() {
             await runExportCheck('ui export native download == API export', 'native', `${FF}.pm-library.json`, dir);
         }
         try {
-            await click('#pm-window .pm-tab[data-tab="io"]');
-            await until(() => exists('#pm-window .pm-pane[data-pane="io"]:not([hidden])'), 5000, 'io tab shown');
+            await click('#pm-window .pm-tab[data-tab="library"]');
+            await until(() => exists('#pm-window .pm-pane[data-pane="library"]:not([hidden]) .pm-io-section .pm-io-file'), 5000, 'library pane with the import section shown');
             await until(() => probe.eval(`document.querySelectorAll('#pm-window .pm-io-result[data-status="ok"]').length > 0
                 && document.querySelectorAll('#pm-window .pm-io-result[data-status="error"]').length > 0`), 5000, 'log populated');
             await dismissPopups();
