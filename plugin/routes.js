@@ -4,8 +4,9 @@
  * /ops toggle|setSettings), /presets/:id/export, /slot/* (load, model —
  * per-tab GET/POST raw, review-1 W2 —, panel), /events, /rescan,
  * /revisions (list/get/snapshot/restore), /presets/:id/undo|redo|history, /diff, /diff/blocks, /models
- * (GET/PUT + :modelId/tuning PUT/PATCH + seed + rename/merge),
- * /presets/:id/tuning-overrides/:modelId and
+ * (GET/PUT + :modelId/tunings/:name PUT/PATCH/DELETE + :modelId/tunings/rename
+ * + :modelId/default-tuning PUT + seed + rename/merge),
+ * /presets/:id/loadouts (POST root|playstyle, PATCH, DELETE) and
  * /presets/:id/loadouts/:lid/overrides/:modelId (PUT/DELETE/PATCH),
  * /profiles GET, /profiles/backup, /shelf. The rest of the table lands
  * with its phase.
@@ -17,7 +18,7 @@ import { compile, stripConnectionKeys, exportSt } from '../shared/compile.js';
 import { routePanelDiff, panelDelta } from './slot.js';
 import { StoreError } from './store.js';
 import { applyDocOp } from '../shared/docops.js';
-import { iterLeaves, completeOverride } from '../shared/groups.js';
+import { upgradeDoc } from '../shared/schema.js';
 import { resolveModel } from '../shared/models.js';
 import { canonicalHash, ulid, newId } from '../shared/util.js';
 import { TUNING_KEYS } from '../shared/st-keys.js';
@@ -193,9 +194,13 @@ export function makeRouter() {
     router.put('/presets/:id', async (req, res, next) => {
         try {
             const doc = req.body;
+            if (doc === null || typeof doc !== 'object' || Array.isArray(doc)) {
+                return res.status(400).json({ error: 'body must be a preset document object' });
+            }
             if (doc.id !== req.params.id) {
                 return res.status(400).json({ error: `body id ${doc.id} != path id ${req.params.id}` });
             }
+            upgradeDoc(doc);
             const saved = await req.pm.store.savePreset(doc);
             broadcast(req, 'preset', doc.id);
             res.json(saved);
@@ -354,12 +359,16 @@ export function makeRouter() {
     // the active loadout), and settings/notes (setSettings/setNotes — notes
     // are library-only and never compiled). dissolveGroup turns a group's
     // heading and options into plain items; promote/demote take {key} or
-    // {keys} (several rows, document order, all-or-nothing).
+    // {keys} (several rows, document order, all-or-nothing). toggle/setGroup
+    // take an optional {loadoutId} (default the active one) and write a
+    // playstyle's sparse layer, never its root; resetInherit {loadoutId,
+    // identifier} / resetAllInherit {loadoutId} drop a playstyle's own
+    // entries so they inherit from the root again.
     const OPS = /** @type {const} */ ([
         'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'makeSection', 'unmakeSection', 'moveLeaf',
         'createGroup', 'renameGroup', 'dissolveGroup', 'addOption', 'removeOption',
         'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'deleteBlock',
-        'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock',
+        'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock', 'resetInherit', 'resetAllInherit',
     ]);
     router.post('/presets/:id/ops', async (req, res, next) => {
         try {
@@ -497,15 +506,19 @@ export function makeRouter() {
                     return out;
                 };
                 const loadouts = /** @type {Record<string, any>} */ ({});
+                const newLids = /** @type {Map<string, string>} */ (new Map());
+                for (const old of /** @type {any[]} */ (Object.values(doc.loadouts ?? {}))) newLids.set(old.id, `l_${ulid()}`);
                 for (const lo of /** @type {any[]} */ (Object.values(doc.loadouts ?? {}))) {
-                    const lid = `l_${ulid()}`;
+                    const lid = /** @type {string} */ (newLids.get(lo.id));
                     const overrides = /** @type {Record<string, any>} */ ({});
                     for (const [modelName, ov] of Object.entries(/** @type {Record<string, any>} */ (lo.overrides ?? {}))) {
-                        overrides[modelName] = { enabled: rekeyEnabled(ov.enabled ?? {}) };
+                        overrides[modelName] = { enabled: rekeyEnabled(ov.enabled ?? {}), tuning: ov.tuning ?? null };
                     }
                     loadouts[lid] = {
                         ...structuredClone(lo),
                         id: lid,
+                        // a playstyle keeps pointing at the copy of its root
+                        parent: lo.parent ? (newLids.get(lo.parent) ?? lo.parent) : null,
                         enabled: rekeyEnabled(lo.enabled ?? {}),
                         overrides,
                     };
@@ -556,92 +569,41 @@ export function makeRouter() {
 
     // ------------------------------------------------------------ loadouts
 
-    // POST /presets/:id/loadouts {name, from?} -> {doc, rev}: create a
-    // loadout copying `from` (or the current active one when omitted).
+    // POST /presets/:id/loadouts {name, kind, from?, parent?} -> {doc, rev}:
+    // create a root (copy of `from`, default the active loadout's root) or a
+    // sparse playstyle under `parent`. A new loadout never changes what the
+    // slot compiles, but a parent/kind change (PATCH) can, so both broadcast
+    // 'slot' when this is the slot's preset.
     router.post('/presets/:id/loadouts', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const { name, from } = req.body ?? {};
-            if (typeof name !== 'string' || !name.trim()) throw new StoreError('loadouts create needs {name}', 400);
-            const saved = await store.enqueue(async () => {
-                const doc = store.getDocNow(req.params.id);
-                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                if (Object.values(doc.loadouts ?? {}).some((/** @type {any} */ l) => l.name === name.trim())) {
-                    throw new StoreError(`loadout name "${name.trim()}" is already taken`, 409);
-                }
-                const srcId = from ?? doc.activeLoadoutId;
-                const src = srcId ? doc.loadouts?.[srcId] : null;
-                if (!src) throw new StoreError(`no loadout ${String(srcId)}`, 404);
-                const lid = `l_${ulid()}`;
-                doc.loadouts[lid] = {
-                    id: lid,
-                    name: name.trim(),
-                    notes: '',
-                    enabled: { ...structuredClone(src.enabled) },
-                    overrides: structuredClone(src.overrides ?? {}),
-                };
-                return store._savePresetNow(doc);
-            });
-            broadcast(req, 'preset', req.params.id);
+            const saved = await store.createLoadout(req.params.id, req.body ?? {});
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
             res.status(201).json({ doc: saved, rev: store.rev });
         } catch (err) { next(err); }
     });
 
-    // PATCH /presets/:id/loadouts/:lid {name?, notes?} -> {doc, rev}
+    // PATCH /presets/:id/loadouts/:lid {name?, notes?, parent?, kind?} -> {doc, rev}
     router.patch('/presets/:id/loadouts/:lid', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const saved = await store.enqueue(async () => {
-                const doc = store.getDocNow(req.params.id);
-                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                const loadout = doc.loadouts?.[req.params.lid];
-                if (!loadout) throw new StoreError(`no loadout ${req.params.lid}`, 404);
-                const { name, notes } = req.body ?? {};
-                if (name !== undefined) {
-                    if (typeof name !== 'string' || !name.trim()) throw new StoreError('name must be a non-empty string', 400);
-                    if (Object.values(doc.loadouts).some((/** @type {any} */ l) => l.id !== req.params.lid && l.name === name.trim())) {
-                        throw new StoreError(`loadout name "${name.trim()}" is already taken`, 409);
-                    }
-                    loadout.name = name.trim();
-                }
-                if (notes !== undefined) {
-                    if (typeof notes !== 'string') throw new StoreError('notes must be a string', 400);
-                    loadout.notes = notes;
-                }
-                return store._savePresetNow(doc);
-            });
-            broadcast(req, 'preset', req.params.id);
+            const saved = await store.updateLoadout(req.params.id, req.params.lid, req.body ?? {});
+            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
+                store.state.presetId === req.params.id ? null : req.params.id);
             res.json({ doc: saved, rev: store.rev });
         } catch (err) { next(err); }
     });
 
-    // DELETE /presets/:id/loadouts/:lid -> {doc, rev} (never the last one).
-    // Deleting the loadout the slot desires changes the desired state: the
-    // in-queue marker + state write clear it so the slot view falls back to
-    // the document's active loadout.
+    // DELETE /presets/:id/loadouts/:lid -> {doc, rev} (never the last root,
+    // nor a root that still has playstyles). Deleting the loadout the slot
+    // desires changes the desired state: the store's in-queue marker + state
+    // write clear it so the slot view falls back to the document's active
+    // loadout.
     router.delete('/presets/:id/loadouts/:lid', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const { doc, wasDesired } = await store.enqueue(async () => {
-                const d = store.getDocNow(req.params.id);
-                if (!d) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                if (!d.loadouts?.[req.params.lid]) throw new StoreError(`no loadout ${req.params.lid}`, 404);
-                if (Object.keys(d.loadouts).length <= 1) throw new StoreError('cannot delete the last loadout', 409);
-                delete d.loadouts[req.params.lid];
-                if (d.activeLoadoutId === req.params.lid) {
-                    d.activeLoadoutId = Object.keys(d.loadouts)[0];
-                }
-                const desired = store.state.presetId === req.params.id
-                    && (store.state.loadoutId === req.params.lid);
-                if (desired) {
-                    store._markSlotChanged();
-                    await store._mutateStateNow((/** @type {any} */ st) => {
-                        st.loadoutId = null;
-                    });
-                }
-                const saved = await store._savePresetNow(d);
-                return { doc: saved, wasDesired: desired };
-            });
+            const { doc, wasDesired } = await store.deleteLoadout(req.params.id, req.params.lid);
             broadcast(req, wasDesired ? 'slot' : 'preset', wasDesired ? null : req.params.id);
             res.json({ doc, rev: store.rev });
         } catch (err) { next(err); }
@@ -675,31 +637,14 @@ export function makeRouter() {
         } catch (err) { next(err); }
     });
 
-    // PUT/DELETE /presets/:id/loadouts/:lid/overrides/:modelId {enabled:{…}}
-    // -> {doc, rev}. Per-Model loadout override (roadmap item 21). PUT with
-    // {} deletes... no: PUT replaces the override (creating it), DELETE
-    // removes it. Enabled identifiers must be known leaves.
+    // PUT /presets/:id/loadouts/:lid/overrides/:modelId {enabled:{…}, tuning?}
+    // -> {doc, rev}. Per-Model loadout override: PUT replaces the override
+    // (creating it; `tuning` names one of the Model's tunings, absent/null =
+    // the Model default), DELETE removes it. Validation lives in the store.
     router.put('/presets/:id/loadouts/:lid/overrides/:modelId', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const saved = await store.enqueue(async () => {
-                const doc = store.getDocNow(req.params.id);
-                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                const loadout = doc.loadouts?.[req.params.lid];
-                if (!loadout) throw new StoreError(`no loadout ${req.params.lid}`, 404);
-                const { enabled } = req.body ?? {};
-                if (typeof enabled !== 'object' || enabled === null || Array.isArray(enabled)) {
-                    throw new StoreError('override needs {enabled: {identifier: bool}}', 400);
-                }
-                const leaves = new Set(iterLeaves(doc).map((/** @type {any} */ l) => l.ref ?? l.identifier));
-                for (const [id, on] of Object.entries(enabled)) {
-                    if (typeof on !== 'boolean') throw new StoreError(`override.${id} must be a boolean`, 400);
-                    if (!leaves.has(id)) throw new StoreError(`unknown leaf ${id}`, 404);
-                }
-                loadout.overrides ??= {};
-                loadout.overrides[req.params.modelId] = { enabled: completeOverride(doc, { ...enabled }) };
-                return store._savePresetNow(doc);
-            });
+            const saved = await store.setLoadoutOverride(req.params.id, req.params.lid, req.params.modelId, req.body ?? {});
             // the slot recompiles against overrides when its Model matches
             broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
                 store.state.presetId === req.params.id ? null : req.params.id);
@@ -708,8 +653,8 @@ export function makeRouter() {
     });
 
     // PATCH /presets/:id/loadouts/:lid/overrides/:modelId {set?:{id:bool},
-    // unset?:[id]} -> {doc, rev}; 404 when no override exists. Semantic
-    // patch (review-1 W2) applied inside the store queue.
+    // unset?:[id], tuning?} -> {doc, rev}; 404 when no override exists.
+    // Semantic patch (review-1 W2) applied inside the store queue.
     router.patch('/presets/:id/loadouts/:lid/overrides/:modelId', async (req, res, next) => {
         try {
             const store = req.pm.store;
@@ -732,60 +677,6 @@ export function makeRouter() {
                     throw new StoreError(`no override for ${req.params.modelId}`, 404);
                 }
                 delete loadout.overrides[req.params.modelId];
-                return store._savePresetNow(doc);
-            });
-            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
-                store.state.presetId === req.params.id ? null : req.params.id);
-            res.json({ doc: saved, rev: store.rev });
-        } catch (err) { next(err); }
-    });
-
-    // -------------------------------------------------- tuning overrides
-
-    // PUT/DELETE /presets/:id/tuning-overrides/:modelId {…TUNING_KEYS}
-    // -> {doc, rev} (roadmap item 16).
-    router.put('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
-        try {
-            const store = req.pm.store;
-            const saved = await store.enqueue(async () => {
-                const doc = store.getDocNow(req.params.id);
-                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                const body = req.body ?? {};
-                for (const k of Object.keys(body)) {
-                    if (!TUNING_KEYS.includes(k)) throw new StoreError(`"${k}" is not a tuning key`, 400);
-                }
-                doc.tuningOverrides ??= {};
-                doc.tuningOverrides[req.params.modelId] = { ...body };
-                return store._savePresetNow(doc);
-            });
-            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
-                store.state.presetId === req.params.id ? null : req.params.id);
-            res.json({ doc: saved, rev: store.rev });
-        } catch (err) { next(err); }
-    });
-
-    // PATCH /presets/:id/tuning-overrides/:modelId {set?, unset?} ->
-    // {doc, rev}; 404 when no override exists.
-    router.patch('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
-        try {
-            const store = req.pm.store;
-            const saved = await store.patchTuningOverride(req.params.id, req.params.modelId, req.body ?? {});
-            broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
-                store.state.presetId === req.params.id ? null : req.params.id);
-            res.json({ doc: saved, rev: store.rev });
-        } catch (err) { next(err); }
-    });
-
-    router.delete('/presets/:id/tuning-overrides/:modelId', async (req, res, next) => {
-        try {
-            const store = req.pm.store;
-            const saved = await store.enqueue(async () => {
-                const doc = store.getDocNow(req.params.id);
-                if (!doc) throw new StoreError(`preset ${req.params.id} not found`, 404);
-                if (doc.tuningOverrides?.[req.params.modelId] === undefined) {
-                    throw new StoreError(`no tuning override for ${req.params.modelId}`, 404);
-                }
-                delete doc.tuningOverrides[req.params.modelId];
                 return store._savePresetNow(doc);
             });
             broadcast(req, store.state.presetId === req.params.id ? 'slot' : 'preset',
@@ -886,15 +777,16 @@ export function makeRouter() {
                     // cannot be diffed field-wise; reject rather than guess.
                     throw new StoreError('snapshot or base lost prompt_order/prompts structure', 409);
                 }
-                const { routed, globalTuning, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
+                const { routed, tuningWrite, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
                 // A panel observation that routes nothing is not a revision:
                 // saving unconditionally here turned every echo of our own apply
                 // into doc.rev+1 and fed the apply<->panel loop.
-                if (routed.length > 0 || globalTuning) {
+                if (routed.length > 0 || tuningWrite) {
                     await store._savePresetNow(doc);
-                    if (globalTuning && model) {
+                    if (tuningWrite && model) {
                         await store._mutateModelsNow((/** @type {any} */ reg) => {
-                            reg.models[model.name].tuning = { ...reg.models[model.name].tuning, ...globalTuning };
+                            const t = reg.models[model.name].tunings;
+                            t[tuningWrite.name] = { ...(t[tuningWrite.name] ?? {}), ...tuningWrite.values };
                         });
                     }
                 }
@@ -927,8 +819,8 @@ export function makeRouter() {
 
     // POST /models/rename {from, to} -> {models, migrated: [presetId]}.
     // Server-side transaction (review-1 W2): renames the registry entry and
-    // migrates every doc.tuningOverrides[from]/loadout override reference to
-    // `to` in one queued pass, revision-labelled before each touched doc.
+    // migrates every loadout override reference to `to` in one queued pass,
+    // revision-labelled before each touched doc.
     router.post('/models/rename', async (req, res, next) => {
         try {
             const store = req.pm.store;
@@ -966,23 +858,60 @@ export function makeRouter() {
         } catch (err) { next(err); }
     });
 
-    router.put('/models/:modelId/tuning', async (req, res, next) => {
+    // Named per-Model tunings: PUT /models/:modelId/tunings/:name {…TUNING_KEYS}
+    // upserts; PATCH {set?, unset?} is a semantic patch inside the store
+    // queue; DELETE refuses the default and any tuning a loadout override
+    // uses. All answer with the Model entry.
+    router.put('/models/:modelId/tunings/:name', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const entry = await store.setModelTuning(req.params.modelId, req.body ?? {});
+            const entry = await store.setModelTuning(req.params.modelId, req.params.name, req.body ?? {});
             broadcast(req, 'models', null);
             if (store.state.presetId) broadcast(req, 'slot', null);
             res.json(entry);
         } catch (err) { next(err); }
     });
 
-    // PATCH /models/:modelId/tuning {set?, unset?} -> Model entry. Semantic
-    // patch (review-1 W2) applied inside the store queue, never a whole
-    // cached object.
-    router.patch('/models/:modelId/tuning', async (req, res, next) => {
+    router.patch('/models/:modelId/tunings/:name', async (req, res, next) => {
         try {
             const store = req.pm.store;
-            const entry = await store.patchModelTuning(req.params.modelId, req.body ?? {});
+            const entry = await store.patchModelTuning(req.params.modelId, req.params.name, req.body ?? {});
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            res.json(entry);
+        } catch (err) { next(err); }
+    });
+
+    router.delete('/models/:modelId/tunings/:name', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const entry = await store.deleteModelTuning(req.params.modelId, req.params.name);
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            res.json(entry);
+        } catch (err) { next(err); }
+    });
+
+    // POST /models/:modelId/tunings/rename {from, to} -> {model, migrated}.
+    // Rewrites the loadout overrides that name the tuning in the same
+    // transaction, so every migrated preset is broadcast like /models/rename.
+    router.post('/models/:modelId/tunings/rename', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const { from, to } = req.body ?? {};
+            const result = await store.renameModelTuning(req.params.modelId, from, to);
+            broadcast(req, 'models', null);
+            if (store.state.presetId) broadcast(req, 'slot', null);
+            for (const id of result.migrated) broadcast(req, 'preset', id);
+            res.json(result);
+        } catch (err) { next(err); }
+    });
+
+    // PUT /models/:modelId/default-tuning {name} -> Model entry.
+    router.put('/models/:modelId/default-tuning', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const entry = await store.setDefaultTuning(req.params.modelId, req.body?.name);
             broadcast(req, 'models', null);
             if (store.state.presetId) broadcast(req, 'slot', null);
             res.json(entry);

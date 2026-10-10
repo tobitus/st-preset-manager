@@ -74,8 +74,16 @@ function panelTransaction(store, body) {
         const { compiled: currentCompiled } = compile(doc, model, {}, desiredLoadout);
         const delta = panelDelta(base, snapshot);
         if (delta === null) throw new StoreError('snapshot or base lost prompt_order/prompts structure', 409);
-        const { routed, globalTuning, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
-        if (routed.length > 0 || globalTuning) await store._savePresetNow(doc);
+        const { routed, tuningWrite, warnings } = routePanelDiff(doc, currentCompiled, delta, model, desiredLoadout);
+        if (routed.length > 0 || tuningWrite) {
+            await store._savePresetNow(doc);
+            if (tuningWrite && model) {
+                await store._mutateModelsNow((/** @type {any} */ reg) => {
+                    const t = reg.models[model.name].tunings;
+                    t[tuningWrite.name] = { ...(t[tuningWrite.name] ?? {}), ...tuningWrite.values };
+                });
+            }
+        }
         return { routed, warnings, rev: store.rev, docId: doc.id };
     });
 }

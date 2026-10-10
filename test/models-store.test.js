@@ -34,9 +34,9 @@ const onDisk = (store) => JSON.parse(fs.readFileSync(path.join(store.root, 'mode
 
 function kimiRegistry() {
     return { version: 1, models: {
-        'Kimi K3': { id: 'm_kimi', name: 'Kimi K3', profiles: ['p-hap', 'p-nano'], preferredProfile: 'p-hap', tuning: { temperature: 0.3 },
+        'Kimi K3': { id: 'm_kimi', name: 'Kimi K3', profiles: ['p-hap', 'p-nano'], preferredProfile: 'p-hap', tunings: { default: { temperature: 0.3 } }, defaultTuning: 'default',
             matches: [{ source: 'custom', model: 'hapuppy/kimi-k3' }, { source: 'custom', model: 'nanogpt-payg/moonshotai/kimi-k3' }] },
-        Mock: { id: 'm_mock', name: 'Mock', profiles: ['p-mock'], preferredProfile: 'p-mock', tuning: { temperature: 1.1 },
+        Mock: { id: 'm_mock', name: 'Mock', profiles: ['p-mock'], preferredProfile: 'p-mock', tunings: { default: { temperature: 1.1 } }, defaultTuning: 'default',
             matches: [{ source: 'custom', model: 'mock' }] },
     } };
 }
@@ -62,22 +62,22 @@ test('replaceModels: validated whole-registry replace; an invalid body is a 400 
     await store.replaceModels(kimiRegistry());
     assert.deepEqual(onDisk(store), kimiRegistry());
     const bad = kimiRegistry();
-    /** @type {any} */ (bad.models.Mock).tuning = { custom_url: 'x' };
+    /** @type {any} */ (bad.models.Mock).tunings = { default: { custom_url: 'x' } };
     await assert.rejects(() => store.replaceModels(bad), (e) => e instanceof StoreError && e.status === 400);
     assert.deepEqual(onDisk(store), kimiRegistry());
     assert.deepEqual(store.models, kimiRegistry());
 });
 
-test('setModelTuning: replaces one Model\'s global tuning; unknown Model 404, non-tuning key 400', async () => {
+test('setModelTuning: replaces one named tuning of a Model; unknown Model 404, non-tuning key 400', async () => {
     const store = await tmpStore();
     await store.replaceModels(kimiRegistry());
-    const m = await store.setModelTuning('Kimi K3', { temperature: 0.55, top_p: 0.8 });
-    assert.deepEqual(m.tuning, { temperature: 0.55, top_p: 0.8 });
-    assert.deepEqual(onDisk(store).models['Kimi K3'].tuning, { temperature: 0.55, top_p: 0.8 });
-    assert.deepEqual(onDisk(store).models.Mock.tuning, { temperature: 1.1 }, 'other Models untouched');
-    await assert.rejects(() => store.setModelTuning('Nope', { temperature: 1 }), (e) => e instanceof StoreError && e.status === 404);
-    await assert.rejects(() => store.setModelTuning('Mock', { custom_model: 'x' }), (e) => e instanceof StoreError && e.status === 400);
-    assert.deepEqual(onDisk(store).models.Mock.tuning, { temperature: 1.1 });
+    const m = await store.setModelTuning('Kimi K3', 'default', { temperature: 0.55, top_p: 0.8 });
+    assert.deepEqual(m.tunings.default, { temperature: 0.55, top_p: 0.8 });
+    assert.deepEqual(onDisk(store).models['Kimi K3'].tunings.default, { temperature: 0.55, top_p: 0.8 });
+    assert.deepEqual(onDisk(store).models.Mock.tunings.default, { temperature: 1.1 }, 'other Models untouched');
+    await assert.rejects(() => store.setModelTuning('Nope', 'default', { temperature: 1 }), (e) => e instanceof StoreError && e.status === 404);
+    await assert.rejects(() => store.setModelTuning('Mock', 'default', { custom_model: 'x' }), (e) => e instanceof StoreError && e.status === 400);
+    assert.deepEqual(onDisk(store).models.Mock.tunings.default, { temperature: 1.1 });
 });
 
 // --------------------------------------------------------------- slot model
@@ -145,14 +145,13 @@ function routingDoc() {
             { kind: 'block', ref: 'c', key: 'k3' },
             { kind: 'block', ref: 'kimi', key: 'k4' },
         ] }],
-        loadouts: { L: { id: 'L', name: 'L', notes: '', enabled: { hdr: false, a: true, b: false, c: true, kimi: false },
-            overrides: { 'Kimi K3': { enabled: { kimi: true } } } } },
+        loadouts: { L: { id: 'L', name: 'L', notes: '', kind: 'root', parent: null, enabled: { hdr: false, a: true, b: false, c: true, kimi: false },
+            overrides: { 'Kimi K3': { enabled: { kimi: true }, tuning: null } } } },
         activeLoadoutId: 'L',
-        tuningOverrides: {},
     };
 }
 const toggle = (id, on) => ({ prompt_order: { changed: false, order: [{ identifier: id, enabled: on }] } });
-const KIMI = { name: 'Kimi K3', tuning: { temperature: 0.3 } };
+const KIMI = { name: 'Kimi K3', tunings: { default: { temperature: 0.3 }, ov: { temperature: 0.9 } }, defaultTuning: 'default' };
 
 test('routing: a toggle of a block the Model override lists goes to the override, loadout untouched', () => {
     const doc = routingDoc();
@@ -172,7 +171,7 @@ test('routing: a toggle of a block the override does NOT list goes to the loadou
 
 test('routing: with another Model (no override) the same toggle goes to the loadout', () => {
     const doc = routingDoc();
-    routePanelDiff(doc, null, toggle('kimi', true), { name: 'Mock', tuning: {} });
+    routePanelDiff(doc, null, toggle('kimi', true), { name: 'Mock', tunings: { default: {} }, defaultTuning: 'default' });
     assert.equal(doc.loadouts.L.enabled.kimi, true);
     assert.deepEqual(doc.loadouts.L.overrides['Kimi K3'].enabled, { kimi: true });
 });
@@ -192,31 +191,32 @@ test('routing: a pick-one option the override lists, switched on, turns its sibl
     assert.equal(enabled.a, false);
 });
 
-test('routing: temperature goes to the preset\'s tuning override when one exists for the Model, else to the global tuning', () => {
+test('routing: temperature goes to the tuning the loadout override is bound to when one exists for the Model, else to the default tuning', () => {
     const withOv = routingDoc();
-    withOv.tuningOverrides['Kimi K3'] = { temperature: 0.9 };
+    withOv.loadouts.L.overrides['Kimi K3'].tuning = 'ov';
     const r1 = routePanelDiff(withOv, null, { temperature: 0.55 }, KIMI);
-    assert.equal(withOv.tuningOverrides['Kimi K3'].temperature, 0.55);
-    assert.equal(r1.globalTuning, null);
+    assert.deepEqual(r1.tuningWrite, { name: 'ov', values: { temperature: 0.55 } });
+    assert.equal(withOv.settings.temperature, undefined);
 
     const noOv = routingDoc();
     const r2 = routePanelDiff(noOv, null, { temperature: 0.55 }, KIMI);
-    assert.deepEqual(r2.globalTuning, { temperature: 0.55 });
-    assert.deepEqual(noOv.tuningOverrides, {});
+    assert.deepEqual(r2.tuningWrite, { name: 'default', values: { temperature: 0.55 } });
+    assert.equal(noOv.loadouts.L.overrides['Kimi K3'].tuning, null);
     assert.equal(noOv.settings.temperature, undefined);
 });
 
-test('compile with the resolved Model: global tuning, then the preset override, then the loadout override', async () => {
+test('compile with the resolved Model: default tuning, then the loadout override bound tuning, then the loadout override bits', async () => {
     const { resolveModel } = await import('../shared/models.js');
     const reg = kimiRegistry();
+    reg.models['Kimi K3'].tunings.ov = { temperature: 0.9 };
     const doc = routingDoc();
     const kimi = resolveModel(reg, { source: 'custom', model: 'nanogpt-payg/moonshotai/kimi-k3', profileId: null });
     const mock = resolveModel(reg, { source: 'custom', model: 'mock', profileId: null });
-    assert.equal(compile(doc, kimi, {}).compiled.temperature, 0.3, 'global Kimi tuning');
-    assert.equal(compile(doc, mock, {}).compiled.temperature, 1.1, 'global Mock tuning');
+    assert.equal(compile(doc, kimi, {}).compiled.temperature, 0.3, 'default Kimi tuning');
+    assert.equal(compile(doc, mock, {}).compiled.temperature, 1.1, 'default Mock tuning');
     assert.equal(compile(doc, kimi, {}).enabled.kimi, true, 'Kimi loadout override on');
     assert.equal(compile(doc, mock, {}).enabled.kimi, false, 'loadout bit for other Models');
-    doc.tuningOverrides['Kimi K3'] = { temperature: 0.9 };
-    assert.equal(compile(doc, kimi, {}).compiled.temperature, 0.9, 'preset override beats global');
+    doc.loadouts.L.overrides['Kimi K3'].tuning = 'ov';
+    assert.equal(compile(doc, kimi, {}).compiled.temperature, 0.9, 'bound named tuning beats the default');
     assert.equal(compile(doc, mock, {}).compiled.temperature, 1.1);
 });

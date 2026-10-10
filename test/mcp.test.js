@@ -33,13 +33,13 @@ const EXPECTED_TOOLS = {
     loadout_set_override: ['PUT', '/presets/:presetId/loadouts/:loadoutId/overrides/:modelId'],
     loadout_patch_override: ['PATCH', '/presets/:presetId/loadouts/:loadoutId/overrides/:modelId'],
     loadout_delete_override: ['DELETE', '/presets/:presetId/loadouts/:loadoutId/overrides/:modelId'],
-    tuning_override_set: ['PUT', '/presets/:presetId/tuning-overrides/:modelId'],
-    tuning_override_patch: ['PATCH', '/presets/:presetId/tuning-overrides/:modelId'],
-    tuning_override_delete: ['DELETE', '/presets/:presetId/tuning-overrides/:modelId'],
     models_list: ['GET', '/models'],
     models_replace: ['PUT', '/models'],
-    models_set_tuning: ['PUT', '/models/:modelId/tuning'],
-    models_patch_tuning: ['PATCH', '/models/:modelId/tuning'],
+    models_set_tuning: ['PUT', '/models/:modelId/tunings/:name'],
+    models_patch_tuning: ['PATCH', '/models/:modelId/tunings/:name'],
+    models_delete_tuning: ['DELETE', '/models/:modelId/tunings/:name'],
+    models_rename_tuning: ['POST', '/models/:modelId/tunings/rename'],
+    models_set_default_tuning: ['PUT', '/models/:modelId/default-tuning'],
     models_rename: ['POST', '/models/rename'],
     models_merge: ['POST', '/models/merge'],
     models_seed: ['POST', '/models/seed'],
@@ -285,8 +285,8 @@ test('path params are URL-encoded and never sent in the body', async () => {
     assert.deepEqual(r.calls, [{ method: 'GET', path: '/presets/p%20x%2F1', body: undefined }]);
     r = await callTool('loadout_set_override', { presetId: 'p1', loadoutId: 'l1', modelId: 'or/claude 4', enabled: { a: true } });
     assert.deepEqual(r.calls, [{ method: 'PUT', path: '/presets/p1/loadouts/l1/overrides/or%2Fclaude%204', body: { enabled: { a: true } } }]);
-    r = await callTool('models_set_tuning', { modelId: '100% local', tuning: { temperature: 0.5 } });
-    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models/100%25%20local/tuning', body: { temperature: 0.5 } }]);
+    r = await callTool('models_set_tuning', { modelId: '100% local', name: 'hot/1', tuning: { temperature: 0.5 } });
+    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models/100%25%20local/tunings/hot%2F1', body: { temperature: 0.5 } }]);
     r = await callTool('revision_get', { presetId: 'p1', rev: 4 });
     assert.deepEqual(r.calls, [{ method: 'GET', path: '/presets/p1/revisions/4', body: undefined }]);
     r = await callTool('shelf_remove', { shelfId: 's_1' });
@@ -323,10 +323,14 @@ test('whole-body tools send that one argument as the body', async () => {
     assert.deepEqual(r.calls, [{ method: 'PUT', path: '/presets/p1', body: doc }]);
     r = await callTool('models_replace', { registry: { version: 1, models: {} } });
     assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models', body: { version: 1, models: {} } }]);
-    r = await callTool('models_set_tuning', { modelId: 'M', tuning: { temperature: 0.7 } });
-    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models/M/tuning', body: { temperature: 0.7 } }]);
-    r = await callTool('tuning_override_set', { presetId: 'p1', modelId: 'M', tuning: { top_p: 0.9 } });
-    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/presets/p1/tuning-overrides/M', body: { top_p: 0.9 } }]);
+    r = await callTool('models_set_tuning', { modelId: 'M', name: 'hot', tuning: { temperature: 0.7 } });
+    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models/M/tunings/hot', body: { temperature: 0.7 } }]);
+    r = await callTool('loadout_set_override', { presetId: 'p1', loadoutId: 'l1', modelId: 'M', enabled: {}, tuning: 'hot' });
+    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/presets/p1/loadouts/l1/overrides/M', body: { enabled: {}, tuning: 'hot' } }]);
+    r = await callTool('models_rename_tuning', { modelId: 'M', from: 'hot', to: 'spicy' });
+    assert.deepEqual(r.calls, [{ method: 'POST', path: '/models/M/tunings/rename', body: { from: 'hot', to: 'spicy' } }]);
+    r = await callTool('models_set_default_tuning', { modelId: 'M', name: 'hot' });
+    assert.deepEqual(r.calls, [{ method: 'PUT', path: '/models/M/default-tuning', body: { name: 'hot' } }]);
 });
 
 test('diff_blocks and revision_restore send their bodies as given', async () => {
@@ -345,6 +349,23 @@ test('HTTP error -> isError with the status and the server\'s error body', async
     r = await callTool('health', {}, () => ({ status: 502, json: null, text: 'Bad Gateway' }));
     assert.equal(r.result.isError, true);
     assert.deepEqual(JSON.parse(r.result.content[0].text), { status: 502, error: 'Bad Gateway' });
+});
+
+test('loadout tools: create requires kind (a 400 surfaces as isError); update/override carry the new fields; preset_op knows the reset ops', async () => {
+    const byName = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
+    assert.deepEqual([...byName.loadout_create.inputSchema.required].sort(), ['kind', 'name', 'presetId']);
+    assert.deepEqual(byName.loadout_create.inputSchema.properties.kind.enum, ['root', 'playstyle']);
+    assert.ok(byName.loadout_create.inputSchema.properties.parent);
+    assert.ok(byName.loadout_create.inputSchema.properties.from);
+    assert.ok(byName.loadout_update.inputSchema.properties.parent);
+    assert.ok(byName.loadout_update.inputSchema.properties.kind);
+    assert.ok(byName.loadout_set_override.inputSchema.properties.tuning);
+    assert.ok(byName.loadout_patch_override.inputSchema.properties.tuning);
+    const ops = byName.preset_op.inputSchema.properties.op.enum;
+    assert.ok(ops.includes('resetInherit') && ops.includes('resetAllInherit'), JSON.stringify(ops));
+    const r = await callTool('loadout_create', { presetId: 'p_1', name: 'X' }, () => ({ status: 400, json: { error: 'loadouts create needs {kind}' } }));
+    assert.equal(r.result.isError, true);
+    assert.deepEqual(JSON.parse(r.result.content[0].text), { status: 400, error: 'loadouts create needs {kind}' });
 });
 
 test('missing or unsafe path argument -> -32602; no HTTP call', async () => {

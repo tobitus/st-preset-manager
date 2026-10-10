@@ -143,7 +143,7 @@ test('store: state + models mutation bump the global rev monotonically', async (
     const { store } = await storeWithDoc();
     const r0 = store.rev;
     await store.mutateState((st) => { st.presetId = 'p_x'; });
-    await store.mutateModels((reg) => { reg.models['Kimi K3'] = { id: 'm_1', name: 'Kimi K3', matches: [], profiles: [], preferredProfile: null, tuning: {} }; });
+    await store.mutateModels((reg) => { reg.models['Kimi K3'] = { id: 'm_1', name: 'Kimi K3', matches: [], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' }; });
     assert.equal(store.rev, r0 + 2);
     assert.equal(store.state.presetId, 'p_x');
     assert.ok(store.models.models['Kimi K3']);
@@ -152,7 +152,7 @@ test('store: state + models mutation bump the global rev monotonically', async (
 test('schema: validateDoc rejects bad documents with paths', () => {
     assert.deepEqual(validateDoc({ format: 'st-preset-manager/library' }), [
         'version', 'id', 'name', 'tags', 'notes', 'source', 'settings', 'markers', 'blocks', 'sequences',
-        'loadouts', 'activeLoadoutId', 'tuningOverrides', 'createdAt', 'updatedAt', 'rev',
+        'loadouts', 'activeLoadoutId', 'createdAt', 'updatedAt', 'rev',
     ]);
     const st = sampleSt();
     const doc = importStPreset(st, 'ok');
@@ -167,7 +167,7 @@ test('schema: validateDoc rejects bad documents with paths', () => {
 
 test('schema: registry validation', () => {
     assert.deepEqual(validateRegistry({ version: 1, models: {} }), []);
-    const errs = validateRegistry({ version: 1, models: { M: { id: '', name: 'M', matches: [{}], profiles: null, preferredProfile: 5, tuning: { evil: 1 } } } });
+    const errs = validateRegistry({ version: 1, models: { M: { id: '', name: 'M', matches: [{}], profiles: null, preferredProfile: 5, tunings: { default: { evil: 1 } }, defaultTuning: 'default' } } });
     assert.ok(errs.length >= 5);
 });
 
@@ -223,25 +223,26 @@ test('slot routing: no Model -> temperature goes to doc settings with warning', 
     const snap = structuredClone(compiled);
     snap.temperature = 0.42;
     const delta = panelDelta(compiled, snap);
-    const { routed, warnings, globalTuning } = routePanelDiff(doc, compiled, delta, null);
+    const { routed, warnings, tuningWrite } = routePanelDiff(doc, compiled, delta, null);
     assert.equal(doc.settings.temperature, 0.42);
     assert.ok(routed.some((r) => r.key === 'temperature' && r.layer === 'settings'));
     assert.equal(warnings.length, 1);
-    assert.equal(globalTuning, null);
+    assert.equal(tuningWrite, null);
 });
 
-test('slot routing: with a Model override, tuning goes to the preset override (item 21)', () => {
+test('slot routing: with a Model, tuning goes to the named tuning the loadout override is bound to (item 21)', () => {
     const st = sampleSt();
     const doc = importStPreset(st, 'x');
     ensureDefaultLoadout(doc);
-    doc.tuningOverrides['Kimi K3'] = {};
-    const { compiled } = compile(doc, { name: 'Kimi K3', tuning: {} }, {});
+    doc.loadouts[doc.activeLoadoutId].overrides['Kimi K3'] = { enabled: {}, tuning: 'ov' };
+    const model = { name: 'Kimi K3', tunings: { default: {}, ov: {} }, defaultTuning: 'default' };
+    const { compiled } = compile(doc, model, {});
     const snap = structuredClone(compiled);
     snap.temperature = 0.55;
     const delta = panelDelta(compiled, snap);
-    const { routed } = routePanelDiff(doc, compiled, delta, /** @type {{name: string, tuning?: Record<string, unknown>|null}|null} */ ({ name: 'Kimi K3', tuning: {} }));
-    assert.equal(doc.tuningOverrides['Kimi K3'].temperature, 0.55);
-    assert.ok(routed.some((r) => r.key === 'temperature' && r.layer === 'tuningOverride:Kimi K3'));
+    const { routed, tuningWrite } = routePanelDiff(doc, compiled, delta, model);
+    assert.deepEqual(tuningWrite, { name: 'ov', values: { temperature: 0.55 } });
+    assert.ok(routed.some((r) => r.key === 'temperature' && r.layer === 'tuning:Kimi K3/ov'));
 });
 
 test('slot routing: reorder in panel reorders sequences (blocks layer)', () => {

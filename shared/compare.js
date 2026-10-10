@@ -37,6 +37,7 @@
  */
 import { flattenSeq } from './outline.js';
 import { canonicalJson } from './canonical.js';
+import { effectiveEnabled } from './loadouts.js';
 
 // fields whose difference makes a matched row "changed"
 export const ROW_FIELDS = ['content', 'role', 'injection_position', 'injection_depth', 'injection_order', 'enabled'];
@@ -98,11 +99,23 @@ export function blockOrder(doc) {
 }
 
 /**
+ * The enabled map of a document's active loadout (inheritance resolved, no
+ * Model override); no active loadout -> empty (every block reads as off).
+ * @param {any} doc
+ * @returns {Record<string, boolean>}
+ */
+function activeEnabled(doc) {
+    if (!doc.loadouts?.[doc.activeLoadoutId]) return {};
+    return effectiveEnabled(doc, doc.activeLoadoutId, null).enabled;
+}
+
+/**
  * The comparable row fields of a block, as the ROW_FIELDS keys.
  * @param {any} doc
  * @param {string} identifier
+ * @param {Record<string, boolean>} enabledMap the document's effective active-loadout enabled map
  */
-function blockRow(doc, identifier) {
+function blockRow(doc, identifier, enabledMap) {
     const block = doc.blocks[identifier];
     return {
         content: block.content ?? '',
@@ -110,7 +123,7 @@ function blockRow(doc, identifier) {
         injection_position: block.fields?.injection_position ?? null,
         injection_depth: block.fields?.injection_depth ?? null,
         injection_order: block.fields?.injection_order ?? null,
-        enabled: !!doc.loadouts?.[doc.activeLoadoutId]?.enabled?.[identifier],
+        enabled: !!enabledMap[identifier],
     };
 }
 
@@ -251,6 +264,8 @@ export function comparePresets(a, b) {
             throw new CompareError(`preset ${label} too large to compare (${leaves} leaves, limit ${MAX_DIFF_LEAVES})`);
         }
     }
+    const enabledA = activeEnabled(a);
+    const enabledB = activeEnabled(b);
     const leftOrder = blockOrder(a);
     const rightOrder = blockOrder(b);
     const rightById = new Map(rightOrder.map((r) => [r.identifier, r]));
@@ -302,7 +317,7 @@ export function comparePresets(a, b) {
             const r = pair.right;
             const rightBlock = b.blocks[r.identifier];
             const rightEntry = { pos: r.pos, identifier: r.identifier, name: rightBlock.name ?? r.identifier };
-            const fields = fieldDiffs(blockRow(a, l.identifier), blockRow(b, r.identifier));
+            const fields = fieldDiffs(blockRow(a, l.identifier, enabledA), blockRow(b, r.identifier, enabledB));
             const row = {
                 status: 'same',
                 matchedBy: pair.matchedBy,

@@ -95,15 +95,19 @@ export function groupOfLeaf(doc) {
  * ghosts are toggled like anything else (the loadout's enabled map covers
  * every leaf); group structure never changes.
  *
- * `preferred` (optional) is the identifier the user just switched ON: it
- * wins over its siblings regardless of outline order (the panel route and
- * /ops toggle pass it; ambiguous imported/compiled state falls back to the
- * last enabled member in outline order).
+ * `preferred` (optional) names the option(s) that win a collapse regardless
+ * of outline order: a string (the identifier the user just switched ON —
+ * the panel route and /ops toggle pass it) or a Set of identifiers (the
+ * ones a layer above the base explicitly turned on — the loadout
+ * inheritance resolver passes it). With a Set, the LAST enabled member
+ * (outline order) that is in the Set is kept; when none is in the
+ * Set — and for null/no match, i.e. ambiguous imported/compiled state —
+ * the last enabled member in outline order is kept.
  *
  * @param {any} doc document (sequences read-only here)
  * @param {Record<string, boolean>} enabled flat identifier -> bool map (every leaf)
  * @param {string[]} [changedOut] if given, identifiers flipped by this call are appended
- * @param {string|null} [preferred] the option just enabled (wins the collapse)
+ * @param {string|Set<string>|null} [preferred] the option(s) that win the collapse
  * @returns {Record<string, boolean>} the same map (mutated in place for convenience)
  */
 export function normalize(doc, enabled, changedOut = undefined, preferred = null) {
@@ -120,7 +124,10 @@ export function normalize(doc, enabled, changedOut = undefined, preferred = null
         if (on.length > 1) {
             // the option just switched on wins; outline-order last is the
             // fallback for ambiguous bulk state
-            const keep = preferred != null && on.includes(preferred) ? preferred : on[on.length - 1];
+            const pref = preferred instanceof Set
+                ? on.filter((id) => preferred.has(id))
+                : preferred != null && on.includes(preferred) ? [preferred] : [];
+            const keep = pref.length ? pref[pref.length - 1] : on[on.length - 1];
             for (const id of on) {
                 if (id !== keep) {
                     enabled[id] = false;

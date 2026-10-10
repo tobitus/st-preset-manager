@@ -16,10 +16,11 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { validateDoc, validateRegistry, nativeShapeErrors } from '../shared/schema.js';
+import { validateDoc, validateRegistry, nativeShapeErrors, upgradeDoc, upgradeRegistry } from '../shared/schema.js';
 import { copyPayloadFromDoc, copyIntoDoc } from '../shared/docops.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
 import { ensureAllLeaves, completeOverride, iterLeaves, collectGroups, pickOneMembers } from '../shared/groups.js';
+import { effectiveEnabled, rootOf, childrenOf } from '../shared/loadouts.js';
 import { ImportError, importStPreset, assertStPreset } from '../shared/recognizers.js';
 import { rebuildSeq, flattenSeq, deriveStructure } from '../shared/outline.js';
 import { resolveModel, seedFromProfiles, mergeModels } from '../shared/models.js';
@@ -88,7 +89,7 @@ export class Store {
         this.revisionsDir = path.join(root, 'revisions');
         this.modelsFile = path.join(root, 'models.json');
         this.stateFile = path.join(root, 'state.json');
-        /** @type {Map<string, {id: string, path: string, name: string, folder: string, tags: string[], updatedAt: string, doc: any}>} */
+        /** @type {Map<string, {id: string, path: string, name: string, folder: string, tags: string[], updatedAt: string, doc: any, legacyDoc?: any}>} */
         this.index = new Map();
         /** @type {Map<string, any>} */
         this.shelf = new Map();
@@ -163,7 +164,7 @@ export class Store {
             }, null, 2));
         }
         this.state = JSON.parse(fs.readFileSync(this.stateFile, 'utf8'));
-        this.models = JSON.parse(fs.readFileSync(this.modelsFile, 'utf8'));
+        this.models = upgradeRegistry(JSON.parse(fs.readFileSync(this.modelsFile, 'utf8')));
         this.rev = this.state.rev ?? 0;
         this.slotChangedRev = this.state.slotChangedRev ?? 0;
         await this.rescan();
@@ -232,7 +233,7 @@ export class Store {
         const prevClones = new Map();
         for (const { entry, doc } of targets) {
             prevClones.set(doc.id, structuredClone(entry.doc));
-            await this._writeRevision(entry.doc, revisionLabel);
+            await this._writeRevision(entry.legacyDoc ?? entry.doc, revisionLabel);
             doc.rev = (entry.doc.rev ?? 0) + 1;
             doc.updatedAt = new Date().toISOString();
         }
@@ -277,7 +278,9 @@ export class Store {
         }
 
         for (const { entry, doc } of targets) {
-            this.index.set(doc.id, { ...entry, updatedAt: doc.updatedAt, tags: doc.tags ?? [], doc: structuredClone(doc) });
+            // the next save/commit writes the upgraded shape: the pre-upgrade snapshot is spent
+            const { legacyDoc: _spent, ...kept } = entry;
+            this.index.set(doc.id, { ...kept, updatedAt: doc.updatedAt, tags: doc.tags ?? [], doc: structuredClone(doc) });
             // Model rename/merge rewrite references: older snapshots would
             // name a Model that no longer exists, so they are dropped
             const prevClone = prevClones.get(doc.id);
@@ -326,7 +329,14 @@ export class Store {
                 // normalize too (no-op for docs the store wrote itself).
                 deriveStructure(doc);
                 stripLeafEnabled(doc); // legacy files: bits belong to loadouts only
+                // pre-upgrade shape (post strip/derive), kept only when the
+                // upgrade changes something: the first save snapshots it as
+                // the revision, so the old bytes stay recoverable
+                const before = JSON.stringify(doc);
+                upgradeDoc(doc);
+                const legacyDoc = JSON.stringify(doc) === before ? undefined : JSON.parse(before);
                 next.set(doc.id, {
+                    legacyDoc,
                     id: doc.id,
                     path: full,
                     name: doc.name,
@@ -352,8 +362,7 @@ export class Store {
             tags: e.tags,
             updatedAt: e.updatedAt,
             activeLoadoutId: e.doc.activeLoadoutId,
-            loadouts: Object.values(e.doc.loadouts ?? {}).map((l) => ({ id: l.id, name: l.name })),
-            hasOverrides: Object.keys(e.doc.tuningOverrides ?? {}),
+            loadouts: Object.values(e.doc.loadouts ?? {}).map((l) => ({ id: l.id, name: l.name, kind: l.kind ?? 'root', parent: l.parent ?? null })),
         }));
         items.sort((a, b) => (a.folder + '/' + a.name).toLowerCase().localeCompare((b.folder + '/' + b.name).toLowerCase()));
         if (tag) return items.filter((i) => i.tags.includes(tag));
@@ -436,6 +445,7 @@ export class Store {
                     ensureDefaultLoadout(doc);
                 }
                 stripLeafEnabled(doc); // native uploads may still carry leaf bits
+                upgradeDoc(doc);
             } else if (body.st) {
                 assertStPreset(body.st, body.name ?? 'preset');
                 const name = sanitizeName(body.name ?? body.st.name);
@@ -519,7 +529,7 @@ export class Store {
             const oldNamePath = entry.path;
             doc.updatedAt = new Date().toISOString();
             doc.rev = (entry.doc.rev ?? 0) + 1;
-            await this._writeRevision(entry.doc, opts.label);
+            await this._writeRevision(entry.legacyDoc ?? entry.doc, opts.label);
             // rename = move (name or folder change)
             const newPath = path.join(this._safeDir(doc.folder), `${sanitizeName(doc.name)}.json`);
             if (path.resolve(newPath) !== path.resolve(oldNamePath)) {
@@ -671,40 +681,208 @@ export class Store {
     // --------------------------------------------------------- doc patches
 
     /**
-     * Patch a preset's tuning override for a Model: semantic
-     * `{set?: {key: value}, unset?: [key]}`, applied inside the store
-     * queue (never a whole cached object). 404 when no override exists for
-     * that Model.
+     * Create a loadout. `kind` is required. A playstyle starts empty under
+     * an existing ROOT `parent`; a root copies the EFFECTIVE map and the
+     * overrides of `from` (default: the root of the active loadout).
      * @param {string} presetId
-     * @param {string} name
-     * @param {{ set?: Record<string, any>, unset?: string[] }} patch
+     * @param {{ name?: string, kind?: string, from?: string, parent?: string }} body
      */
-    async patchTuningOverride(presetId, name, patch) {
+    async createLoadout(presetId, body) {
         return this.enqueue(async () => {
             const doc = this.getDocNow(presetId);
             if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
-            if (doc.tuningOverrides?.[name] === undefined) {
-                throw new StoreError(`no tuning override for ${name}`, 404);
+            const { name, kind, from, parent } = body ?? {};
+            if (kind !== 'root' && kind !== 'playstyle') {
+                throw new StoreError('loadouts create needs {kind: "root"|"playstyle"}', 400);
             }
-            Store._validatePatch(patch, TUNING_KEYS, (k) => `"${k}" is not a tuning key`);
-            const next = { ...doc.tuningOverrides[name] };
-            for (const k of patch.unset ?? []) delete next[k];
-            Object.assign(next, patch.set ?? {});
-            doc.tuningOverrides[name] = next;
+            if (typeof name !== 'string' || !name.trim()) throw new StoreError('loadouts create needs {name}', 400);
+            const trimmed = name.trim();
+            if (Object.values(doc.loadouts ?? {}).some((/** @type {any} */ l) => l.name === trimmed)) {
+                throw new StoreError(`loadout name "${trimmed}" is already taken`, 409);
+            }
+            const lid = `l_${ulid()}`;
+            if (kind === 'playstyle') {
+                const root = typeof parent === 'string' ? doc.loadouts?.[parent] : undefined;
+                if (!root || root.kind === 'playstyle') {
+                    throw new StoreError('a playstyle loadout needs {parent: <id of a root loadout>}', 400);
+                }
+                doc.loadouts[lid] = { id: lid, name: trimmed, notes: '', kind: 'playstyle', parent: root.id, enabled: {}, overrides: {} };
+            } else {
+                let fromId = from;
+                if (fromId === undefined) {
+                    fromId = rootOf(doc, doc.activeLoadoutId).id;
+                } else if (!doc.loadouts?.[fromId]) {
+                    throw new StoreError(`no loadout ${String(fromId)}`, 404);
+                }
+                const src = doc.loadouts[fromId];
+                doc.loadouts[lid] = {
+                    id: lid,
+                    name: trimmed,
+                    notes: '',
+                    kind: 'root',
+                    parent: null,
+                    enabled: effectiveEnabled(doc, fromId, null).enabled,
+                    overrides: structuredClone(src.overrides ?? {}),
+                };
+            }
+            return this._savePresetNow(doc);
+        });
+    }
+
+    /**
+     * Rename/annotate a loadout, or change its kind/parent. root ->
+     * playstyle (no children, existing other root as `parent`) keeps the
+     * effective map: `enabled` becomes the keys that differ from the new
+     * parent's. playstyle -> root materialises the complete effective map.
+     * A `parent` alone re-parents a playstyle (explicit sets kept).
+     * @param {string} presetId
+     * @param {string} lid
+     * @param {{ name?: string, notes?: string, parent?: string|null, kind?: string }} patch
+     */
+    async updateLoadout(presetId, lid, patch) {
+        return this.enqueue(async () => {
+            const doc = this.getDocNow(presetId);
+            if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
+            const loadout = doc.loadouts?.[lid];
+            if (!loadout) throw new StoreError(`no loadout ${lid}`, 404);
+            const { name, notes, parent, kind } = patch ?? {};
+            if (name !== undefined) {
+                if (typeof name !== 'string' || !name.trim()) throw new StoreError('name must be a non-empty string', 400);
+                if (Object.values(doc.loadouts).some((/** @type {any} */ l) => l.id !== lid && l.name === name.trim())) {
+                    throw new StoreError(`loadout name "${name.trim()}" is already taken`, 409);
+                }
+            }
+            if (notes !== undefined && typeof notes !== 'string') throw new StoreError('notes must be a string', 400);
+            if (kind !== undefined && kind !== 'root' && kind !== 'playstyle') {
+                throw new StoreError('kind must be "root" or "playstyle"', 400);
+            }
+            /** @param {any} pid @returns {any} */
+            const requireRoot = (pid) => {
+                const p = typeof pid === 'string' ? doc.loadouts[pid] : undefined;
+                if (!p || p.kind === 'playstyle' || p.id === lid) {
+                    throw new StoreError('parent must be the id of another root loadout', 400);
+                }
+                return p;
+            };
+
+            const wasPlaystyle = loadout.kind === 'playstyle';
+            const toPlaystyle = (kind ?? (wasPlaystyle ? 'playstyle' : 'root')) === 'playstyle';
+            if (!wasPlaystyle && toPlaystyle) {
+                const kids = childrenOf(doc, lid);
+                if (kids.length) {
+                    throw new StoreError(`root "${loadout.name}" has ${kids.length} playstyle loadout(s); delete or re-parent them first`, 409);
+                }
+                const newParent = requireRoot(parent);
+                const mine = effectiveEnabled(doc, lid, null).enabled;
+                const base = effectiveEnabled(doc, newParent.id, null).enabled;
+                /** @type {Record<string, boolean>} */
+                const sparse = {};
+                for (const [id, on] of Object.entries(mine)) {
+                    if (base[id] !== on) sparse[id] = on;
+                }
+                loadout.kind = 'playstyle';
+                loadout.parent = newParent.id;
+                loadout.enabled = sparse;
+            } else if (wasPlaystyle && !toPlaystyle) {
+                loadout.enabled = effectiveEnabled(doc, lid, null).enabled;
+                loadout.kind = 'root';
+                loadout.parent = null;
+            } else if (parent !== undefined && parent !== null) {
+                if (!wasPlaystyle) throw new StoreError('only a playstyle loadout has a parent', 400);
+                loadout.parent = requireRoot(parent).id;
+            }
+            if (name !== undefined) loadout.name = name.trim();
+            if (notes !== undefined) loadout.notes = notes;
+            return this._savePresetNow(doc);
+        });
+    }
+
+    /**
+     * Delete a loadout. 404 when missing; a root with playstyle children
+     * or the last root -> 409. Deleting the active loadout falls back to
+     * the deleted playstyle's parent, else the first remaining root.
+     * Deleting the loadout the slot desires changes the desired state: the
+     * in-queue marker + state write clear it so the slot view falls back to
+     * the document's active loadout.
+     * @param {string} presetId
+     * @param {string} lid
+     * @returns {Promise<{ doc: any, wasDesired: boolean }>}
+     */
+    async deleteLoadout(presetId, lid) {
+        return this.enqueue(async () => {
+            const doc = this.getDocNow(presetId);
+            if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
+            const target = doc.loadouts?.[lid];
+            if (!target) throw new StoreError(`no loadout ${lid}`, 404);
+            if (target.kind !== 'playstyle') {
+                const kids = childrenOf(doc, lid);
+                if (kids.length) {
+                    throw new StoreError(`root "${target.name}" has ${kids.length} playstyle loadout(s); delete or re-parent them first`, 409);
+                }
+                const roots = Object.values(doc.loadouts).filter((/** @type {any} */ l) => l.kind !== 'playstyle');
+                if (roots.length <= 1) throw new StoreError('cannot delete the last root loadout', 409);
+            }
+            delete doc.loadouts[lid];
+            if (doc.activeLoadoutId === lid) {
+                const parentId = target.kind === 'playstyle' ? target.parent : null;
+                doc.activeLoadoutId = parentId && doc.loadouts[parentId]
+                    ? parentId
+                    : /** @type {any} */ (Object.values(doc.loadouts).find((/** @type {any} */ l) => l.kind !== 'playstyle')).id;
+            }
+            const desired = this.state.presetId === presetId && this.state.loadoutId === lid;
+            if (desired) {
+                this._markSlotChanged();
+                await this._mutateStateNow((/** @type {any} */ st) => {
+                    st.loadoutId = null;
+                });
+            }
+            const saved = await this._savePresetNow(doc);
+            return { doc: saved, wasDesired: desired };
+        });
+    }
+
+    /**
+     * Replace (creating) a loadout's per-Model override. Enabled
+     * identifiers must be known leaves; `tuning` (default null) must name
+     * one of the Model's tunings.
+     * @param {string} presetId
+     * @param {string} lid
+     * @param {string} modelName
+     * @param {{ enabled?: Record<string, boolean>, tuning?: string|null }} body
+     */
+    async setLoadoutOverride(presetId, lid, modelName, body) {
+        return this.enqueue(async () => {
+            const doc = this.getDocNow(presetId);
+            if (!doc) throw new StoreError(`preset ${presetId} not found`, 404);
+            const loadout = doc.loadouts?.[lid];
+            if (!loadout) throw new StoreError(`no loadout ${lid}`, 404);
+            const { enabled, tuning } = body ?? {};
+            if (typeof enabled !== 'object' || enabled === null || Array.isArray(enabled)) {
+                throw new StoreError('override needs {enabled: {identifier: bool}}', 400);
+            }
+            const bound = this._checkTuningName(modelName, tuning);
+            const leaves = new Set(iterLeaves(doc).map((/** @type {any} */ l) => l.ref ?? l.identifier));
+            for (const [id, on] of Object.entries(enabled)) {
+                if (typeof on !== 'boolean') throw new StoreError(`override.${id} must be a boolean`, 400);
+                if (!leaves.has(id)) throw new StoreError(`unknown leaf ${id}`, 404);
+            }
+            loadout.overrides ??= {};
+            loadout.overrides[modelName] = { enabled: completeOverride(doc, { ...enabled }), tuning: bound };
             return this._savePresetNow(doc);
         });
     }
 
     /**
      * Patch a loadout's per-Model override: semantic
-     * `{set?: {identifier: bool}, unset?: [identifier]}`, applied inside
-     * the store queue. 404 when the preset, loadout or override is
-     * missing, or an identifier names an unknown leaf (same rule as the
-     * PUT route).
+     * `{set?: {identifier: bool}, unset?: [identifier], tuning?: string|null}`,
+     * applied inside the store queue. 404 when the preset, loadout or
+     * override is missing, or an identifier names an unknown leaf (same
+     * rule as the PUT route); an unknown tuning name is 400. An absent
+     * `tuning` keeps the current binding.
      * @param {string} presetId
      * @param {string} lid
      * @param {string} name
-     * @param {{ set?: Record<string, any>, unset?: string[] }} patch
+     * @param {{ set?: Record<string, any>, unset?: string[], tuning?: string|null }} patch
      */
     async patchLoadoutOverride(presetId, lid, name, patch) {
         return this.enqueue(async () => {
@@ -718,9 +896,9 @@ export class Store {
                 throw new StoreError('patch must be an object', 400);
             }
             for (const k of Object.keys(patch)) {
-                if (k !== 'set' && k !== 'unset') throw new StoreError(`unknown patch field "${k}"`, 400);
+                if (k !== 'set' && k !== 'unset' && k !== 'tuning') throw new StoreError(`unknown patch field "${k}"`, 400);
             }
-            const { set, unset } = patch;
+            const { set, unset, tuning } = patch;
             if (set !== undefined && !isPlainObject(set)) {
                 throw new StoreError('patch.set must be a plain object', 400);
             }
@@ -734,13 +912,14 @@ export class Store {
             for (const id of [...Object.keys(set ?? {}), ...(unset ?? [])]) {
                 if (!leaves.has(id)) throw new StoreError(`unknown leaf ${id}`, 404);
             }
+            const bound = tuning === undefined ? (cur.tuning ?? null) : this._checkTuningName(name, tuning);
             const next = { ...cur.enabled };
             for (const id of unset ?? []) delete next[id];
             for (const [id, v] of Object.entries(set ?? {})) {
                 delete next[id];
                 next[id] = v;
             }
-            loadout.overrides[name] = { enabled: completeOverride(doc, next) };
+            loadout.overrides[name] = { enabled: completeOverride(doc, next), tuning: bound };
             return this._savePresetNow(doc);
         });
     }
@@ -930,36 +1109,42 @@ export class Store {
      * @param {any} reg
      */
     async replaceModels(reg) {
+        const incoming = upgradeRegistry(structuredClone(reg));
         return this.enqueue(() => this._mutateModelsNow((r) => {
-            r.version = reg.version;
-            r.models = structuredClone(reg.models);
+            r.version = incoming.version;
+            r.models = incoming.models;
             return structuredClone(r);
         }));
     }
 
     /**
-     * Replace one Model's global tuning wholesale.
+     * Upsert one named tuning of a Model (replaces that tuning's values
+     * wholesale).
      * @param {string} name
-     * @param {any} tuning
+     * @param {string} tuningName
+     * @param {any} values
      */
-    async setModelTuning(name, tuning) {
+    async setModelTuning(name, tuningName, values) {
         return this.enqueue(async () => {
             if (!this.models.models[name]) throw new StoreError(`Model ${name} not found`, 404);
-            if (typeof tuning !== 'object' || tuning === null || Array.isArray(tuning)) {
+            if (typeof tuningName !== 'string' || !tuningName.trim()) {
+                throw new StoreError('tuning name must be a non-empty string', 400);
+            }
+            if (typeof values !== 'object' || values === null || Array.isArray(values)) {
                 throw new StoreError('tuning must be an object', 400);
             }
-            for (const k of Object.keys(tuning)) {
+            for (const k of Object.keys(values)) {
                 if (!TUNING_KEYS.includes(k)) throw new StoreError(`"${k}" is not a tuning key`, 400);
             }
-            await this._mutateModelsNow((reg) => { reg.models[name].tuning = { ...tuning }; });
+            await this._mutateModelsNow((reg) => { reg.models[name].tunings[tuningName] = { ...values }; });
             return structuredClone(this.models.models[name]);
         });
     }
 
     /**
      * Rename a Model, migrating every document reference: any
-     * `tuningOverrides[from]` or `loadouts[*].overrides[from]` moves to
-     * `to` (replacing an existing `to` key). One `_commit` transaction: a
+     * `loadouts[*].overrides[from]` (enabled bits and tuning binding) moves
+     * to `to` (replacing an existing `to` key). One `_commit` transaction: a
      * labelled revision of each touched doc is snapshotted first.
      * @param {string} from
      * @param {string} to
@@ -992,11 +1177,6 @@ export class Store {
             for (const entry of this.index.values()) {
                 const doc = structuredClone(entry.doc);
                 let touched = false;
-                if (doc.tuningOverrides && Object.prototype.hasOwnProperty.call(doc.tuningOverrides, from)) {
-                    doc.tuningOverrides[trimmed] = doc.tuningOverrides[from];
-                    delete doc.tuningOverrides[from];
-                    touched = true;
-                }
                 for (const loadout of Object.values(doc.loadouts ?? {})) {
                     if (loadout.overrides && Object.prototype.hasOwnProperty.call(loadout.overrides, from)) {
                         loadout.overrides[trimmed] = loadout.overrides[from];
@@ -1014,10 +1194,11 @@ export class Store {
 
     /**
      * Merge Models under one name, migrating every document reference: the
-     * union of `tuningOverrides`/loadout `overrides` keyed by any merged
-     * name (first-listed wins on conflict), moved to `name`. One `_commit`
-     * transaction: a labelled revision of each touched doc is snapshotted
-     * first.
+     * union of loadout `overrides` keyed by any merged name (first-listed
+     * wins on conflict), moved to `name`; the merged override binds the
+     * tuning of the first-listed Model that has an override in that loadout.
+     * One `_commit` transaction: a labelled revision of each touched doc is
+     * snapshotted first.
      * @param {string[]} names Model names to merge, in precedence order
      * @param {string} name the merged Model's name
      * @returns {Promise<{ models: Record<string, any>, migrated: string[] }>}
@@ -1038,17 +1219,6 @@ export class Store {
                 const doc = structuredClone(entry.doc);
                 let touched = false;
 
-                if (doc.tuningOverrides && names.some((n) => Object.prototype.hasOwnProperty.call(doc.tuningOverrides, n))) {
-                    /** @type {Record<string, any>} */
-                    const merged = {};
-                    for (let i = names.length - 1; i >= 0; i -= 1) {
-                        Object.assign(merged, doc.tuningOverrides[names[i]] ?? {});
-                    }
-                    for (const n of names) delete doc.tuningOverrides[n];
-                    doc.tuningOverrides[target] = merged;
-                    touched = true;
-                }
-
                 for (const loadout of Object.values(doc.loadouts ?? {})) {
                     if (!loadout.overrides || !names.some((n) => Object.prototype.hasOwnProperty.call(loadout.overrides, n))) continue;
                     /** @type {Record<string, boolean>} */
@@ -1059,6 +1229,9 @@ export class Store {
                     for (let i = names.length - 1; i >= 0; i -= 1) {
                         Object.assign(merged, originalEnabled[names[i]] ?? {});
                     }
+                    // the first-listed Model with an override here binds the tuning
+                    const firstBound = names.find((n) => Object.prototype.hasOwnProperty.call(loadout.overrides, n));
+                    const tuning = (firstBound !== undefined ? loadout.overrides[firstBound]?.tuning : null) ?? null;
                     for (const n of names) delete loadout.overrides[n];
 
                     // pick-one winner: Model precedence (order of `names`)
@@ -1100,7 +1273,7 @@ export class Store {
                         }
                     }
 
-                    loadout.overrides[target] = { enabled: completeOverride(doc, merged) };
+                    loadout.overrides[target] = { enabled: completeOverride(doc, merged), tuning };
                     touched = true;
                 }
 
@@ -1144,20 +1317,153 @@ export class Store {
     }
 
     /**
-     * Patch one Model's global tuning: `{set?: {key: value}, unset?: [key]}`.
+     * Validate a tuning name against a Model's `tunings` (null/undefined =
+     * no binding). Unknown Model or unknown name -> 400.
+     * @param {string} modelName
+     * @param {any} tuning
+     * @returns {string|null}
+     */
+    _checkTuningName(modelName, tuning) {
+        if (tuning === null || tuning === undefined) return null;
+        const tunings = this.models.models[modelName]?.tunings;
+        if (typeof tuning !== 'string' || !tunings || !Object.prototype.hasOwnProperty.call(tunings, tuning)) {
+            throw new StoreError(`Model ${modelName} has no tuning "${String(tuning)}"`, 400);
+        }
+        return tuning;
+    }
+
+    /**
+     * Every `<preset name> / <loadout name>` whose override for `model`
+     * binds `tuningName`.
+     * @param {string} model
+     * @param {string} tuningName
+     * @returns {string[]}
+     */
+    _tuningReferences(model, tuningName) {
+        /** @type {string[]} */
+        const refs = [];
+        for (const entry of this.index.values()) {
+            for (const loadout of Object.values(entry.doc.loadouts ?? {})) {
+                if (loadout.overrides?.[model]?.tuning === tuningName) refs.push(`${entry.doc.name} / ${loadout.name}`);
+            }
+        }
+        return refs;
+    }
+
+    /**
+     * Look up a Model's named tuning in the live registry (404 when either
+     * is missing).
      * @param {string} name
+     * @param {string} tuningName
+     */
+    _requireTuning(name, tuningName) {
+        const model = this.models.models[name];
+        if (!model) throw new StoreError(`Model ${name} not found`, 404);
+        if (!Object.prototype.hasOwnProperty.call(model.tunings, tuningName)) {
+            throw new StoreError(`Model ${name} has no tuning "${tuningName}"`, 404);
+        }
+        return model;
+    }
+
+    /**
+     * Patch one named Model tuning: `{set?: {key: value}, unset?: [key]}`.
+     * @param {string} name
+     * @param {string} tuningName
      * @param {{ set?: Record<string, any>, unset?: string[] }} patch
      */
-    async patchModelTuning(name, patch) {
+    async patchModelTuning(name, tuningName, patch) {
         return this.enqueue(async () => {
-            if (!this.models.models[name]) throw new StoreError(`Model ${name} not found`, 404);
+            this._requireTuning(name, tuningName);
             Store._validatePatch(patch, TUNING_KEYS, (k) => `"${k}" is not a tuning key`);
             await this._mutateModelsNow((reg) => {
-                const tuning = { ...reg.models[name].tuning };
+                const tuning = { ...reg.models[name].tunings[tuningName] };
                 for (const k of patch.unset ?? []) delete tuning[k];
                 Object.assign(tuning, patch.set ?? {});
-                reg.models[name].tuning = tuning;
+                reg.models[name].tunings[tuningName] = tuning;
             });
+            return structuredClone(this.models.models[name]);
+        });
+    }
+
+    /**
+     * Delete a named Model tuning. 404 when missing; 409 when it is the
+     * Model's default or any loadout override binds it.
+     * @param {string} name
+     * @param {string} tuningName
+     */
+    async deleteModelTuning(name, tuningName) {
+        return this.enqueue(async () => {
+            const model = this._requireTuning(name, tuningName);
+            if (model.defaultTuning === tuningName) {
+                throw new StoreError(`tuning "${tuningName}" is the default of Model ${name}; choose another default first`, 409);
+            }
+            const refs = this._tuningReferences(name, tuningName);
+            if (refs.length) {
+                throw new StoreError(`tuning "${tuningName}" of Model ${name} is used by: ${refs.join(', ')}`, 409);
+            }
+            await this._mutateModelsNow((reg) => { delete reg.models[name].tunings[tuningName]; });
+            return structuredClone(this.models.models[name]);
+        });
+    }
+
+    /**
+     * Rename a named Model tuning: the registry key (order kept), the
+     * Model's `defaultTuning` when it names it, and every loadout override
+     * binding it, in ONE `_commit` (a labelled revision of each touched doc
+     * is snapshotted first; their undo stacks are cleared).
+     * @param {string} name
+     * @param {string} from
+     * @param {string} to
+     * @returns {Promise<{ model: Record<string, any>, migrated: string[] }>}
+     */
+    async renameModelTuning(name, from, to) {
+        return this.enqueue(async () => {
+            this._requireTuning(name, from);
+            const trimmed = String(to ?? '').trim();
+            if (!trimmed) throw new StoreError('renameModelTuning needs a non-empty name', 400);
+            if (Object.prototype.hasOwnProperty.call(this.models.models[name].tunings, trimmed)) {
+                throw new StoreError(`Model ${name} already has a tuning "${trimmed}"`, 409);
+            }
+
+            const reg = structuredClone(this.models);
+            const model = reg.models[name];
+            /** @type {Record<string, any>} */
+            const tunings = {};
+            for (const key of Object.keys(model.tunings)) {
+                tunings[key === from ? trimmed : key] = model.tunings[key];
+            }
+            model.tunings = tunings;
+            if (model.defaultTuning === from) model.defaultTuning = trimmed;
+
+            /** @type {any[]} */
+            const docs = [];
+            for (const entry of this.index.values()) {
+                const doc = structuredClone(entry.doc);
+                let touched = false;
+                for (const loadout of Object.values(doc.loadouts ?? {})) {
+                    const override = loadout.overrides?.[name];
+                    if (override?.tuning === from) {
+                        override.tuning = trimmed;
+                        touched = true;
+                    }
+                }
+                if (touched) docs.push(doc);
+            }
+
+            await this._commit({ registry: reg, docs, revisionLabel: `Model tuning rename: ${name} ${from} -> ${trimmed}` });
+            return { model: structuredClone(this.models.models[name]), migrated: docs.map((d) => d.id) };
+        });
+    }
+
+    /**
+     * Choose which named tuning a Model uses when a loadout binds none.
+     * @param {string} name
+     * @param {string} tuningName
+     */
+    async setDefaultTuning(name, tuningName) {
+        return this.enqueue(async () => {
+            this._requireTuning(name, tuningName);
+            await this._mutateModelsNow((reg) => { reg.models[name].defaultTuning = tuningName; });
             return structuredClone(this.models.models[name]);
         });
     }
@@ -1437,7 +1743,7 @@ export function ensureDefaultLoadout(doc) {
     for (const seq of doc.sequences ?? []) walk(seq.rows ?? []);
     const lid = `l_${ulid()}`;
     doc.loadouts = {
-        [lid]: { id: lid, name: 'Current', notes: '', enabled, overrides: {} },
+        [lid]: { id: lid, name: 'Current', notes: '', kind: 'root', parent: null, enabled, overrides: {} },
     };
     doc.activeLoadoutId = lid;
     ensureAllLeaves(doc, doc.loadouts[lid].enabled);

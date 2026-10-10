@@ -46,7 +46,8 @@ test('seedFromProfiles: one Model per distinct (source, model), named by the raw
     assert.deepEqual(models.mock.matches, [{ source: 'custom', model: 'mock' }]);
     assert.deepEqual(models.mock.profiles, ['p-mock', 'p-mock-default']);
     assert.equal(models.mock.name, 'mock');
-    assert.deepEqual(models.mock.tuning, {});
+    assert.deepEqual(models.mock.tunings, { default: {} });
+    assert.equal(models.mock.defaultTuning, 'default');
     assert.equal(typeof models.mock.id, 'string');
     const ids = Object.values(models).map((m) => m.id);
     assert.equal(new Set(ids).size, ids.length, 'Model ids are unique');
@@ -68,7 +69,7 @@ test('seedFromProfiles: preferredProfile = first connection-only profile (exclud
 
 test('seedFromProfiles: skips non-cc, model-less and already-matched profiles; api alias maps to source', () => {
     const reg = { version: 1, models: {
-        'Kimi K3': { id: 'm_kimi', name: 'Kimi K3', matches: [{ source: 'custom', model: 'hapuppy/kimi-k3' }], profiles: [], preferredProfile: null, tuning: { temperature: 0.3 } },
+        'Kimi K3': { id: 'm_kimi', name: 'Kimi K3', matches: [{ source: 'custom', model: 'hapuppy/kimi-k3' }], profiles: [], preferredProfile: null, tunings: { default: { temperature: 0.3 } }, defaultTuning: 'default' },
     } };
     const profiles = [
         P('tc', 'kobold', 'whatever', { mode: 'tc' }),
@@ -98,7 +99,7 @@ test('seedFromProfiles: same model id under two sources -> two Models, no name c
 
 test('seedFromProfiles: a name already taken in the registry is not reused', () => {
     const reg = { version: 1, models: {
-        mock: { id: 'm_mock', name: 'mock', matches: [{ source: 'openai', model: 'other' }], profiles: [], preferredProfile: null, tuning: {} },
+        mock: { id: 'm_mock', name: 'mock', matches: [{ source: 'openai', model: 'other' }], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
     } };
     const { models } = seedFromProfiles([P('p', 'custom', 'mock')], reg);
     const [name] = Object.keys(models);
@@ -118,8 +119,8 @@ test('suggestMerges: groups Model NAMES sharing a normalized tail; singletons om
 
 test('mergeModels: owner merge of two ids -> one Model with both matches; input untouched', () => {
     const { models } = seedFromProfiles(FIXTURE, empty());
-    models['hapuppy/kimi-k3'].tuning = { temperature: 0.3, top_p: 0.9 };
-    models['nanogpt-payg/moonshotai/kimi-k3'].tuning = { temperature: 1.5, top_k: 40 };
+    models['hapuppy/kimi-k3'].tunings = { default: { temperature: 0.3, top_p: 0.9 }, creative: { temperature: 1.1 } };
+    models['nanogpt-payg/moonshotai/kimi-k3'].tunings = { default: { temperature: 1.5, top_k: 40 }, strict: { top_k: 5 } };
     const reg = { version: 1, models };
     const before = JSON.stringify(reg);
     const out = mergeModels(reg, ['hapuppy/kimi-k3', 'nanogpt-payg/moonshotai/kimi-k3'], 'Kimi K3');
@@ -134,7 +135,12 @@ test('mergeModels: owner merge of two ids -> one Model with both matches; input 
     ]);
     assert.deepEqual(k.profiles, ['p-hap', 'p-nano']);
     assert.equal(k.preferredProfile, 'p-hap');
-    assert.deepEqual(k.tuning, { temperature: 0.3, top_p: 0.9, top_k: 40 }, 'first listed wins on conflicts');
+    assert.deepEqual(k.tunings, {
+        default: { temperature: 0.3, top_p: 0.9 },
+        creative: { temperature: 1.1 },
+        strict: { top_k: 5 },
+    }, 'tunings union by name; the first listed Model\'s whole record wins on a name clash (no key layering)');
+    assert.equal(k.defaultTuning, 'default');
     assert.deepEqual(validateRegistry(out), []);
     // both raw ids now resolve to the merged Model
     assert.equal(resolveModel(out, { source: 'custom', model: 'nanogpt-payg/moonshotai/kimi-k3' })?.name, 'Kimi K3');
@@ -143,8 +149,8 @@ test('mergeModels: owner merge of two ids -> one Model with both matches; input 
 
 test('mergeModels: the new name may reuse a merged name; duplicate matches/profiles collapse', () => {
     const reg = { version: 1, models: {
-        A: { id: 'm_a', name: 'A', matches: [{ source: 'custom', model: 'x' }], profiles: ['p1'], preferredProfile: null, tuning: {} },
-        B: { id: 'm_b', name: 'B', matches: [{ source: 'custom', model: 'x' }, { source: 'custom', model: 'y' }], profiles: ['p1', 'p2'], preferredProfile: 'p2', tuning: {} },
+        A: { id: 'm_a', name: 'A', matches: [{ source: 'custom', model: 'x' }], profiles: ['p1'], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
+        B: { id: 'm_b', name: 'B', matches: [{ source: 'custom', model: 'x' }, { source: 'custom', model: 'y' }], profiles: ['p1', 'p2'], preferredProfile: 'p2', tunings: { default: {} }, defaultTuning: 'default' },
     } };
     const out = mergeModels(reg, ['A', 'B'], 'B');
     assert.deepEqual(Object.keys(out.models), ['B']);
@@ -155,9 +161,9 @@ test('mergeModels: the new name may reuse a merged name; duplicate matches/profi
 
 test('mergeModels: refuses <2 names, unknown names, an empty name, and a name owned by another Model', () => {
     const reg = { version: 1, models: {
-        A: { id: 'm_a', name: 'A', matches: [], profiles: [], preferredProfile: null, tuning: {} },
-        B: { id: 'm_b', name: 'B', matches: [], profiles: [], preferredProfile: null, tuning: {} },
-        C: { id: 'm_c', name: 'C', matches: [], profiles: [], preferredProfile: null, tuning: {} },
+        A: { id: 'm_a', name: 'A', matches: [], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
+        B: { id: 'm_b', name: 'B', matches: [], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
+        C: { id: 'm_c', name: 'C', matches: [], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
     } };
     assert.throws(() => mergeModels(reg, ['A'], 'X'));
     assert.throws(() => mergeModels(reg, ['A', 'Z'], 'X'));
@@ -167,8 +173,8 @@ test('mergeModels: refuses <2 names, unknown names, an empty name, and a name ow
 
 test('resolveModel: exact (source, model) first, then connection-profile id; source matters', () => {
     const reg = { version: 1, models: {
-        ByProfile: { id: 'm_1', name: 'ByProfile', matches: [], profiles: ['prof-9'], preferredProfile: null, tuning: {} },
-        ByMatch: { id: 'm_2', name: 'ByMatch', matches: [{ source: 'custom', model: 'm' }], profiles: [], preferredProfile: null, tuning: {} },
+        ByProfile: { id: 'm_1', name: 'ByProfile', matches: [], profiles: ['prof-9'], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
+        ByMatch: { id: 'm_2', name: 'ByMatch', matches: [{ source: 'custom', model: 'm' }], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' },
     } };
     assert.equal(resolveModel(reg, { source: 'custom', model: 'm', profileId: 'prof-9' })?.name, 'ByMatch');
     assert.equal(resolveModel(reg, { source: 'openrouter', model: 'm', profileId: 'prof-9' })?.name, 'ByProfile');

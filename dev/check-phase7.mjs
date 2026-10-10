@@ -57,8 +57,8 @@ const TOOL_NAMES = [
     'preset_fork', 'preset_move', 'preset_set_meta', 'preset_op',
     'loadout_create', 'loadout_update', 'loadout_delete', 'loadout_activate',
     'loadout_set_override', 'loadout_patch_override', 'loadout_delete_override',
-    'tuning_override_set', 'tuning_override_patch', 'tuning_override_delete',
     'models_list', 'models_replace', 'models_set_tuning', 'models_patch_tuning',
+    'models_delete_tuning', 'models_rename_tuning', 'models_set_default_tuning',
     'models_rename', 'models_merge', 'models_seed', 'profiles_list', 'profiles_backup',
     'slot_get', 'slot_load', 'slot_set_model', 'diff_presets', 'diff_blocks',
     'revisions_list', 'revision_get', 'revision_create', 'revision_restore',
@@ -360,7 +360,7 @@ async function main() {
     // ------------------------------------------------------------------ 7c
     await check('7c slot_load {presetId, loadoutId}: ST shows that preset and that loadout', async () => {
         // a second loadout L2 that differs from the active L1 in exactly X, built through MCP
-        const created = await ok('loadout_create', { presetId: ids.sola, name: 'mcp L2' });
+        const created = await ok('loadout_create', { presetId: ids.sola, name: 'mcp L2', kind: 'root' });
         ids.l2 = Object.values(created.doc.loadouts).find((/** @type {any} */ l) => l.name === 'mcp L2')?.id ?? '';
         must(ids.l2, 'loadout_create returned no "mcp L2"');
         await ok('loadout_activate', { presetId: ids.sola, loadoutId: ids.l2 });

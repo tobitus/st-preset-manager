@@ -774,7 +774,6 @@ export function importStPreset(data, name, ids = {}) {
         sequences,
         loadouts: {},
         activeLoadoutId: null,
-        tuningOverrides: {},
     };
 }
 

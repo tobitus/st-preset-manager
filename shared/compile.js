@@ -6,21 +6,24 @@
  * the running ST version).
  *
  * 1. out = pick(B, non-connection keys of settingsToUpdate) ⊕ D.settings
- * 2. out ⊕= models[M].tuning ⊕ D.tuningOverrides[M.name]
- * 3. enabled = L.enabled ⊕ L.overrides[M].enabled, then groups.normalize
+ * 2. out ⊕= the Model's tuning in effect: models[M].tunings[name], where
+ *    name = L.overrides[M].tuning ?? models[M].defaultTuning
+ * 3. enabled = effectiveEnabled(D, L, M): root ⊕ playstyle ⊕ L.overrides[M].enabled,
+ *    then groups.normalize
  * 4. out.prompts = markers (verbatim) + blocks as ST prompts;
  *    out.prompt_order = one entry per sequence, flattened leaf order
  * 5. strip every CONNECTION_KEYS key; return { out, hash }
  */
 import { TUNING_KEYS, CONNECTION_KEYS, PRESET_SETTING_KEYS, MODELED_PROMPT_KEYS } from './st-keys.js';
-import { normalize, iterLeaves } from './groups.js';
+import { iterLeaves } from './groups.js';
+import { effectiveEnabled, tuningNameInEffect, LoadoutError } from './loadouts.js';
 import { flattenSeq } from './outline.js';
 import { canonicalHash } from './util.js';
 
 /**
  * Compile a document into an ST preset for the working slot.
  * @param {any} doc native library document
- * @param {{ name: string, tuning?: Record<string, any> }|null} model Model registry entry or null
+ * @param {{ name: string, tunings?: Record<string, Record<string, any>>, defaultTuning?: string }|null} model Model registry entry or null
  * @param {any} base ST Default.json content (or {} in tests)
  * @param {string|null} [loadoutId] compile THIS loadout (defaults to the
  *   document's activeLoadoutId); lets /slot/load serve a non-active loadout
@@ -44,29 +47,28 @@ export function compile(doc, model, base = {}, loadoutId = undefined, opts = {})
         if (!CONNECTION_KEYS.includes(key)) out[key] = value;
     }
 
-    // 2. Tunings: global per Model, then the preset's override.
-    const modelTuning = model?.tuning ?? {};
-    for (const key of TUNING_KEYS) {
-        if (modelTuning[key] !== undefined) out[key] = modelTuning[key];
-    }
-    const override = model ? doc.tuningOverrides?.[model.name] : undefined;
-    for (const key of TUNING_KEYS) {
-        if (override && override[key] !== undefined) out[key] = override[key];
-    }
-
-    // 3. Enabled: loadout ⊕ per-model loadout override, then pick-one ≤ 1.
+    // 2. Tuning: the Model's named tuning in effect for this loadout.
     const lid = loadoutId ?? doc.activeLoadoutId;
     const loadout = lid ? doc.loadouts?.[lid] : null;
     if (!loadout) throw new CompileError(`document has no loadout ${lid ?? '(none)'}`);
-    /** @type {Record<string, boolean>} */
-    const enabled = { ...loadout.enabled };
-    const modelOverride = model ? loadout.overrides?.[model.name] : undefined;
-    if (modelOverride?.enabled) {
-        for (const [id, on] of Object.entries(modelOverride.enabled)) {
-            if (typeof on === 'boolean') enabled[id] = on;
+    if (model) {
+        const tname = tuningNameInEffect(loadout, model);
+        const T = tname === undefined ? undefined : model.tunings?.[tname];
+        if (!T) throw new CompileError(`loadout ${lid} override for ${model.name} names unknown tuning ${tname}`);
+        for (const key of TUNING_KEYS) {
+            if (T[key] !== undefined) out[key] = T[key];
         }
     }
-    normalize(doc, enabled);
+
+    // 3. Enabled: inherited loadout layers + per-model override, pick-one ≤ 1.
+    /** @type {Record<string, boolean>} */
+    let enabled;
+    try {
+        enabled = effectiveEnabled(doc, lid, model?.name ?? null).enabled;
+    } catch (err) {
+        if (err instanceof LoadoutError) throw new CompileError(err.message);
+        throw err;
+    }
 
     // 4. prompts + prompt_order. A section/group heading block with empty
     // or whitespace-only content is omitted from the slot's prompts and

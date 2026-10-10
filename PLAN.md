@@ -82,12 +82,15 @@ One JSON file per preset. Real JSON fields, nothing in comments (item 14).
                    pick-one|pick-one-or-more, guessed, header, options:[leaf]} — NO enabled bits */ ] } ],
   "loadouts": { "<loadoutId>": {
       "id", "name", "notes",
-      "enabled": { "<identifier>": true|false },          // every leaf (blocks, markers, ghosts)
-      "overrides": { "<ModelId>": { "enabled": { "<identifier>": true|false } } }  // item 21: only
+      "kind": "root|playstyle",                             // round 2: inheriting loadouts
+      "parent": null,                                       // null iff root; a playstyle names a ROOT (no chaining)
+      "enabled": { "<identifier>": true|false },          // root: every leaf (blocks, markers, ghosts);
+                                                          // playstyle: sparse, absent = inherit the root's bit
+      "overrides": { "<ModelId>": { "enabled": { "<identifier>": true|false },  // item 21: only
                                                           // listed identifiers are "controlled"
+                                    "tuning": null } }     // a named tuning of that Model; null = its defaultTuning
   } },
-  "activeLoadoutId": "l_…",
-  "tuningOverrides": { "<ModelId>": { "temperature": 0.8, /* TUNING_KEYS subset */ } },  // item 16
+  "activeLoadoutId": "l_…",                              // either kind
   "createdAt", "updatedAt", "rev": 17                    // per-document revision (int)
 }
 ```
@@ -96,7 +99,15 @@ Layer rules (item 15): **blocks** = `blocks`+`markers`+`sequences`+`settings` (t
 content and shape); **loadouts** = on/off + group choice (a pick-one group's choice *is*
 "the one member whose `enabled` is true"; `shared/groups.js` enforces ≤1 on every write and
 on compile — the last one switched on wins, siblings go off); **tunings** = sampler keys,
-global per Model in `models.json`, overridable per preset in `tuningOverrides`.
+global per Model in `models.json` as NAMED tunings (`tunings: {<name>: {…TUNING_KEYS subset}}`,
+`defaultTuning`); a loadout's per-Model override picks one by name (`overrides[M].tuning`).
+Effective enabled map (`shared/loadouts.js` `effectiveEnabled`): root ⊕ playstyle's explicit
+bits ⊕ the loadout's OWN `overrides[M].enabled` (a playstyle never sees its parent's
+overrides), then pick-one normalisation preferring explicit (non-root) choices. Documents
+from before round 2 (no `kind`, a `tuningOverrides` field) are converted on load
+(`upgradeDoc`: every loadout becomes a complete root, overrides get `tuning: null`,
+`tuningOverrides` is dropped — the first save's pre-save revision keeps the old bytes);
+an old `models.json` (`tuning`) becomes `tunings: {default: …}, defaultTuning: 'default'`.
 
 `TUNING_KEYS` (shared/st-keys.js, explicit list): `temperature, frequency_penalty,
 presence_penalty, top_p, top_k, top_a, min_p, repetition_penalty, openai_max_context,
@@ -153,9 +164,11 @@ compile time (so missing keys track the running ST version, not a copy in this r
 1. `out = pick(B, non-connection keys of settingsToUpdate) ⊕ D.settings`  — a preset that
    lacks a key would otherwise leave the previous preset's value in place, because ST only
    applies `preset[key] !== undefined` (`openai.js:5058`).
-2. `out ⊕= R.models[M].tuning ⊕ D.tuningOverrides[M]` (global → preset override, item 21).
-3. `enabled = L.enabled ⊕ L.overrides[M].enabled`, then `groups.normalize(D, enabled)`
-   (pick-one ≤ 1 on: the override's/last change wins).
+2. `out ⊕= R.models[M].tunings[L.overrides[M].tuning ?? R.models[M].defaultTuning]` (a
+   whole named tuning; an unknown name is a CompileError).
+3. `enabled = effectiveEnabled(D, L, M)` = root ⊕ playstyle ⊕ `L.overrides[M].enabled`, then
+   `groups.normalize` (pick-one ≤ 1 on: an explicit playstyle/override choice beats an
+   inherited one; otherwise the last change wins).
 4. `out.prompts` = markers (verbatim) + every block as an ST prompt `{identifier, name,
    content, role, ...fields, enabled: enabled[id], marker:false, system_prompt:false}` —
    **no `notes`, no group data**; `out.prompt_order` = one entry per sequence, `order` =
@@ -286,10 +299,12 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
     - bounded work: more than 5000 rows shown in ST or more than 200 moved rows in one
       write-back is not a panel drag and is refused (document unchanged; the re-apply puts
       ST back).
-  - `TUNING_KEYS` changed → `D.tuningOverrides[M]` if that override exists, else
-    `R.models[M].tuning` (mirrors item 21's override-if-it-controls rule; the UI's tuning
-    panel has an explicit "override for this preset" switch so intent is visible). With no
+  - `TUNING_KEYS` changed → the Model's named tuning IN EFFECT for this compile
+    (`L.overrides[M].tuning ?? R.models[M].defaultTuning`) in the registry. With no
     Model resolved, → `D.settings` and a warning event.
+  - enabled bit → `L.overrides[M]` when it already lists the identifier, else the desired
+    loadout's OWN layer: a root's complete map (+ normalize), a playstyle's sparse map
+    (explicit set; pick-one siblings written false). Never the playstyle's parent.
   - anything else → `D.settings`.
   Response `{rev, compiled, hash}`. A routed-nothing observation is NOT a revision (no save,
   no broadcast). The tab sets `appliedHash`/`appliedRev`/`baseSnapshot = S` from the 200; if
@@ -366,9 +381,11 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
   byte-identical to its backed-up copy (else nothing is deleted) and the active profile is
   kept.
 - **Model rename / merge** (Settings tab) are plugin transactions (`POST /models/rename`,
-  `POST /models/merge`) that re-key every document's `tuningOverrides[Model]` and
-  `loadouts[*].overrides[Model]` with the registry, published as one step; a merge keeps
-  the first-listed Model's value per key (tuning) / identifier (override); for each pick-one
+  `POST /models/merge`) that re-key every document's `loadouts[*].overrides[Model]`
+  (enabled bits and the `tuning` binding) with the registry, published as one step; a merge
+  unions the Models' named tunings (first-listed wins per tuning name, `defaultTuning` from
+  the first-listed), keeps the first-listed Model's value per identifier (override) and the
+  tuning binding of the first-listed Model that had an override in that loadout; for each pick-one
   group the first Model that chose in it decides: an option on, or every member listed off
   (= none); a Model that does not list all members off without choosing falls through, and each touched document gets a labelled revision holding the old values.
 
@@ -386,10 +403,14 @@ Message: `data: {"rev": N, "kind": "slot|preset|models|shelf", "origin": "<clien
 | POST | `/presets/:id/ops` | `{op, ...args}` — `toggle`, `setGroup`, `setCardinality`, `promote`, `demote` (`{key}` or `{keys}`: several rows applied in document order, all-or-nothing, → `{keys}`), `dissolveGroup {key}` (the group's heading and options become plain items in place; order, blocks and loadouts untouched), `makeSection {key}` / `unmakeSection {key}` (one atomic op each: a plain item becomes a section heading named after its block, the rows below up to the next section heading become its children; exact inverse; options, group headings, markers and ghosts refused), `moveLeaf`, `editBlock`, `addBlock`, `addSection {name, before}` (one atomic op: an empty section heading, ON in the active loadout; the rows below it up to the next section heading become its children; an anchor inside a group snaps above the group), `deleteBlock`, `copyBlock {fromPresetId|shelfId, identifier, before | after}` (`after` = a single block lands directly below that row in the row's own sequence: after an option it joins the group, after a group heading it lands below the whole group; Duplicate uses it), `renameBlock`, `setSettings` → `{doc, rev, result}` (`result` = the op's return value, e.g. `{identifier, key}` for addBlock/addSection). A section's or headed group's name is its heading block's name; renaming the block (`editBlock`/`renameBlock`) or a headed group (`renameGroup`) keeps both in sync. |
 | POST | `/presets/:id/undo`, `/presets/:id/redo` | → `{doc, rev, history:{undo,redo}}`; 409 on an empty stack. In-memory per-preset whole-document snapshots (cap 100, lost on plugin restart), pushed by every save of an existing doc (and `copyBlock`); import replace, restore and Model rename/merge clear it; same slot semantics as restore |
 | GET | `/presets/:id/history` | `{undo, redo}` depths |
-| POST/PUT/DELETE | `/presets/:id/loadouts[/:lid]` | `{name, from?}` create (copies `from` or current) / rename / delete (not the last) |
+| POST | `/presets/:id/loadouts` | `{name, kind, from?, parent?}` — `kind` root\|playstyle required; a root copies the effective map of `from` (default: the active loadout's root); a playstyle needs `parent` = a root id and starts empty (inherits everything) |
+| PATCH | `/presets/:id/loadouts/:lid` | `{name?, notes?, parent?, kind?}` — root→playstyle (409 with children; `enabled` becomes the diff against the new parent, effective map unchanged), playstyle→root (materialises the effective map), `parent` re-parents a playstyle (explicit bits kept) |
+| DELETE | `/presets/:id/loadouts/:lid` | a playstyle always; a root with playstyles → 409; never the last root |
 | POST | `/presets/:id/loadouts/:lid/activate` | → recompile if this preset is in the slot |
-| PUT/DELETE | `/presets/:id/loadouts/:lid/overrides/:modelId` | `{enabled:{…}}` |
-| PUT/DELETE | `/presets/:id/tuning-overrides/:modelId` | `{…TUNING_KEYS}` |
+| PUT/PATCH/DELETE | `/presets/:id/loadouts/:lid/overrides/:modelId` | PUT `{enabled:{…}, tuning?}`, PATCH `{set?, unset?, tuning?}`; `tuning` must name one of the Model's tunings (or null) |
+| PUT/PATCH/DELETE | `/models/:modelId/tunings/:name` | PUT `{…TUNING_KEYS}` upsert, PATCH `{set?, unset?}`; DELETE → 409 for the default or a tuning any loadout override names |
+| POST | `/models/:modelId/tunings/rename` | `{from, to}` — renames and migrates every override reference in one labelled transaction |
+| PUT | `/models/:modelId/default-tuning` | `{name}` |
 | GET/PUT | `/models` | registry; PUT replaces the whole registry (validated) |
 | POST | `/models/seed` | `{profiles?}` (default: read from `settings.json`) → `{models, mergeSuggestions:[[ids…]]}` — one Model per distinct raw id, suggestions grouped by normalized tail (lower-case, provider prefix up to the last `/` dropped); nothing merges without the owner (item 22) |
 | GET | `/profiles` | cc profiles from `settings.json` (read-only): `{id,name,api,model,preset?,exclude}` |

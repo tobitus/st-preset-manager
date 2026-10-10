@@ -79,10 +79,9 @@ test('exportSt: no library-only keys anywhere, even with notes/tunings/overrides
     doc.notes = 'preset note';
     doc.tags = ['t'];
     doc.blocks.o1.notes = 'block note';
-    doc.tuningOverrides = { 'Kimi K3': { temperature: 0.01 } };
     const lid = doc.activeLoadoutId;
     doc.loadouts[lid].notes = 'loadout note';
-    doc.loadouts[lid].overrides = { 'Kimi K3': { enabled: { deep: false } } };
+    doc.loadouts[lid].overrides = { 'Kimi K3': { enabled: { deep: false }, tuning: 'hot' } };
     const out = exportSt(doc);
     const keys = allKeys(out);
     for (const k of ['notes', 'groups', 'cardinality', 'guessed', 'options', 'rows', 'sequences',

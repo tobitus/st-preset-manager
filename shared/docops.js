@@ -10,12 +10,19 @@
  *
  * Layer rules (roadmap item 15): these ops shape the BLOCKS layer
  * (blocks+markers+sequences+settings). Enabled bits live in loadouts and are
- * only written by `toggle`/`setGroup` (and loadout endpoints); pick-one
- * conflicts are NOT collapsed here — the compile/routing layer normalises
- * (Phase 2 Must-NOT). Notes are library-only and never compiled.
+ * only written by `toggle`/`setGroup` (and loadout endpoints), which take an
+ * optional `loadoutId` (default: the active loadout; unknown -> 404). A ROOT
+ * loadout holds a complete map; a PLAYSTYLE loadout holds a sparse layer over
+ * its root and is written sparsely (ON sets the key, OFF stores false; the
+ * root is never written); `resetInherit`/`resetAllInherit` drop a playstyle's
+ * explicit keys so it inherits again. New blocks get `false` in every root
+ * and no entry in playstyles. Pick-one conflicts are NOT collapsed here — the
+ * compile/routing layer normalises (Phase 2 Must-NOT). Notes are library-only
+ * and never compiled.
  */
 import { CONNECTION_KEYS } from './st-keys.js';
-import { normalize, pickOneMembers } from './groups.js';
+import { normalize, pickOneMembers, iterLeaves, completeOverride } from './groups.js';
+import { effectiveEnabled, inheritResetKeys } from './loadouts.js';
 import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError, containerName, syncHeadingNames, makeSection, unmakeSection } from './outline.js';
 import { newId } from './util.js';
 import { newKey } from './canonical.js';
@@ -55,10 +62,54 @@ function defaultFields() {
     };
 }
 
+const isPlaystyle = (/** @type {any} */ l) => l?.kind === 'playstyle';
+
 function activeLoadout(/** @type {any} */ doc) {
     const l = doc.loadouts?.[doc.activeLoadoutId];
     if (!l) throw new OpError('preset has no active loadout', 409);
     return l;
+}
+
+/**
+ * The loadout a bit-writing op targets: `a.loadoutId` when given (400 not a
+ * string, 404 unknown), else the active loadout (409 when none).
+ * @param {any} doc
+ * @param {{ loadoutId?: any }|undefined} a
+ * @returns {{ lid: string, loadout: any }}
+ */
+function targetLoadout(doc, a) {
+    if (a?.loadoutId !== undefined && typeof a.loadoutId !== 'string') {
+        throw new OpError('loadoutId must be a string');
+    }
+    const lid = a?.loadoutId ?? doc.activeLoadoutId;
+    if (a?.loadoutId === undefined) return { lid, loadout: activeLoadout(doc) };
+    const loadout = doc.loadouts?.[lid];
+    if (!loadout) throw new OpError(`no loadout ${lid}`, 404);
+    return { lid, loadout };
+}
+
+/** Identifier must be a leaf of the document (404 otherwise). */
+function requireLeaf(/** @type {any} */ doc, /** @type {string} */ identifier) {
+    if (!iterLeaves(doc).some((leaf) => identOf(leaf) === identifier)) {
+        throw new OpError(`unknown leaf ${identifier}`, 404);
+    }
+}
+
+/**
+ * Sparse write into a playstyle's own layer. ON re-inserts the key last and
+ * lets completeOverride turn its pick-one siblings off; OFF stores `false`.
+ * The parent root is never touched.
+ * @param {any} doc @param {any} loadout @param {string} id @param {boolean} on
+ */
+function writePlaystyleBit(doc, loadout, id, on) {
+    if (!on) {
+        loadout.enabled[id] = false;
+        return;
+    }
+    const next = { ...loadout.enabled };
+    delete next[id];
+    next[id] = true;
+    loadout.enabled = completeOverride(doc, next);
 }
 
 /**
@@ -139,15 +190,25 @@ const identOf = (/** @type {any} */ leaf) => leaf.ref ?? leaf.identifier;
 // ------------------------------------------------------------------ switches
 
 /**
- * Flip one leaf's switch in the ACTIVE loadout. Enforces pick-one ≤ 1 via
- * normalize (the option just switched on wins; `none` stays legal).
+ * Flip one leaf's switch in the target loadout (`loadoutId`, default the
+ * active one). A root writes its complete map and enforces pick-one ≤ 1 via
+ * normalize (the option just switched on wins; `none` stays legal). A
+ * playstyle writes sparsely: ON sets the key (and turns its pick-one siblings
+ * off via completeOverride), OFF stores `false`; the root is never written.
+ * Without `value` a playstyle flips its EFFECTIVE bit.
  * @param {any} doc
- * @param {{ identifier?: string, value?: boolean }} a
+ * @param {{ identifier?: string, value?: boolean, loadoutId?: string }} a
  */
 function opToggle(doc, a) {
     const { identifier, value } = a ?? {};
     if (typeof identifier !== 'string') throw new OpError('toggle needs identifier');
-    const loadout = activeLoadout(doc);
+    const { lid, loadout } = targetLoadout(doc, a);
+    if (isPlaystyle(loadout)) {
+        requireLeaf(doc, identifier);
+        const on = value !== undefined ? !!value : !effectiveEnabled(doc, lid, null).enabled[identifier];
+        writePlaystyleBit(doc, loadout, identifier, on);
+        return { identifier, enabled: on };
+    }
     const enabled = loadout.enabled;
     if (!(identifier in enabled)) throw new OpError(`unknown leaf ${identifier}`, 404);
     enabled[identifier] = value !== undefined ? !!value : !enabled[identifier];
@@ -156,10 +217,12 @@ function opToggle(doc, a) {
 }
 
 /**
- * Set a group's choice: turn `identifier` on and (pick-one) its siblings off.
- * The identifier must belong to the group (heading or option).
+ * Set a group's choice: turn `identifier` on and (pick-one) its siblings off,
+ * in the target loadout (`loadoutId`, default the active one; a playstyle
+ * gets a sparse write). The identifier must belong to the group (heading or
+ * option).
  * @param {any} doc
- * @param {{ group?: string, identifier?: string }} a
+ * @param {{ group?: string, identifier?: string, loadoutId?: string }} a
  */
 function opSetGroup(doc, a) {
     const { group, identifier } = a ?? {};
@@ -171,10 +234,65 @@ function opSetGroup(doc, a) {
     if (!members.some((leaf) => identOf(leaf) === identifier)) {
         throw new OpError(`${identifier} is not a member of group ${group}`, 404);
     }
-    const loadout = activeLoadout(doc);
+    const { loadout } = targetLoadout(doc, a);
+    if (isPlaystyle(loadout)) {
+        requireLeaf(doc, identifier);
+        writePlaystyleBit(doc, loadout, identifier, true);
+        return { group, identifier };
+    }
     loadout.enabled[identifier] = true;
     normalize(doc, loadout.enabled, undefined, identifier);
     return { group, identifier };
+}
+
+/**
+ * Shared preamble of the reset ops: `loadoutId` must name an existing
+ * PLAYSTYLE loadout (400 missing/not a string/a root, 404 unknown).
+ * @param {any} doc
+ * @param {any} a
+ * @param {string} op
+ */
+function playstyleTarget(doc, a, op) {
+    const lid = a?.loadoutId;
+    if (typeof lid !== 'string') throw new OpError(`${op} needs {loadoutId}`);
+    const loadout = doc.loadouts?.[lid];
+    if (!loadout) throw new OpError(`no loadout ${lid}`, 404);
+    if (!isPlaystyle(loadout)) throw new OpError(`loadout ${lid} is a root, not a playstyle`);
+    return loadout;
+}
+
+/**
+ * Drop one leaf's explicit value from a playstyle so it inherits the root
+ * again — for a pick-one member, every member of its group (they are
+ * written together). Returns only the keys that were present.
+ * @param {any} doc
+ * @param {{ loadoutId?: string, identifier?: string }} a
+ */
+function opResetInherit(doc, a) {
+    const loadout = playstyleTarget(doc, a, 'resetInherit');
+    const identifier = a?.identifier;
+    if (typeof identifier !== 'string') throw new OpError('resetInherit needs {loadoutId, identifier}');
+    requireLeaf(doc, identifier);
+    /** @type {string[]} */
+    const removed = [];
+    for (const id of inheritResetKeys(doc, identifier)) {
+        if (id in loadout.enabled) {
+            delete loadout.enabled[id];
+            removed.push(id);
+        }
+    }
+    return { loadoutId: a.loadoutId, removed };
+}
+
+/**
+ * Clear a playstyle's whole sparse layer: it inherits everything again.
+ * @param {any} doc
+ * @param {{ loadoutId?: string }} a
+ */
+function opResetAllInherit(doc, a) {
+    const loadout = playstyleTarget(doc, a, 'resetAllInherit');
+    loadout.enabled = {};
+    return { loadoutId: a.loadoutId };
 }
 
 // -------------------------------------------------------------- group shapes
@@ -283,10 +401,11 @@ function onMembers(doc, grp, enabled) {
 
 /**
  * Change a group's kind (pick-one | pick-one-or-more). Never changes enabled
- * bits. Switching to pick-one is refused (409) while any loadout's base map or
- * per-Model override effective map has 2+ of the group's members on (an
- * enabled heading counts, a comment-only heading does not), so normalize
- * never silently collapses after a switch.
+ * bits. Switching to pick-one is refused (409) while any loadout's effective
+ * map (root merged with a playstyle's sparse layer) or per-Model override
+ * effective map has 2+ of the group's members on (an enabled heading counts,
+ * a comment-only heading does not), so normalize never silently collapses
+ * after a switch.
  * @param {any} doc
  * @param {{ key?: string, cardinality?: string }} a
  */
@@ -311,14 +430,9 @@ function opSetCardinality(doc, a) {
         };
         for (const l of loadouts) {
             const label = ` in loadout "${l.name ?? l.id}"`;
-            refuse(l.enabled ?? {}, l === active ? '' : label);
-            for (const [modelName, ov] of Object.entries(l.overrides ?? {})) {
-                /** @type {any} */
-                const eff = { ...l.enabled };
-                for (const [id, on] of Object.entries(/** @type {any} */ (ov)?.enabled ?? {})) {
-                    if (typeof on === 'boolean') eff[id] = on;
-                }
-                refuse(eff, `${label} for Model "${modelName}"`);
+            refuse(effectiveEnabled(doc, l.id, null).enabled, l === active ? '' : label);
+            for (const modelName of Object.keys(l.overrides ?? {})) {
+                refuse(effectiveEnabled(doc, l.id, modelName).enabled, `${label} for Model "${modelName}"`);
             }
         }
     }
@@ -438,7 +552,7 @@ function opAddOption(doc, a) {
     grp.options.push(row); // list end = after the last sibling (v1)
     grp.guessed = false;
     for (const loadout of Object.values(doc.loadouts ?? {})) {
-        loadout.enabled[identifier] = false;
+        if (!isPlaystyle(loadout)) loadout.enabled[identifier] = false;
     }
     return { identifier, key: row.key, group };
 }
@@ -579,7 +693,7 @@ function opAddBlock(doc, a) {
         seq.rows = rebuildSeq([...flattenSeq(seq.rows ?? []), entry]);
     }
     for (const loadout of Object.values(doc.loadouts ?? {})) {
-        loadout.enabled[identifier] = false;
+        if (!isPlaystyle(loadout)) loadout.enabled[identifier] = false;
     }
     return { identifier, key: row.key };
 }
@@ -643,7 +757,7 @@ function opAddSection(doc, a) {
     doc.blocks ??= {};
     doc.blocks[identifier] = { identifier, name, content: '', role: 'system', fields: defaultFields(), notes: '' };
     for (const loadout of Object.values(doc.loadouts ?? {})) {
-        loadout.enabled[identifier] = false;
+        if (!isPlaystyle(loadout)) loadout.enabled[identifier] = false;
     }
     activeLoadout(doc).enabled[identifier] = true;
     return { identifier, key };
@@ -980,6 +1094,7 @@ export function copyIntoDoc(doc, payload, before, opts = {}) {
     });
     host.rows = rows;
     for (const loadout of Object.values(doc.loadouts ?? {})) {
+        if (isPlaystyle(loadout)) continue;
         for (const id of ids) loadout.enabled[id] = false;
     }
     const group = payload.kind === 'group' ? 'grp:' + keys[0] : null;
@@ -1048,6 +1163,8 @@ function dispatchOp(doc, op, a) {
     switch (op) {
         case 'toggle': return opToggle(doc, a);
         case 'setGroup': return opSetGroup(doc, a);
+        case 'resetInherit': return opResetInherit(doc, a);
+        case 'resetAllInherit': return opResetAllInherit(doc, a);
         case 'setSettings': {
             const settings = a?.settings;
             if (typeof settings !== 'object' || settings === null) throw new OpError('setSettings needs {settings}');

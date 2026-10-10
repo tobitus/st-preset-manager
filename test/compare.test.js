@@ -34,9 +34,8 @@ function mkDoc(blocks, opts = {}) {
             role: b.role ?? 'system', fields: b.fields ?? {}, notes: '',
         }])),
         sequences: [{ character_id: 100001, rows: blocks.map((b) => ({ kind: 'block', ref: b.id, key: `k_${b.id}` })) }],
-        loadouts: { l1: { id: 'l1', name: 'Default', notes: '', enabled: Object.fromEntries(all.map((b) => [b.id, b.on ?? true])), overrides: {} } },
+        loadouts: { l1: { id: 'l1', name: 'Default', notes: '', kind: 'root', parent: null, enabled: Object.fromEntries(all.map((b) => [b.id, b.on ?? true])), overrides: {} } },
         activeLoadoutId: 'l1',
-        tuningOverrides: {},
         createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', rev: 1,
     };
 }

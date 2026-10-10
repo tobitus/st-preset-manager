@@ -373,7 +373,7 @@ test('store: loadout create-from copies state, activate switches the slot view (
     const created = await store.enqueue(async () => {
         const d = store.getDocNow(id);
         const lid = `l_${(/** @type {any} */ (await import('../shared/util.js'))).ulid()}`;
-        d.loadouts[lid] = { id: lid, name: 'B', notes: '', enabled: { ...d.loadouts[active].enabled }, overrides: {} };
+        d.loadouts[lid] = { id: lid, name: 'B', notes: '', kind: 'root', parent: null, enabled: { ...d.loadouts[active].enabled }, overrides: {} };
         return store._savePresetNow(d);
     });
     const lidB = Object.values(created.loadouts).find((/** @type {any} */ l) => l.name === 'B')?.id;

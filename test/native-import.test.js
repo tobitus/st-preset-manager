@@ -48,8 +48,7 @@ async function richDoc(store) {
     const lid = doc.activeLoadoutId;
     doc.loadouts.l_second = { ...structuredClone(doc.loadouts[lid]), id: 'l_second', name: 'Second', notes: 'loadout notes' };
     doc.loadouts.l_second.enabled.c = false;
-    doc.loadouts[lid].overrides = { 'Kimi K3': { enabled: { b: true } } };
-    doc.tuningOverrides = { 'Kimi K3': { temperature: 0.9 } };
+    doc.loadouts[lid].overrides = { 'Kimi K3': { enabled: { b: true }, tuning: 'creative' } };
     await store.savePreset(doc);
     return store.getPreset(imported.id);
 }

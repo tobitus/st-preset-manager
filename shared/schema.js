@@ -3,6 +3,7 @@
  * list of problem paths; the REST layer turns a non-empty list into a 400.
  */
 import { TUNING_KEYS, CONNECTION_KEYS } from './st-keys.js';
+import { ensureAllLeaves } from './groups.js';
 
 /**
  * Pre-mutation shape guard for a native upload (POST /presets {native}):
@@ -90,6 +91,12 @@ export function validateDoc(doc) {
     if (typeof doc.loadouts !== 'object' || doc.loadouts === null || Array.isArray(doc.loadouts)) {
         fail('loadouts');
     } else {
+        const leafIds = new Set();
+        for (const leaf of iterLeaves(doc)) {
+            const id = leaf.ref ?? leaf.identifier;
+            if (id != null) leafIds.add(id);
+        }
+        let anyRoot = false;
         for (const [lid, lo] of Object.entries(doc.loadouts)) {
             const l = /** @type {any} */ (lo);
             if (l?.id !== lid) fail(`loadouts.${lid}.id`);
@@ -100,27 +107,39 @@ export function validateDoc(doc) {
                 if (typeof v !== 'boolean') fail(`loadouts.${lid}.enabled.${k}`);
             }
             if (typeof l?.overrides !== 'object' || l?.overrides === null) fail(`loadouts.${lid}.overrides`);
-            if (doc.activeLoadoutId === lid) {
-                // every leaf must have an entry
-                for (const leaf of iterLeaves(doc)) {
-                    const id = leaf.ref ?? leaf.identifier;
-                    if (id != null && !(id in (l?.enabled ?? {}))) fail(`loadouts.${lid}.enabled.${id} (missing leaf)`);
+            if (l?.kind !== 'root' && l?.kind !== 'playstyle') {
+                fail(`loadouts.${lid}.kind`);
+            } else if (l.kind === 'root') {
+                anyRoot = true;
+                if (l.parent !== null) fail(`loadouts.${lid}.parent`);
+                // a root covers every leaf
+                for (const id of leafIds) {
+                    if (!(id in (l.enabled ?? {}))) fail(`loadouts.${lid}.enabled.${id} (missing leaf)`);
+                }
+            } else {
+                const parent = typeof l.parent === 'string' ? doc.loadouts[l.parent] : undefined;
+                if (!parent) fail(`loadouts.${lid}.parent`);
+                else if (parent.kind !== 'root') fail(`loadouts.${lid}.parent (parent must be a root)`);
+                for (const k of Object.keys(l.enabled ?? {})) {
+                    if (!leafIds.has(k)) fail(`loadouts.${lid}.enabled.${k} (unknown leaf)`);
+                }
+            }
+            for (const [m, ov] of Object.entries(l?.overrides ?? {})) {
+                const o = /** @type {any} */ (ov);
+                for (const k of Object.keys(o?.enabled ?? {})) {
+                    if (!leafIds.has(k)) fail(`loadouts.${lid}.overrides.${m}.enabled.${k} (unknown leaf)`);
+                }
+                if (o?.tuning !== null && (typeof o?.tuning !== 'string' || !o.tuning)) {
+                    fail(`loadouts.${lid}.overrides.${m}.tuning`);
                 }
             }
         }
+        if (!anyRoot) fail('loadouts (no root loadout)');
     }
     if (doc.activeLoadoutId !== null && (typeof doc.activeLoadoutId !== 'string' || !doc.loadouts?.[doc.activeLoadoutId])) {
         fail('activeLoadoutId');
     }
-    if (typeof doc.tuningOverrides !== 'object' || doc.tuningOverrides === null || Array.isArray(doc.tuningOverrides)) {
-        fail('tuningOverrides');
-    } else {
-        for (const [mid, t] of Object.entries(doc.tuningOverrides)) {
-            for (const k of Object.keys(/** @type {any} */ (t))) {
-                if (!TUNING_KEYS.includes(k)) fail(`tuningOverrides.${mid}.${k}`);
-            }
-        }
-    }
+    if ('tuningOverrides' in doc) fail('tuningOverrides (removed)');
     if (typeof doc.createdAt !== 'string') fail('createdAt');
     if (typeof doc.updatedAt !== 'string') fail('updatedAt');
     if (typeof doc.rev !== 'number') fail('rev');
@@ -209,14 +228,71 @@ export function validateRegistry(reg) {
         if (model?.preferredProfile !== null && typeof model?.preferredProfile !== 'string') {
             errs.push(`models.${name}.preferredProfile`);
         }
-        if (typeof model?.tuning !== 'object' || model?.tuning === null) errs.push(`models.${name}.tuning`);
-        else {
-            for (const k of Object.keys(model.tuning)) {
-                if (!TUNING_KEYS.includes(k)) errs.push(`models.${name}.tuning.${k}`);
+        if ('tuning' in (model ?? {})) errs.push(`models.${name}.tuning (removed)`);
+        const tunings = model?.tunings;
+        if (typeof tunings !== 'object' || tunings === null || Array.isArray(tunings) || Object.keys(tunings).length < 1) {
+            errs.push(`models.${name}.tunings`);
+        } else {
+            for (const [t, values] of Object.entries(tunings)) {
+                if (typeof values !== 'object' || values === null) {
+                    errs.push(`models.${name}.tunings.${t}`);
+                    continue;
+                }
+                for (const k of Object.keys(values)) {
+                    if (!TUNING_KEYS.includes(k)) errs.push(`models.${name}.tunings.${t}.${k}`);
+                }
+            }
+            if (typeof model?.defaultTuning !== 'string' || !Object.hasOwn(tunings, model.defaultTuning)) {
+                errs.push(`models.${name}.defaultTuning`);
             }
         }
     }
     return errs;
+}
+
+/**
+ * Bring a pre-inheritance document up to the current shape, in place:
+ * a loadout without `kind` becomes a complete root; an override without
+ * `tuning` gets `tuning: null`; `tuningOverrides` is dropped. Idempotent;
+ * a loadout that already has a `kind` is left alone.
+ * @param {any} doc
+ * @returns {any} the same doc
+ */
+export function upgradeDoc(doc) {
+    for (const loadout of Object.values(doc?.loadouts ?? {})) {
+        const l = /** @type {any} */ (loadout);
+        if (l.kind === undefined) {
+            l.kind = 'root';
+            l.parent = null;
+            ensureAllLeaves(doc, l.enabled);
+        }
+        for (const override of Object.values(l.overrides ?? {})) {
+            const o = /** @type {any} */ (override);
+            if (o.tuning === undefined) o.tuning = null;
+        }
+    }
+    delete doc.tuningOverrides;
+    return doc;
+}
+
+/**
+ * Bring a pre-named-tunings Model registry up to the current shape, in
+ * place: `tuning` -> `tunings: {default: tuning}` + `defaultTuning:
+ * 'default'`; a Model with neither gets one empty `default` tuning.
+ * Idempotent.
+ * @param {any} reg
+ * @returns {any} the same registry
+ */
+export function upgradeRegistry(reg) {
+    for (const model of Object.values(reg?.models ?? {})) {
+        const m = /** @type {any} */ (model);
+        if (m.tunings === undefined) {
+            m.tunings = { default: m.tuning ?? {} };
+            m.defaultTuning = 'default';
+        }
+        delete m.tuning;
+    }
+    return reg;
 }
 
 /**

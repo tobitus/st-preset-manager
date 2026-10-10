@@ -102,12 +102,20 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 - **Toolbar Model picker** runs `/profile <Switch via profile>`; the preset
   and loadout never change. The tab reports every model/profile change
   (`POST /slot/model {raw}`); the plugin resolves the Model and recompiles.
-- **Tuning panel** (Presets tab): per Model, global tuning or, with
-  *Override for this preset*, the preset's `tuningOverrides[Model]`. ST panel
-  sampler edits go to the override when one exists, else the global.
-- **Loadout override editor** (Presets tab): per loadout × Model, each block
-  inherit/on/off. ST panel toggles go to the override only for blocks it
-  lists; a pick-one option switched on turns its siblings off in the override.
+- **Loadouts inherit** (round 2): a ROOT loadout holds every block's on/off; a
+  PLAYSTYLE names one root as its parent and stores only the bits you set
+  explicitly (everything else follows the root live). A per-Model override
+  sits inside one loadout (root or playstyle) and is never inherited by
+  children. `preset_op` toggles take `loadoutId`; `resetInherit` /
+  `resetAllInherit` drop a playstyle's explicit bits. ST panel ticks go to the
+  override when it lists the block, else to the desired loadout's own layer —
+  never into a playstyle's root.
+- **Named tunings**: each Model has `tunings` (≥ 1, by name) and a
+  `defaultTuning`; a loadout override may bind a tuning by name (`tuning`,
+  null = the default). ST panel sampler edits go to the tuning in effect.
+  Per-preset `tuningOverrides` are gone: old documents and `models.json`
+  convert on load (the first save keeps the old bytes in a revision).
+  (The Presets-tab tuning panel and loadout UI move to this model in B3.)
 - **Profile guard**: a profile that still loads a preset shows a dialog naming
   it; *Unlink* adds `preset` to its `exclude` (in the tab, ST saves it) and
   re-applies the slot. `bind_preset_to_connection` is forced off once at
@@ -115,11 +123,12 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 - **Tidy** (Settings tab): tick the profiles to keep, *Keep selected, delete
   the rest* writes `preset-manager/backups/profiles-<iso>.json` first, then
   deletes in the tab. *Backup profiles* writes the same file on its own.
-- REST added: `PUT /models`, `PUT|PATCH /models/:modelId/tuning`, `POST
+- REST added: `PUT /models`, `PUT|PATCH|DELETE /models/:modelId/tunings/:name`,
+  `POST /models/:modelId/tunings/rename {from,to}`, `PUT
+  /models/:modelId/default-tuning {name}`, `POST
   /models/rename {from,to}`, `POST /models/merge {names,name}`, `POST
-  /models/seed {profiles?}`, `POST /profiles/backup {profiles?}`, `PATCH
-  /presets/:id/tuning-overrides/:modelId` and `PATCH
-  /presets/:id/loadouts/:lid/overrides/:modelId` (`{set?, unset?}`).
+  /models/seed {profiles?}`, `POST /profiles/backup {profiles?}` and `PATCH
+  /presets/:id/loadouts/:lid/overrides/:modelId` (`{set?, unset?, tuning?}`).
   `GET /slot?source&model&profileId` and `POST /slot/panel {…, raw}` compile and
   route for that connection (each tab sends its own; two tabs can sit on
   different Models); `POST /slot/model {raw}` only records the default used
@@ -257,11 +266,11 @@ the REST call.
 | `preset_import` · `preset_save {doc}` · `preset_delete` | `POST /presets` · `PUT /presets/:id` · `DELETE /presets/:id` |
 | `preset_fork` · `preset_move` · `preset_set_meta` | `POST …/fork` · `POST …/move` · `PATCH …/meta` |
 | `preset_op {op, …op args}` | `POST /presets/:id/ops` (every op, `copyBlock` included) |
-| `loadout_create` · `loadout_update` · `loadout_delete` · `loadout_activate` | `POST/PATCH/DELETE /presets/:id/loadouts[/:lid]`, `POST …/activate` |
-| `loadout_set_override` · `loadout_patch_override` · `loadout_delete_override` | `PUT/PATCH/DELETE …/loadouts/:lid/overrides/:modelId` |
-| `tuning_override_set {tuning}` · `tuning_override_patch` · `tuning_override_delete` | `PUT/PATCH/DELETE /presets/:id/tuning-overrides/:modelId` |
+| `loadout_create {name, kind, from?, parent?}` · `loadout_update {name?, notes?, parent?, kind?}` · `loadout_delete` · `loadout_activate` | `POST/PATCH/DELETE /presets/:id/loadouts[/:lid]`, `POST …/activate` |
+| `loadout_set_override {enabled, tuning?}` · `loadout_patch_override {set?, unset?, tuning?}` · `loadout_delete_override` | `PUT/PATCH/DELETE …/loadouts/:lid/overrides/:modelId` |
 | `models_list` · `models_replace {registry}` | `GET /models` · `PUT /models` |
-| `models_set_tuning {tuning}` · `models_patch_tuning` | `PUT/PATCH /models/:modelId/tuning` |
+| `models_set_tuning {name, tuning}` · `models_patch_tuning {name, set?, unset?}` · `models_delete_tuning {name}` | `PUT/PATCH/DELETE /models/:modelId/tunings/:name` |
+| `models_rename_tuning {from, to}` · `models_set_default_tuning {name}` | `POST /models/:modelId/tunings/rename` · `PUT /models/:modelId/default-tuning` |
 | `models_rename` · `models_merge` · `models_seed` | `POST /models/rename` · `/merge` · `/seed` |
 | `profiles_list` · `profiles_backup` | `GET /profiles` · `POST /profiles/backup` |
 | `slot_get` · `slot_load` · `slot_set_model` | `GET /slot` · `POST /slot/load` · `POST /slot/model` |

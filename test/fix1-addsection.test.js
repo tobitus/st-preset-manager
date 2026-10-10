@@ -52,7 +52,7 @@ function mkDoc() {
     Object.assign(at('s2'), { rank: 'section', sname: 'S2' });
     doc.sequences[0].rows = rebuildSeq(entries);
     const active = doc.loadouts[doc.activeLoadoutId];
-    doc.loadouts.L2 = { id: 'L2', name: 'Other', notes: '', enabled: { ...active.enabled }, overrides: {} };
+    doc.loadouts.L2 = { id: 'L2', name: 'Other', notes: '', kind: 'root', parent: null, enabled: { ...active.enabled }, overrides: {} };
     Object.assign(doc, { id: 'p_test', createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z', rev: 1 });
     assert.deepEqual(validateDoc(doc), [], 'fixture doc is valid');
     return doc;

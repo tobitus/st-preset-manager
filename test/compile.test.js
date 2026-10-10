@@ -37,7 +37,11 @@ function fixtureDoc() {
     return doc;
 }
 
-const MODEL = { name: 'Kimi K3', tuning: { temperature: 0.3, top_p: 0.95 } };
+const MODEL = {
+    name: 'Kimi K3',
+    tunings: { default: { temperature: 0.3, top_p: 0.95 }, ov: { temperature: 0.9 } },
+    defaultTuning: 'default',
+};
 
 test('compile: loadout bits drive prompt_order; markers ride verbatim', () => {
     const doc = fixtureDoc();
@@ -66,12 +70,15 @@ test('compile: strips connection keys and preset selector', () => {
     assert.equal('preset_settings_openai' in compiled, false);
 });
 
-test('compile: tunings layer order is global Model -> preset override (items 16+21)', () => {
+test('compile: tunings layer order is the default tuning -> a loadout override bound to a named tuning (items 16+21)', () => {
     const doc = fixtureDoc();
-    doc.tuningOverrides['Kimi K3'] = { temperature: 0.9 };
+    const lid = doc.activeLoadoutId;
+    const dflt = compile(doc, MODEL, {});
+    assert.equal(dflt.compiled.temperature, 0.3); // default tuning applies with no binding
+    assert.equal(dflt.compiled.top_p, 0.95);
+    doc.loadouts[lid].overrides['Kimi K3'] = { enabled: {}, tuning: 'ov' };
     const withModel = compile(doc, MODEL, {});
-    assert.equal(withModel.compiled.temperature, 0.9); // override beats global
-    assert.equal(withModel.compiled.top_p, 0.95); // global fills
+    assert.equal(withModel.compiled.temperature, 0.9); // bound tuning beats the default
     const noModel = compile(doc, null, {});
     assert.equal(noModel.compiled.temperature, 0.7); // document settings survive (imported passthrough)
 });
@@ -80,7 +87,7 @@ test('compile: loadout per-model override applies on top of loadout (item 21)', 
     const doc = fixtureDoc();
     const lid = doc.activeLoadoutId;
     doc.loadouts[lid].enabled.aaa = false;
-    doc.loadouts[lid].overrides['Kimi K3'] = { enabled: { aaa: true, ccc: false } };
+    doc.loadouts[lid].overrides['Kimi K3'] = { enabled: { aaa: true, ccc: false }, tuning: null };
     const { compiled } = compile(doc, MODEL, {});
     const order = Object.fromEntries(compiled.prompt_order[0].order.map((o) => [o.identifier, o.enabled]));
     assert.equal(order.aaa, true); // override wins under Kimi

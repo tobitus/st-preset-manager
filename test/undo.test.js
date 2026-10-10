@@ -216,10 +216,10 @@ test('copyBlock (a _commit write) is undoable', async () => {
 test('a Model rename that migrates the document clears its stacks; other documents keep theirs', async () => {
     const { store, id } = await storeWithDoc();
     const other = await store.importPreset({ st: sampleSt(), name: 'Other' });
-    const entry = (/** @type {string} */ name, /** @type {string} */ mid, /** @type {string} */ model) => ({ id: mid, name, matches: [{ source: 'custom', model }], profiles: [], preferredProfile: null, tuning: {} });
+    const entry = (/** @type {string} */ name, /** @type {string} */ mid, /** @type {string} */ model) => ({ id: mid, name, matches: [{ source: 'custom', model }], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' });
     await store.replaceModels({ version: 1, models: { A: entry('A', 'm_a', 'x/a') } });
     const d = structuredClone(store.getPreset(id));
-    d.loadouts[d.activeLoadoutId].overrides = { A: { enabled: { a: false, b: true } } };
+    d.loadouts[d.activeLoadoutId].overrides = { A: { enabled: { a: false, b: true }, tuning: null } };
     await store.savePreset(d);
     await toggleA(store, other.id);
     assert.deepEqual(store.historyDepth(id), { undo: 1, redo: 0 });

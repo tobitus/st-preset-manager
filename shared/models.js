@@ -31,7 +31,7 @@ export function sourceOfApi(api) {
 /**
  * @param {any} registry { version, models } — name -> Model
  * @param {{ source?: string, model?: string, profileId?: string|null }} raw
- * @returns {any|null} the registry entry (has .name, .tuning, …), or null
+ * @returns {any|null} the registry entry (has .name, .tunings, …), or null
  */
 export function resolveModel(registry, raw) {
     if (!registry?.models || !raw) return null;
@@ -120,7 +120,8 @@ export function seedFromProfiles(profiles, registry = { version: 1, models: {} }
             matches: [{ source, model }],
             profiles: pids,
             preferredProfile,
-            tuning: {},
+            tunings: { default: {} },
+            defaultTuning: 'default',
         };
     }
 
@@ -182,9 +183,10 @@ export function suggestMerges(registry) {
 
 /**
  * Merge two or more Models under one name (owner action). Matches and
- * profiles concatenate (deduped); `preferredProfile` and conflicting
- * tuning keys are decided by the first listed Model. Does not mutate
- * `registry`.
+ * profiles concatenate (deduped); `preferredProfile` and `defaultTuning`
+ * come from the first listed Model; `tunings` union by tuning name, the
+ * first listed Model that has a name supplying that whole tuning record.
+ * Does not mutate `registry`.
  * @param {any} registry { version, models }
  * @param {string[]} names Model names to merge, in precedence order
  * @param {string} newName the merged Model's name (may reuse one of `names`)
@@ -234,9 +236,11 @@ export function mergeModels(registry, names, newName) {
     }
 
     /** @type {Record<string, any>} */
-    const tuning = {};
-    for (let i = src.length - 1; i >= 0; i -= 1) {
-        Object.assign(tuning, src[i].tuning ?? {});
+    const tunings = {};
+    for (const m of src) {
+        for (const [tname, values] of Object.entries(m.tunings ?? {})) {
+            if (!(tname in tunings)) tunings[tname] = structuredClone(values);
+        }
     }
 
     const merged = {
@@ -245,7 +249,8 @@ export function mergeModels(registry, names, newName) {
         matches,
         profiles,
         preferredProfile,
-        tuning,
+        tunings,
+        defaultTuning: src[0].defaultTuning,
     };
 
     const out = structuredClone(registry);

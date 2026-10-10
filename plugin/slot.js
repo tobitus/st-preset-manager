@@ -7,11 +7,12 @@
  * routePanelDiff routes each user change to its layer:
  *
  *   - prompt_order[].enabled for identifier i -> L.overrides[M].enabled[i]
- *     when that override already controls i (i is a key in it), else
- *     L.enabled[i]; a pick-one option turned on turns its siblings off
- *     (within the override when override-routed — completeOverride fills in
- *     and normalises the override's own pick-one groups — within the
- *     loadout otherwise). Bits the delta omits are untouched.
+ *     when that override already controls i (i is a key in it), else the
+ *     desired loadout's OWN layer: a root's L.enabled[i] (a pick-one option
+ *     turned on turns its siblings off) or a playstyle's sparse L.enabled
+ *     (ON writes last + completeOverride, OFF an explicit false; never the
+ *     parent root). Override-routed pick-one groups are filled in and
+ *     normalised by completeOverride. Bits the delta omits are untouched.
  *   - prompt_order SEQUENCE change -> blocks layer: the minimal set of
  *     moved leaves (outside the heaviest in-order chain over ST's order) is
  *     spliced onto the doc's current structure; a document unchanged by the
@@ -19,13 +20,16 @@
  *   - prompt content/name/role/field changes, keyed by identifier+field ->
  *     blocks layer; identifiers absent from the delta are untouched, so a
  *     concurrent API edit to another block's content survives.
- *   - TUNING_KEYS -> D.tuningOverrides[M] if that override exists, else the
- *     Model's global tuning; with no Model resolved -> D.settings + warning.
+ *   - TUNING_KEYS with a Model -> `tuningWrite` for the named tuning in
+ *     effect (the loadout's override binding, else the Model's default),
+ *     which the caller applies to the registry; with no Model resolved ->
+ *     D.settings + warning.
  *   - anything else -> D.settings.
  */
 import { TUNING_KEYS, CONNECTION_KEYS } from '../shared/st-keys.js';
 import { stripConnectionKeys, compile } from '../shared/compile.js';
 import { normalize, completeOverride } from '../shared/groups.js';
+import { tuningNameInEffect } from '../shared/loadouts.js';
 import { flattenSeq, rebuildSeq, syncHeadingNames } from '../shared/outline.js';
 import { reorderEntries } from '../shared/reorder.js';
 
@@ -40,10 +44,12 @@ import { reorderEntries } from '../shared/reorder.js';
  * @param {any} delta SEMANTIC delta from panelDelta(base, snapshot): what
  *   the user changed, keyed per identifier/field/key — never a wholesale
  *   array replacement
- * @param {{ name: string }|null} model resolved Model (or null)
+ * @param {{ name: string, defaultTuning?: string }|null} model resolved Model (or null)
  * @param {string|null} [loadoutId] the loadout the panel is showing
  *   (defaults to doc.activeLoadoutId); enabled bits route there
- * @returns {{ routed: {key: string, layer: string}[], globalTuning: Record<string,any>|null, warnings: string[] }}
+ * @returns {{ routed: {key: string, layer: string}[], tuningWrite: {name: string, values: Record<string,any>}|null, warnings: string[] }}
+ *   tuningWrite = the sampler values the CALLER must merge into the Model's
+ *   named tuning `name` in the registry (null when none)
  */
 
 /**
@@ -156,10 +162,11 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
     const routed = [];
     /** @type {string[]} */
     const warnings = [];
-    let /** @type {Record<string, any>|null} */ globalTuning = null;
+    /** @type {{name: string, values: Record<string, any>}|null} */
+    let tuningWrite = null;
 
     const loadout = doc.loadouts?.[loadoutId ?? doc.activeLoadoutId];
-    if (!loadout) return { routed, globalTuning, warnings: ['document has no active loadout'] };
+    if (!loadout) return { routed, tuningWrite, warnings: ['document has no active loadout'] };
     const overrideModel = model ? loadout.overrides?.[model.name] : undefined;
 
     // ---- prompt_order: order change + per-identifier enabled bits
@@ -194,6 +201,18 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
                 overrideModel.enabled[id] = false;
             }
             routed.push({ key: id, layer: `override:${model?.name}` });
+        } else if (loadout.kind === 'playstyle') {
+            // a playstyle owns a sparse layer: ON writes last (wins its own
+            // pick-one collapse), OFF is an explicit false; never the parent
+            if (on) {
+                const next = { ...loadout.enabled };
+                delete next[id];
+                next[id] = true;
+                loadout.enabled = completeOverride(doc, next);
+            } else {
+                loadout.enabled[id] = false;
+            }
+            routed.push({ key: id, layer: 'loadout' });
         } else {
             loadout.enabled[id] = on;
             routed.push({ key: id, layer: 'loadout' });
@@ -248,14 +267,12 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
         if (key === 'prompts' || key === 'prompt_order') continue;
         if (CONNECTION_KEYS.includes(key)) continue; // never stored
         if (TUNING_KEYS.includes(key)) {
-            const docOverride = doc.tuningOverrides?.[model?.name ?? ''];
-            if (docOverride) {
-                docOverride[key] = delta[key];
-                routed.push({ key, layer: `tuningOverride:${model?.name}` });
-            } else if (model) {
-                if (!globalTuning) globalTuning = {};
-                globalTuning[key] = delta[key];
-                routed.push({ key, layer: `tuning:${model.name}` });
+            if (model) {
+                // the named tuning in effect for the desired loadout: its
+                // override's binding, else the Model's default
+                tuningWrite ??= { name: tuningNameInEffect(loadout, /** @type {any} */ (model)), values: {} };
+                tuningWrite.values[key] = delta[key];
+                routed.push({ key, layer: `tuning:${model.name}/${tuningWrite.name}` });
             } else {
                 doc.settings ??= {};
                 if (delta[key] !== undefined) doc.settings[key] = delta[key];
@@ -273,7 +290,7 @@ export function routePanelDiff(doc, compiled, delta, model, loadoutId = undefine
     // defensive: a doc may already carry connection keys (e.g. routed by an
     // earlier bug or hand-edited); validation refuses them on every save
     for (const k of CONNECTION_KEYS) delete doc.settings[k];
-    return { routed, globalTuning, warnings };
+    return { routed, tuningWrite, warnings };
 }
 
 /**

@@ -61,18 +61,30 @@ interface PmHandle {
         setSlotModel(raw: { source?: string | null; model?: string | null; profileId?: string | null }): Promise<{ changed: boolean; modelChanged: boolean; modelId: string | null }>;
         /** whole-registry replace, validated; never marks the slot changed */
         replaceModels(reg: Record<string, unknown>): Promise<unknown>;
-        /** replace one Model's global tuning wholesale */
-        setModelTuning(name: string, tuning: Record<string, unknown>): Promise<unknown>;
+        /** upsert one named tuning of a Model (replaces that tuning's values wholesale) */
+        setModelTuning(name: string, tuningName: string, values: Record<string, unknown>): Promise<unknown>;
         /** rename a Model, migrating every document reference */
         renameModel(from: string, to: string): Promise<{ models: Record<string, unknown>; migrated: string[] }>;
         /** merge Models under one name, migrating every document reference */
         mergeModelsTx(names: string[], name: string): Promise<{ models: Record<string, unknown>; migrated: string[] }>;
-        /** semantic patch of one Model's global tuning */
-        patchModelTuning(name: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
-        /** semantic patch of a preset's tuning override for a Model; 404 when no override exists */
-        patchTuningOverride(presetId: string, name: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
+        /** semantic patch of one named Model tuning */
+        patchModelTuning(name: string, tuningName: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
+        /** delete a named Model tuning; 409 when it is the default or an override references it */
+        deleteModelTuning(name: string, tuningName: string): Promise<unknown>;
+        /** rename a named Model tuning, migrating every referencing loadout override */
+        renameModelTuning(name: string, from: string, to: string): Promise<{ model: Record<string, unknown>; migrated: string[] }>;
+        /** choose which named tuning a Model uses when a loadout names none */
+        setDefaultTuning(name: string, tuningName: string): Promise<unknown>;
+        /** create a root or playstyle loadout */
+        createLoadout(presetId: string, body: { name: string; kind: 'root' | 'playstyle'; from?: string; parent?: string }): Promise<unknown>;
+        /** rename/annotate a loadout, or change its kind/parent */
+        updateLoadout(presetId: string, lid: string, patch: { name?: string; notes?: string; parent?: string | null; kind?: 'root' | 'playstyle' }): Promise<unknown>;
+        /** delete a loadout; wasDesired when the desired slot pointed at it */
+        deleteLoadout(presetId: string, lid: string): Promise<{ doc: Record<string, unknown>; wasDesired: boolean }>;
+        /** replace a loadout's per-Model override */
+        setLoadoutOverride(presetId: string, lid: string, name: string, body: { enabled: Record<string, unknown>; tuning?: string | null }): Promise<unknown>;
         /** semantic patch of a loadout's per-Model override; 404 when the preset/loadout/override is missing or an id is not a leaf */
-        patchLoadoutOverride(presetId: string, lid: string, name: string, patch: { set?: Record<string, unknown>; unset?: string[] }): Promise<unknown>;
+        patchLoadoutOverride(presetId: string, lid: string, name: string, patch: { set?: Record<string, unknown>; unset?: string[]; tuning?: string | null }): Promise<unknown>;
         /** seed the registry from ST connection profiles */
         seedModels(profiles: unknown[]): Promise<{ added: string[]; models: Record<string, unknown>; mergeSuggestions: string[][] }>;
         /** snapshot profiles verbatim into backups/profiles-<iso>.json */
