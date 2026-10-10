@@ -205,6 +205,70 @@ function opRenameGroup(doc, a) {
 }
 
 /**
+ * Dissolve a group: its heading leaf (if any) and every option become plain
+ * items at the same flat position. Enabled bits, blocks and loadouts are
+ * untouched.
+ * @param {any} doc
+ * @param {{ key?: string }} a
+ */
+function opDissolveGroup(doc, a) {
+    if (typeof a?.key !== 'string') throw new OpError('dissolveGroup needs {key}');
+    const grp = requireGroup(doc, a.key);
+    const keys = new Set([...(grp.header ? [grp.header] : []), ...(grp.options ?? [])].map((/** @type {any} */ l) => l.key));
+    for (const seq of doc.sequences ?? []) {
+        const entries = flattenSeq(seq.rows ?? []);
+        if (!entries.some((e) => keys.has(e.leaf.key))) continue;
+        for (const e of entries) {
+            if (!keys.has(e.leaf.key)) continue;
+            e.rank = 'item';
+            e.gmeta = null;
+            delete e.leaf._gmeta;
+        }
+        seq.rows = rebuildSeq(entries);
+        break;
+    }
+    return { key: a.key };
+}
+
+/**
+ * promote / demote one row ({key}) or several ({keys}, applied in document
+ * order, all-or-nothing).
+ * @param {any} doc
+ * @param {{ key?: string, keys?: string[] }} a
+ * @param {'promote'|'demote'} name
+ * @param {(doc: any, key: string) => void} fn
+ */
+function opLadder(doc, a, name, fn) {
+    if (a?.keys !== undefined) {
+        if (a.key !== undefined) throw new OpError(`${name} takes {key} or {keys}, not both`);
+        const keys = a.keys;
+        if (!Array.isArray(keys) || keys.length === 0 || keys.some((k) => typeof k !== 'string')) {
+            throw new OpError(`${name} needs {keys} as a non-empty array of strings`);
+        }
+        if (new Set(keys).size !== keys.length) throw new OpError(`${name} {keys} must not repeat a key`);
+        for (const k of keys) findRowKey(doc, k);
+        /** @type {Map<string, number>} */
+        const order = new Map();
+        for (const seq of doc.sequences ?? []) {
+            for (const e of flattenSeq(seq.rows ?? [])) order.set(e.leaf.key, order.size);
+        }
+        const ordered = [...keys].sort((x, y) => (order.get(x) ?? 0) - (order.get(y) ?? 0));
+        const saved = structuredClone(doc.sequences);
+        try {
+            for (const k of ordered) fn(doc, k);
+        } catch (err) {
+            doc.sequences = saved;
+            throw err;
+        }
+        return { keys: ordered };
+    }
+    if (typeof a?.key !== 'string') throw new OpError(`${name} needs {key}`);
+    findRowKey(doc, a.key); // unknown key -> 404 before the structural op
+    fn(doc, a.key);
+    return { key: a.key };
+}
+
+/**
  * Identifiers of the group's pick-one members (heading + options; a
  * comment-only heading is no member) that are on in an enabled map.
  * @param {any} doc
@@ -992,18 +1056,8 @@ function dispatchOp(doc, op, a) {
             Object.assign(doc.settings, settings);
             return { keys: Object.keys(settings) };
         }
-        case 'promote': {
-            if (typeof a?.key !== 'string') throw new OpError('promote needs {key}');
-            findRowKey(doc, a.key); // unknown key -> 404 before the structural op
-            promote(doc, a.key);
-            return { key: a.key };
-        }
-        case 'demote': {
-            if (typeof a?.key !== 'string') throw new OpError('demote needs {key}');
-            findRowKey(doc, a.key);
-            demote(doc, a.key);
-            return { key: a.key };
-        }
+        case 'promote': return opLadder(doc, a, 'promote', promote);
+        case 'demote': return opLadder(doc, a, 'demote', demote);
         case 'makeSection': {
             if (typeof a?.key !== 'string') throw new OpError('makeSection needs {key}');
             findRowKey(doc, a.key);
@@ -1032,6 +1086,7 @@ function dispatchOp(doc, op, a) {
         }
         case 'createGroup': return opCreateGroup(doc, a);
         case 'renameGroup': return opRenameGroup(doc, a);
+        case 'dissolveGroup': return opDissolveGroup(doc, a);
         case 'setCardinality': return opSetCardinality(doc, a);
         case 'addOption': return opAddOption(doc, a);
         case 'removeOption': return opRemoveOption(doc, a);

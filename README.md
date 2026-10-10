@@ -330,6 +330,16 @@ Chromium on ST).
   content*, `editBlock`/`renameBlock`, or a rename in ST's panel) or a headed
   group (`renameGroup`, which renames the heading block) keeps the stored
   name in sync; a headerless group keeps its own name.
+- **Row numbers and multi-select**: every row with a block shows its 1-based
+  position in the flat prompt order (headings counted, the same numbers in
+  every view of the preset). Ctrl/Cmd-click adds or removes a row from the
+  selection, Shift-click selects the visible range; with 2+ rows selected
+  Promote / Demote send ONE op carrying all keys (`{keys}`, applied in
+  document order, all-or-nothing).
+- **Group card**: clicking a group row (headerless "(options)" groups too)
+  shows the group in the editor pane: rename it (`renameGroup`), switch
+  1 ↔ N (`setCardinality`) and *Dissolve* it (`dissolveGroup`: heading and
+  options become plain rows in place; order, switches and loadouts are kept).
 - **Search**: names + content, case-insensitive, client-side over the loaded
   document; a match count, Enter / Shift+Enter walk the matches (the editor
   follows), *Filter* keeps only matches and their ancestor headings, and a

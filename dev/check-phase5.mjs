@@ -411,7 +411,7 @@ async function main() {
     await check('2f the Diff pane takes no space under the other tabs, and only the Diff pane shows under Diff', async () => {
         const panes = () => probe.eval(`[...document.querySelectorAll('#pm-window .pm-pane')].map((p) => ({ pane: p.dataset.pane, hidden: p.hidden, display: getComputedStyle(p).display, h: Math.round(p.getBoundingClientRect().height) }))`);
         const out = [];
-        for (const tab of ['library', 'presets', 'io', 'settings', 'diff']) {
+        for (const tab of ['library', 'presets', 'settings', 'diff']) {
             await showTab(tab);
             const ps = await panes();
             const shown = ps.filter((/** @type {any} */ p) => p.display !== 'none');

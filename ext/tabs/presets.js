@@ -35,7 +35,7 @@
 import { api, ctx, slotPath, loadSlot } from '../st.js';
 import { activeNotice } from '../active.js';
 import { createOutline } from './outline.js';
-import { createEditor } from './editor.js';
+import { createEditor, findGroupRow } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
 import { findLeaf, headingAction, searchMatches } from '../outline-model.js';
@@ -92,6 +92,13 @@ export function createPresetsTab(pane, bridge) {
     let /** @type {string|null} */ active = null;
     const /** @type {Map<string, any>} */ docs = new Map();
     const /** @type {Map<string, string|null>} */ selected = new Map();
+    /** the whole multi-selection per preset (primary key included); mirrors `selected` */
+    const /** @type {Map<string, Set<string>>} */ multi = new Map();
+    /** Select exactly one key (or nothing) for a preset. */
+    function setSelection(/** @type {string} */ id, /** @type {string|null} */ key) {
+        selected.set(id, key);
+        multi.set(id, key ? new Set([key]) : new Set());
+    }
     let /** @type {PresetView|null} */ view = null;
     let /** @type {any} */ refreshTimer = undefined;
     let shelfOpen = false;
@@ -206,7 +213,7 @@ export function createPresetsTab(pane, bridge) {
         }
         if (openIds.includes(presetId)) return true; // opened while we awaited
         docs.set(presetId, doc);
-        selected.set(presetId, null);
+        setSelection(presetId, null);
         openIds.push(presetId);
         saveOpenState();
         return true;
@@ -227,6 +234,7 @@ export function createPresetsTab(pane, bridge) {
         openIds.splice(idx, 1);
         docs.delete(id);
         selected.delete(id);
+        multi.delete(id);
         if (active === id) {
             active = null;
             destroyView();
@@ -349,8 +357,9 @@ export function createPresetsTab(pane, bridge) {
             delTimer: null,
             ac: new AbortController(),
             outline: createOutline(outlineEl, {
-                onSelect: (/** @type {string|null} */ key) => {
-                    selected.set(id, key);
+                onSelect: (/** @type {string[]} */ keys) => {
+                    selected.set(id, keys.at(-1) ?? null);
+                    multi.set(id, new Set(keys));
                     refreshView();
                 },
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
@@ -367,6 +376,7 @@ export function createPresetsTab(pane, bridge) {
             }),
             editor: createEditor(editorEl, {
                 onOps: (/** @type {any[]} */ ops) => runOps(id, ops),
+                onCardinality: (/** @type {string} */ key, /** @type {'pick-one'|'pick-one-or-more'} */ c) => cardinalityOp(id, key, c),
             }),
             notesGuard: createEditGuard(),
             deleteArmed: false,
@@ -435,7 +445,7 @@ export function createPresetsTab(pane, bridge) {
             nextView.search.index = ev.shiftKey
                 ? (nextView.search.index <= 0 ? n - 1 : nextView.search.index - 1)
                 : (nextView.search.index + 1) % n;
-            selected.set(id, matches[nextView.search.index]);
+            setSelection(id, matches[nextView.search.index]);
             refreshView();
             scrollToKey(matches[nextView.search.index]);
         });
@@ -479,6 +489,11 @@ export function createPresetsTab(pane, bridge) {
     function rankOp(/** @type {string} */ id, op, delta = 0) {
         const key = selected.get(id);
         if (!key) return;
+        const keys = multi.get(id);
+        if (op !== 'moveLeaf' && keys && keys.size >= 2) {
+            void runOps(id, [{ op, keys: [...keys] }]).catch(() => {});
+            return;
+        }
         void runOps(id, [op === 'moveLeaf' ? { op, key, delta } : { op, key }]).catch(() => {});
     }
 
@@ -584,7 +599,7 @@ export function createPresetsTab(pane, bridge) {
         try {
             const res = await bridge.edit(() => api('POST', `/presets/${id}/ops`, op));
             setDoc(id, res.doc);
-            selected.set(id, res.result?.key ?? null);
+            setSelection(id, res.result?.key ?? null);
             setStatus('');
             refreshView();
             if (res.result?.key) scrollToKey(res.result.key);
@@ -608,7 +623,7 @@ export function createPresetsTab(pane, bridge) {
             }));
             setDoc(id, res.doc);
             const newKey = res.keys?.[0] ?? null;
-            selected.set(id, newKey);
+            setSelection(id, newKey);
             const name = g.found.block?.name || g.found.identifier;
             setStatus(`Duplicated "${name}"`);
             refreshView();
@@ -650,7 +665,7 @@ export function createPresetsTab(pane, bridge) {
         try {
             const res = await bridge.edit(() => api('POST', `/presets/${id}/ops`, { op: 'deleteBlock', identifier: g.found.identifier }));
             setDoc(id, res.doc);
-            selected.set(id, null);
+            setSelection(id, null);
             setStatus(`Deleted "${name}"`);
             refreshView();
         } catch (err) {
@@ -746,12 +761,24 @@ export function createPresetsTab(pane, bridge) {
         const doc = docs.get(view.id);
         if (!doc) return;
         refreshLoadoutBar(doc);
-        const key = selected.get(view.id) ?? null;
-        for (const b of view.rankButtons) b.disabled = !key;
+        let key = selected.get(view.id) ?? null;
+        if (key?.startsWith('grp:') && !findGroupRow(doc, key)) {
+            // the group row is gone (e.g. dissolved): clear the selection
+            setSelection(view.id, null);
+            key = null;
+        }
+        const onGroup = !!key?.startsWith('grp:');
+        for (const b of view.rankButtons) b.disabled = !key || onGroup;
         updateHeadingButtons(view, doc, key);
-        view.shelfSaveBtn.disabled = !key;
+        view.makeSectionBtn.disabled = onGroup;
+        view.makeGroupBtn.disabled = onGroup;
+        view.shelfSaveBtn.disabled = !key || onGroup;
         if (view.delArmedKey && view.delArmedKey !== key) disarmDelete();
         updateBlockActionButtons(view, doc, key);
+        if (onGroup) {
+            view.dupBtn.disabled = true;
+            view.delBtn.disabled = true;
+        }
         if (!view.notesGuard.dirty) view.notes.value = doc.notes ?? '';
         const q = view.search.query.trim();
         const matches = q ? searchMatches(doc, q) : [];
@@ -765,6 +792,7 @@ export function createPresetsTab(pane, bridge) {
                     : `${view.search.index + 1}/${matches.length}`));
         view.outline.render(doc, key, {
             collapsed: view.collapsed,
+            selectedKeys: multi.get(view.id),
             search: q ? { keys: new Set(matches), current: view.search.index >= 0 ? matches[view.search.index] : null, filter: view.search.filter } : undefined,
         });
         view.editor.show(doc, key);

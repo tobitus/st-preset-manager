@@ -18,17 +18,44 @@
  * `.value` / `textContent` — never innerHTML.
  */
 import { findLeaf } from '../outline-model.js';
+import { containerName } from '../../shared/outline.js';
+
+/**
+ * The `kind:'group'` row with `key`, anywhere in the doc's sequences
+ * (recursing into sections).
+ * @param {any} doc
+ * @param {string} key
+ * @returns {any|null}
+ */
+export function findGroupRow(doc, key) {
+    /** @param {any[]|undefined} rows @returns {any|null} */
+    const walk = (rows) => {
+        for (const row of rows ?? []) {
+            if (row.kind === 'group' && row.key === key) return row;
+            if (row.kind === 'section') {
+                const hit = walk(row.rows);
+                if (hit) return hit;
+            }
+        }
+        return null;
+    };
+    for (const seq of doc.sequences ?? []) {
+        const hit = walk(seq.rows);
+        if (hit) return hit;
+    }
+    return null;
+}
 
 /**
  * @param {HTMLElement} container the `.pm-editor` element
- * @param {{ onOps(ops: any[]): Promise<void> }} handlers
+ * @param {{ onOps(ops: any[]): Promise<void>, onCardinality(key: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
  * @returns {{ show(doc: any, key: string|null): void }}
  */
 export function createEditor(container, handlers) {
     /** @type {string|null|undefined} */
     let shownKey;
     let rendered = false;
-    /** @type {'empty'|'readonly'|'block'} */
+    /** @type {'empty'|'readonly'|'block'|'group'} */
     let mode = 'empty';
     let dirtyContent = false;
     let dirtyNotes = false;
@@ -37,6 +64,8 @@ export function createEditor(container, handlers) {
     let renderSeq = 0;
     /** @type {{ identifier: string, name: any, role: any, content: any, notes: any }|null} */
     let blockView = null;
+    /** @type {{ group: any, count: any, name: any, card: any }|null} */
+    let groupView = null;
 
     /**
      * Small DOM helper: everything user-controlled is set via textContent.
@@ -160,10 +189,117 @@ export function createEditor(container, handlers) {
     }
 
     /**
+     * @param {any} group a `kind:'group'` row
+     * @returns {string} the group's member count line
+     */
+    function groupCount(group) {
+        const n = (group.options ?? []).length;
+        return `${n} option${n === 1 ? '' : 's'}`;
+    }
+
+    /**
+     * @param {any} group
+     * @returns {{ text: string, title: string, next: 'pick-one'|'pick-one-or-more' }}
+     */
+    function cardInfo(group) {
+        const one = group.cardinality === 'pick-one';
+        return {
+            text: one ? '1' : 'N',
+            title: one ? 'Pick one — click to allow many' : 'Pick many — click to allow one',
+            next: one ? 'pick-one-or-more' : 'pick-one',
+        };
+    }
+
+    /**
+     * The group card: name + Rename, the 1/N cardinality toggle, Dissolve.
+     * @param {any} doc
+     * @param {any} group a `kind:'group'` row
+     */
+    function renderGroup(doc, group) {
+        renderSeq++;
+        const key = group.key;
+        const header = el('div', 'pm-group-header');
+        const title = el('span', 'pm-group-title', 'Group');
+        const count = el('span', 'pm-group-count pm-muted', groupCount(group));
+        header.append(title, ' ', count);
+
+        const name = el('input', 'pm-group-name text_pole');
+        name.type = 'text';
+        name.value = containerName(doc, group) ?? '';
+        name.addEventListener('input', () => { dirtyContent = true; });
+
+        const renameBtn = el('button', 'pm-group-rename menu_button', 'Rename');
+        renameBtn.addEventListener('click', () => {
+            renameBtn.disabled = true;
+            void (async () => {
+                await handlers.onOps([{ op: 'renameGroup', key, name: name.value }]);
+                dirtyContent = false;
+            })().catch(() => {
+                // rejected rename keeps the typed name
+            }).finally(() => {
+                renameBtn.disabled = false;
+            });
+        });
+
+        const info = cardInfo(group);
+        const card = el('button', 'pm-group-card menu_button', info.text);
+        card.type = 'button';
+        card.title = info.title;
+        card.addEventListener('click', () => {
+            const g = groupView?.group;
+            if (g) handlers.onCardinality(key, cardInfo(g).next);
+        });
+
+        const dissolve = el('button', 'pm-group-dissolve menu_button', 'Dissolve');
+        dissolve.title = 'Make every option a plain row (and the heading, if any)';
+        dissolve.addEventListener('click', () => {
+            void handlers.onOps([{ op: 'dissolveGroup', key }]).catch(() => {});
+        });
+
+        mode = 'group';
+        blockView = null;
+        dirtyContent = false;
+        dirtyNotes = false;
+        groupView = { group, count, name, card };
+        container.replaceChildren(header, name, renameBtn, card, dissolve);
+    }
+
+    /**
+     * Same group, new doc: refresh count/card, and the name unless typed into.
+     * @param {any} doc
+     * @param {any} group
+     */
+    function updateGroup(doc, group) {
+        if (!groupView) return;
+        groupView.group = group;
+        groupView.count.textContent = groupCount(group);
+        const info = cardInfo(group);
+        groupView.card.textContent = info.text;
+        groupView.card.title = info.title;
+        if (!dirtyContent) groupView.name.value = containerName(doc, group) ?? '';
+    }
+
+    /**
      * @param {any} doc
      * @param {string|null} key
      */
     function show(doc, key) {
+        if (key?.startsWith('grp:')) {
+            const group = findGroupRow(doc, key);
+            if (!rendered || key !== shownKey || mode !== 'group') {
+                shownKey = key;
+                rendered = true;
+                if (!group) renderEmpty();
+                else renderGroup(doc, group);
+                return;
+            }
+            if (!group) {
+                renderEmpty();
+                return;
+            }
+            updateGroup(doc, group);
+            return;
+        }
         const found = key === null ? null : findLeaf(doc, key);
         if (!rendered || key !== shownKey) {
             shownKey = key;

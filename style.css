@@ -1326,3 +1326,33 @@ table.pm-diff-sbs tr.pm-sbs-hunk-head td {
     cursor: grabbing;
     opacity: 1;
 }
+
+/* flat row numbers (outline) */
+.pm-row-num {
+    flex: none;
+    min-width: 2.2em;
+    margin-right: 4px;
+    text-align: right;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    opacity: 0.55;
+    user-select: none;
+}
+
+/* group card (editor) */
+.pm-group-header {
+    font-weight: bold;
+}
+
+.pm-group-header .pm-group-count {
+    font-weight: normal;
+}
+
+.pm-editor .pm-group-name {
+    width: 100%;
+}
+
+.pm-editor .pm-group-card {
+    min-width: 2.2em;
+    font-weight: bold;
+}

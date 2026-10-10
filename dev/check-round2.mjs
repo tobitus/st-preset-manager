@@ -214,6 +214,149 @@ async function sectionA1() {
     });
 }
 
+// ------------------------------------------------------------------ a2
+
+/** Real mouse click at an element's centre (scrolled into view), with CDP modifiers (2 = Ctrl, 8 = Shift). */
+async function mouseClickSel(/** @type {string} */ sel, modifiers = 0) {
+    await probe.eval(`document.querySelector(${J(sel)})?.scrollIntoView({ block: 'center' })`);
+    await sleep(100);
+    const p = await probe.eval(`(() => { const el = document.querySelector(${J(sel)}); if (!el) return null; const b = el.getBoundingClientRect(); return { x: b.x + Math.min(b.width / 2, 40), y: b.y + b.height / 2 }; })()`);
+    if (!p) throw new Error(`no element ${sel}`);
+    await probe.cdp('Input.dispatchMouseEvent', { type: 'mouseMoved', x: p.x, y: p.y, modifiers });
+    await probe.cdp('Input.dispatchMouseEvent', { type: 'mousePressed', x: p.x, y: p.y, button: 'left', buttons: 1, clickCount: 1, modifiers });
+    await probe.cdp('Input.dispatchMouseEvent', { type: 'mouseReleased', x: p.x, y: p.y, button: 'left', buttons: 0, clickCount: 1, modifiers });
+}
+
+/** Record page POSTs to /ops (full bodies) from now on. */
+const recordOps = () => probe.eval(`(() => {
+    window.__chkOps = [];
+    window.__chkFetch0 = window.__chkFetch0 ?? window.fetch;
+    const orig = window.__chkFetch0;
+    window.fetch = (...args) => {
+        const url = String(args[0]?.url ?? args[0]);
+        if (url.includes('/api/plugins/st-preset-manager/presets/') && url.endsWith('/ops') && (args[1]?.method ?? 'GET') === 'POST') {
+            try { window.__chkOps.push(JSON.parse(String(args[1]?.body ?? '{}'))); } catch { window.__chkOps.push('?'); }
+        }
+        return orig(...args);
+    };
+    return true; })()`);
+const opsSeen = () => probe.eval('window.__chkOps ?? []');
+
+/** The li selector of the headerless group that has the leaf `key` among its options. */
+const hlessLi = (/** @type {string} */ key) => `${view(ids.sola)} li.pm-node[data-kind="group"][data-key^="grp:"]:has(> ul.pm-list > li.pm-node[data-key="${key}"])`;
+
+async function sectionA2() {
+    await showTab('presets');
+    await until(() => exists(`${view(ids.sola)} .pm-outline li.pm-node`), 10000, 'Sola view');
+    const doc0 = await getDoc(ids.sola);
+    const f0 = flat(doc0);
+    // two adjacent top-level plain blocks become a headerless group (REST)
+    const i0 = f0.findIndex((e, i) => i > 2 && e.rank === 'item' && e.leaf.kind === 'block' && f0[i + 1]?.rank === 'item' && f0[i + 1]?.leaf.kind === 'block');
+    must(i0 > 0, 'no two adjacent plain blocks in Sola');
+    const [KA, KB] = [f0[i0].leaf.key, f0[i0 + 1].leaf.key];
+
+    await check('a2 every outline row with a leaf shows .pm-row-num = its 1-based flat position', async () => {
+        await until(async () => {
+            const got = await probe.eval(`[...document.querySelectorAll(${J(`${view(ids.sola)} .pm-outline li.pm-node`)})]
+                .filter((li) => li.dataset.kind === 'leaf' || (li.dataset.key && !li.dataset.key.startsWith('grp:')))
+                .map((li) => [li.dataset.key, li.querySelector(':scope > .pm-row .pm-row-num')?.textContent?.trim() ?? null, li.dataset.pos ?? null])`);
+            const want = flat(await getDoc(ids.sola)).map((e, i) => [e.leaf.key, String(i + 1), String(i + 1)]);
+            return J(got) === J(want) ? got : null;
+        }, 8000, 'row numbers 1..N in flat order');
+        return `${f0.length} rows numbered 1..${f0.length} in flat order (data-pos matches)`;
+    });
+
+    await check('a2 clicking a headerless group row selects it; the editor shows rename / 1-N / Dissolve; Dissolve posts exactly one op', async () => {
+        must((await op(ids.sola, { op: 'demote', keys: [KA, KB] })).status === 200, 'REST demote {keys} failed');
+        const li = hlessLi(KA);
+        await until(() => exists(li), 8000, 'headerless group renders');
+        const groupKey = await probe.eval(`document.querySelector(${J(li)}).dataset.key`);
+        const nameSel = `${li} > .pm-row .pm-name`;
+        await mouseClickSel((await exists(nameSel)) ? nameSel : `${li} > .pm-row`);
+        await until(() => exists(`${li} > .pm-row.pm-selected`), 5000, 'group row selected');
+        for (const c of ['.pm-group-name', '.pm-group-rename', '.pm-group-card', '.pm-group-dissolve']) {
+            await until(() => exists(`${view(ids.sola)} ${c}`), 5000, `editor ${c}`);
+        }
+        const cardText = (await text(`${view(ids.sola)} .pm-group-card`))?.trim();
+        await shot('round2-a2-group-card.png');
+        const loadouts0 = J((await getDoc(ids.sola)).loadouts);
+        const ids0 = flat(await getDoc(ids.sola)).map((e) => e.leaf.key);
+        await recordOps();
+        await click(`${view(ids.sola)} .pm-group-dissolve`);
+        const d1 = await until(async () => {
+            const d = await getDoc(ids.sola);
+            return flat(d).find((e) => e.leaf.key === KA)?.rank === 'item' ? d : null;
+        }, 8000, 'options are plain items');
+        await sleep(500);
+        const seen = await opsSeen();
+        must(J(seen) === J([{ op: 'dissolveGroup', key: groupKey }]), `ops ${J(seen)}`);
+        must(flat(d1).find((e) => e.leaf.key === KB)?.rank === 'item', 'second option not a plain item');
+        must(J(flat(d1).map((e) => e.leaf.key)) === J(ids0), 'flat order changed');
+        must(J(d1.loadouts) === loadouts0, 'loadouts changed');
+        const topLevel = (/** @type {string} */ k) => probe.eval(`(() => { const el = document.querySelector(${J(`${rowLi(ids.sola, k)}[data-kind="leaf"]`)}); return !!el && !el.parentElement.closest('li.pm-node'); })()`);
+        await until(async () => !(await exists(li)) && await topLevel(KA) && await topLevel(KB), 8000, 'group row gone, options top-level');
+        return `group ${groupKey} selected (card shows ${J(cardText)}); Dissolve -> ops ${J(seen)}; ${KA}/${KB} are top-level items, order + loadouts unchanged`;
+    });
+
+    await check('a2 Ctrl-click two rows, Promote: one promote op carrying both keys', async () => {
+        await mouseClickSel(`${rowLi(ids.sola, KA)} > .pm-row .pm-name`);
+        await until(() => exists(`${rowLi(ids.sola, KA)} > .pm-row.pm-selected`), 5000, 'A selected');
+        await mouseClickSel(`${rowLi(ids.sola, KB)} > .pm-row .pm-name`, 2);
+        await until(async () => await exists(`${rowLi(ids.sola, KA)} > .pm-row.pm-selected`) && await exists(`${rowLi(ids.sola, KB)} > .pm-row.pm-selected`), 5000, 'A and B selected');
+        await recordOps();
+        await click(`${view(ids.sola)} .pm-rank-promote`);
+        const d = await until(async () => {
+            const doc = await getDoc(ids.sola);
+            const r = (/** @type {string} */ k) => flat(doc).find((e) => e.leaf.key === k)?.rank;
+            return r(KA) === 'group' && r(KB) === 'group' ? doc : null;
+        }, 8000, 'both rows are group headings');
+        await sleep(500);
+        const seen = await opsSeen();
+        must(seen.length === 1 && seen[0].op === 'promote' && J([...seen[0].keys].sort()) === J([KA, KB].sort()), `ops ${J(seen)}`);
+        await shot('round2-a2-multiselect.png');
+        // restore plain rows (REST)
+        must((await op(ids.sola, { op: 'demote', keys: [KA, KB] })).status === 200, 'restore demote failed');
+        return `ops ${J(seen)}; ranks ${J([KA, KB].map((k) => flat(d).find((e) => e.leaf.key === k)?.rank))}`;
+    });
+
+    await check('a2 group card on a headerless group: Rename sets its name; 1/N flips it; its pick-one switch reaches ST\'s loaded preset', async () => {
+        // A on, B off, then one headerless pick-one-or-more group of the two (REST)
+        const [IA, IB] = [identOf(f0[i0].leaf), identOf(f0[i0 + 1].leaf)];
+        must((await op(ids.sola, { op: 'toggle', identifier: IA, value: true })).status === 200, `toggle ${IA} on failed`);
+        must((await op(ids.sola, { op: 'toggle', identifier: IB, value: false })).status === 200, `toggle ${IB} off failed`);
+        must((await op(ids.sola, { op: 'demote', keys: [KA, KB] })).status === 200, 'REST demote {keys} failed');
+        const li = hlessLi(KA);
+        await until(() => exists(li), 8000, 'headerless group renders');
+        const groupKey = await probe.eval(`document.querySelector(${J(li)}).dataset.key`);
+        const groupRow = async () => (await getDoc(ids.sola)).sequences[0].rows.find((/** @type {any} */ r) => r.key === groupKey);
+        must((await groupRow())?.cardinality === 'pick-one-or-more', `group ${groupKey} not pick-one-or-more`);
+        const stOn = async () => {
+            const order = (await st()).order;
+            return [IA, IB].filter((i) => order.find((/** @type {any} */ o) => o.identifier === i)?.enabled);
+        };
+        await until(async () => J(await stOn()) === J([IA]), 10000, 'ST shows A on, B off');
+        await mouseClickSel(`${li} > .pm-row`);
+        await until(() => exists(`${li} > .pm-row.pm-selected`), 5000, 'group row selected');
+        await until(() => exists(`${view(ids.sola)} .pm-group-name`), 5000, 'group card');
+        const NAME = 'Round2 Options';
+        await probe.eval(`(() => { const el = document.querySelector(${J(`${view(ids.sola)} .pm-group-name`)}); el.value = ${J(NAME)}; el.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`);
+        await click(`${view(ids.sola)} .pm-group-rename`);
+        await until(async () => (await groupRow())?.name === NAME, 8000, 'group renamed in the doc');
+        await until(async () => (await text(`${li} > .pm-row`))?.includes(NAME), 8000, 'outline shows the new group name');
+        await click(`${view(ids.sola)} .pm-group-card`);
+        await until(async () => (await groupRow())?.cardinality === 'pick-one', 8000, 'cardinality pick-one');
+        await until(() => exists(`${rowLi(ids.sola, KB)} > .pm-row input.pm-switch[type="radio"]`), 8000, 'options render as radios');
+        await mouseClickSel(`${rowLi(ids.sola, KB)} > .pm-row input.pm-switch`);
+        const on1 = await until(async () => { const on = await stOn(); return J(on) === J([IB]) ? on : null; }, 10000, 'ST loaded preset shows only B on');
+        await mouseClickSel(`${li} > .pm-row`);
+        await until(() => exists(`${view(ids.sola)} .pm-group-card`), 5000, 'group card again');
+        await click(`${view(ids.sola)} .pm-group-card`);
+        await until(async () => (await groupRow())?.cardinality === 'pick-one-or-more', 8000, 'cardinality back to pick-one-or-more');
+        must((await op(ids.sola, { op: 'dissolveGroup', key: groupKey })).status === 200, `cleanup dissolveGroup ${groupKey} failed`);
+        return `group ${groupKey} renamed ${J(NAME)}; N -> 1; clicking B's radio: ST enabled among ${J([IA, IB])} = ${J(on1)}; 1 -> N; dissolved`;
+    });
+}
+
 // ------------------------------------------------------------------ main
 
 async function main() {
@@ -254,6 +397,7 @@ async function main() {
     report('setup: reset, FF + Sola imported, Sola in the slot and open, clean pm.* localStorage', true, `ff=${ids.ff} sola=${ids.sola}`);
 
     if (wanted('a1')) await sectionA1();
+    if (wanted('a2')) await sectionA2();
 
     finish();
 }

@@ -327,10 +327,12 @@ export function makeRouter() {
     // (setContent/editBlock/setBlockNotes/renameBlock/addBlock/addSection/
     // deleteBlock — addSection inserts a new empty section heading, ON in
     // the active loadout), and settings/notes (setSettings/setNotes — notes
-    // are library-only and never compiled).
+    // are library-only and never compiled). dissolveGroup turns a group's
+    // heading and options into plain items; promote/demote take {key} or
+    // {keys} (several rows, document order, all-or-nothing).
     const OPS = /** @type {const} */ ([
         'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'makeSection', 'unmakeSection', 'moveLeaf',
-        'createGroup', 'renameGroup', 'addOption', 'removeOption',
+        'createGroup', 'renameGroup', 'dissolveGroup', 'addOption', 'removeOption',
         'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'deleteBlock',
         'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock',
     ]);

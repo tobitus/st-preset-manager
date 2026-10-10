@@ -369,7 +369,7 @@ async function main() {
         if (g0.cardinality !== 'pick-one-or-more') {
             must((await op(ids.sola, { op: 'setCardinality', key: g0.key, cardinality: 'pick-one-or-more' })).status === 200, 'REST setCardinality pick-one-or-more failed');
         }
-        const li = `${view(ids.sola)} li.pm-node[data-kind="group"][data-key=""]:has(> ul.pm-list > li.pm-node[data-key="${K}"])`;
+        const li = `${view(ids.sola)} li.pm-node[data-kind="group"][data-key^="grp:"]:has(> ul.pm-list > li.pm-node[data-key="${K}"])`;
         await until(() => exists(li), 10000, 'headerless group renders');
         await until(async () => (await badgeText(li)) === 'N', 8000, 'headerless badge shows N');
         must((await probe.eval(`document.querySelector(${J(badge(li))}).dataset.next`)) === 'pick-one', 'badge data-next is not pick-one');

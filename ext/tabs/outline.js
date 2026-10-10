@@ -130,9 +130,28 @@ function noneLabel(node) {
     return label;
 }
 
-/** @param {string|null} selectedKey @returns {string} row class suffix for the selected key */
-function selectedSuffix(key, selectedKey) {
-    return key && key === selectedKey ? ' pm-selected' : '';
+/**
+ * @param {string} key
+ * @param {string|null} selectedKey
+ * @param {RenderCtx} ctx
+ * @returns {string} row class suffix for the selected key(s)
+ */
+function selectedSuffix(key, selectedKey, ctx) {
+    return key && (key === selectedKey || ctx.selected?.has(key)) ? ' pm-selected' : '';
+}
+
+/**
+ * The row-number span (flat position); also records it as `li.dataset.pos`.
+ * @param {HTMLElement} li
+ * @param {number|undefined} pos
+ * @returns {HTMLSpanElement}
+ */
+function numSpan(li, pos) {
+    const s = document.createElement('span');
+    s.className = 'pm-row-num';
+    s.textContent = String(pos ?? '');
+    li.dataset.pos = String(pos ?? '');
+    return s;
 }
 
 /**
@@ -144,6 +163,7 @@ function selectedSuffix(key, selectedKey) {
  * per row).
  * @typedef {Object} RenderCtx
  * @property {Set<string>} collapsed
+ * @property {Set<string>} selected
  * @property {{ keys: Set<string>, current: string|null, filter: boolean }|undefined} search
  * @property {boolean} searchActive
  * @property {WeakMap<Node, boolean>} matches
@@ -206,11 +226,11 @@ function leafLi(node, selectedKey, ctx) {
     li.dataset.identifier = node.identifier ?? '';
     li.dataset.nodeKey = node.key;
     const row = document.createElement('div');
-    row.className = 'pm-row' + selectedSuffix(node.key, selectedKey);
+    row.className = 'pm-row' + selectedSuffix(node.key, selectedKey, ctx);
     const spacer = document.createElement('span');
     spacer.className = 'pm-caret-spacer';
     spacer.setAttribute('aria-hidden', 'true');
-    row.append(spacer, handleSpan(), makeSwitch(node), nameSpan(node.name));
+    row.append(spacer, handleSpan(), numSpan(li, node.pos), makeSwitch(node), nameSpan(node.name));
     applySearchMatch(row, node.key, ctx);
     li.append(row);
     if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
@@ -233,11 +253,11 @@ function groupLi(node, selectedKey, ctx) {
     const li = document.createElement('li');
     li.className = 'pm-node';
     li.dataset.kind = 'group';
-    li.dataset.key = key;
+    li.dataset.key = node.header ? key : node.key;
     li.dataset.identifier = node.header?.identifier ?? '';
     li.dataset.nodeKey = node.key;
     const row = document.createElement('div');
-    row.className = 'pm-row pm-group-row' + selectedSuffix(key, selectedKey);
+    row.className = 'pm-row pm-group-row' + selectedSuffix(li.dataset.key ?? '', selectedKey, ctx);
     const caret = caretSpan();
     const collapsedDisplay = !!ctx.collapsed?.has(node.key)
         && !(ctx.searchActive && ctx.matches.get(node));
@@ -245,6 +265,7 @@ function groupLi(node, selectedKey, ctx) {
     row.append(caret);
     if (node.header) {
         row.append(handleSpan());
+        row.append(numSpan(li, node.header.pos));
         if (node.headerSwitch) row.append(makeSwitch(node.header));
         row.append(nameSpan(node.header.name));
         if (node.header.hasContent) row.append(sendsTextSpan());
@@ -286,7 +307,7 @@ function sectionLi(node, selectedKey, ctx) {
     li.dataset.identifier = node.header?.identifier ?? '';
     li.dataset.nodeKey = node.key;
     const row = document.createElement('div');
-    row.className = 'pm-row pm-section-row' + selectedSuffix(key, selectedKey);
+    row.className = 'pm-row pm-section-row' + selectedSuffix(key, selectedKey, ctx);
     const caret = caretSpan();
     const collapsedDisplay = !!ctx.collapsed?.has(node.key)
         && !(ctx.searchActive && ctx.matches.get(node));
@@ -294,6 +315,7 @@ function sectionLi(node, selectedKey, ctx) {
     row.append(caret);
     if (node.header) {
         row.append(handleSpan());
+        row.append(numSpan(li, node.header.pos));
         if (!node.header.commentOnly) row.append(makeSwitch(node.header));
     }
     row.append(nameSpan(node.name || node.header?.name || '(section)'));
@@ -323,6 +345,17 @@ function renderNode(node, selectedKey, ctx) {
 }
 
 /**
+ * The li's own leaf key as the drag/anchor code sees it: a headerless group's
+ * `grp:…` selection key counts as no key ('').
+ * @param {HTMLElement} li
+ * @returns {string}
+ */
+function ownLeafKey(li) {
+    const k = li?.dataset?.key ?? '';
+    return k.startsWith('grp:') ? '' : k;
+}
+
+/**
  * @param {Element} ul
  * @returns {(string|null)[]} direct li.pm-node children's data-key ('' -> null)
  */
@@ -330,7 +363,7 @@ function listKeys(ul) {
     const keys = [];
     for (const el of ul.children) {
         if (el instanceof Element && el.matches('li.pm-node')) {
-            keys.push(/** @type {HTMLElement} */ (el).dataset.key || null);
+            keys.push(ownLeafKey(/** @type {HTMLElement} */ (el)) || null);
         }
     }
     return keys;
@@ -354,7 +387,7 @@ function isNode(el) {
  *   a headerless GROUP the search descended into.
  */
 function firstKey(li) {
-    const own = /** @type {string} */ (li.dataset.key);
+    const own = ownLeafKey(li);
     if (own) return { key: own, outsideGroup: false };
     for (const child of li.children) {
         if (child.tagName !== 'UL') continue;
@@ -405,15 +438,23 @@ export function dropAnchor(li) {
 }
 
 /**
+ * Outline view over a `.pm-outline` element.
+ * `handlers.onSelect(keys)` gets the whole selection as an array, the primary
+ * (most recent) key LAST; `[]` clears. Plain click -> `[key]`; Ctrl/Meta click
+ * toggles the key; Shift click selects the visible range from the primary key.
+ * `render(doc, selectedKey, opts)`: a row is selected when its key is
+ * `selectedKey` or in `opts.selectedKeys`.
  * @param {HTMLElement} container the .pm-outline element
- * @param {{ onSelect(key: string|null): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void, onCardinality?(nodeKey: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
- * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
+ * @param {{ onSelect(keys: string[]): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void, onCardinality?(nodeKey: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
+ * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
  */
 export function createOutline(container, handlers) {
     /** group key -> GroupNode from the last buildOutline (radio clicks need it) */
     const /** @type {Map<string, GroupNode>} */ groupByKey = new Map();
     /** the selected key as of the last render/click (drives keyboard ops) */
     let selectedKey = null;
+    /** the whole selection (primary included) as of the last render/click */
+    let /** @type {Set<string>} */ selectedSet = new Set();
 
     const ac = new AbortController();
 
@@ -479,9 +520,38 @@ export function createOutline(container, handlers) {
         if (!row) return;
         const li = /** @type {HTMLElement|null} */ (row.closest('li.pm-node'));
         const key = li?.dataset.key || '';
-        if (!key) return; // headerless containers are not selectable
-        selectedKey = key;
-        handlers.onSelect(key);
+        if (!key || !li) return; // headerless sections are not selectable
+        const current = selectedSet.size ? [...selectedSet] : selectedKey ? [selectedKey] : [];
+        /** @type {string[]} */
+        let next;
+        if (ev.ctrlKey || ev.metaKey) {
+            next = current.includes(key)
+                ? current.filter((k) => k !== key)
+                : [...current, key];
+        } else if (ev.shiftKey && selectedKey) {
+            const visible = [];
+            for (const el of container.querySelectorAll('li.pm-node')) {
+                const h = /** @type {HTMLElement} */ (el);
+                if (h.dataset.key && h.offsetParent !== null) visible.push(h.dataset.key);
+            }
+            const a = visible.indexOf(selectedKey);
+            const b = visible.indexOf(key);
+            if (a < 0 || b < 0) next = [key];
+            else {
+                const range = visible.slice(Math.min(a, b), Math.max(a, b) + 1).filter((k) => k !== key);
+                next = [...range, key];
+            }
+        } else {
+            next = [key];
+        }
+        selectedKey = next.at(-1) ?? null;
+        selectedSet = new Set(next);
+        handlers.onSelect(next);
+    };
+
+    // shift-click extends the selection: keep the browser from selecting text
+    const onMousedown = (/** @type {MouseEvent} */ ev) => {
+        if (ev.shiftKey && ev.target instanceof Element && ev.target.closest('.pm-row')) ev.preventDefault();
     };
 
     const onChange = (/** @type {Event} */ ev) => {
@@ -508,6 +578,7 @@ export function createOutline(container, handlers) {
         void handlers.onOps([{ ...a, key }]).catch(() => {});
     };
 
+    container.addEventListener('mousedown', onMousedown, { signal: ac.signal });
     container.addEventListener('click', onClick, { signal: ac.signal });
     container.addEventListener('change', onChange, { signal: ac.signal });
     container.addEventListener('keydown', onKeydown, { signal: ac.signal });
@@ -547,7 +618,7 @@ export function createOutline(container, handlers) {
                     let ops = [];
                     try {
                         const keysAfter = listKeys(ul);
-                        const movedKey = JQ(ui.item).attr('data-key') || null;
+                        const movedKey = ownLeafKey(ui.item[0]) || null;
                         ops = dragOps(keysBefore, keysAfter, movedKey);
                     } catch { // a malformed drag is an empty op, never a crash
                         ops = [];
@@ -567,8 +638,9 @@ export function createOutline(container, handlers) {
         }
     };
 
-    const render = (/** @type {any} */ doc, /** @type {string|null} */ sel, /** @type {{ collapsed?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }} */ opts = {}) => {
+    const render = (/** @type {any} */ doc, /** @type {string|null} */ sel, /** @type {{ collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }} */ opts = {}) => {
         selectedKey = sel;
+        selectedSet = opts.selectedKeys ?? new Set();
         const top = container.scrollTop;
         destroySortables();
         groupByKey.clear();
@@ -583,6 +655,7 @@ export function createOutline(container, handlers) {
         }
         const ctx = /** @type {RenderCtx} */ ({
             collapsed: opts.collapsed ?? new Set(),
+            selected: selectedSet,
             search: opts.search,
             searchActive,
             matches,

@@ -506,7 +506,7 @@ async function main() {
 
         // headerless group: a bare demote creates one
         must((await op(ids.sola, { op: 'demote', key: S.sola0Keys[1] })).status === 200, 'demote failed');
-        const hless = `${view(ids.sola)} li.pm-node[data-kind="group"][data-key=""]`;
+        const hless = `${view(ids.sola)} li.pm-node[data-kind="group"][data-key^="grp:"]`;
         await until(() => exists(`${hless} > .pm-row > .pm-caret`), 8000, 'headerless group row with a caret');
         const nodeKey = await probe.eval(`document.querySelector(${J(hless)})?.dataset.nodeKey ?? null`);
         must(await click(`${hless} > .pm-row > .pm-caret`), 'no caret on the headerless group');

@@ -8,7 +8,7 @@
  * no DOM, runs in node and browser.
  */
 
-import { containerName } from '../shared/outline.js';
+import { containerName, flattenSeq } from '../shared/outline.js';
 import { isCommentOnly } from '../shared/groups.js';
 
 /**
@@ -24,6 +24,7 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {'checkbox'|'radio'|'readonly'} switchType
  * @property {boolean} hasContent true when a block leaf's content is non-blank and not comment-only
  * @property {boolean} commentOnly content is only {{// }} comments and {{trim}}: sends no text; heading rows render no switch
+ * @property {number} pos 1-based position of this leaf in flattenSeq order of its own sequence
  */
 
 /**
@@ -78,6 +79,7 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {'block'|'marker'|'ghost'} [leafKind]
  * @property {boolean} [hasContent]
  * @property {boolean} [commentOnly] content is only {{// }} comments and {{trim}}: sends no text; heading rows render no switch
+ * @property {number} [pos]
  * @property {string} [name]
  * @property {boolean} [enabled]
  * @property {'checkbox'|'radio'|'readonly'} [switchType]
@@ -113,9 +115,10 @@ function switchType(leaf, pickOne) {
  * @param {Object|undefined} enabled the loadout's enabled map
  * @param {any} leaf
  * @param {boolean} pickOne
+ * @param {Map<string, number>} posMap leaf key -> 1-based flat position in its sequence
  * @returns {LeafNode}
  */
-function leafNode(doc, enabled, leaf, pickOne) {
+function leafNode(doc, enabled, leaf, pickOne, posMap) {
     const identifier = leaf.ref ?? leaf.identifier;
     const content = String(doc.blocks?.[identifier]?.content ?? '');
     const commentOnly = leaf.kind === 'block' && isCommentOnly(content);
@@ -129,6 +132,7 @@ function leafNode(doc, enabled, leaf, pickOne) {
         switchType: switchType(leaf, pickOne),
         hasContent: leaf.kind === 'block' && content.trim() !== '' && !commentOnly,
         commentOnly,
+        pos: posMap.get(leaf.key) ?? 0,
     };
 }
 
@@ -139,12 +143,13 @@ function leafNode(doc, enabled, leaf, pickOne) {
  * @param {any} doc
  * @param {Object|undefined} enabled
  * @param {any} row
+ * @param {Map<string, number>} posMap
  * @returns {GroupNode}
  */
-function groupNode(doc, enabled, row) {
+function groupNode(doc, enabled, row, posMap) {
     const pickOne = row.cardinality === 'pick-one';
-    const header = row.header ? leafNode(doc, enabled, row.header, pickOne) : null;
-    const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, enabled, o, pickOne));
+    const header = row.header ? leafNode(doc, enabled, row.header, pickOne, posMap) : null;
+    const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, enabled, o, pickOne, posMap));
     const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
     const headerOn = header?.enabled && !header.commentOnly ? 1 : 0;
     // Nemo only (see the GroupNode typedef): FF/DEM/Sola content headings are informational
@@ -171,20 +176,21 @@ function groupNode(doc, enabled, row) {
  * @param {any} doc
  * @param {Object|undefined} enabled
  * @param {any} row
+ * @param {Map<string, number>} posMap
  * @returns {Node}
  */
-function rowNode(doc, enabled, row) {
-    if (row.kind === 'group') return groupNode(doc, enabled, row);
+function rowNode(doc, enabled, row, posMap) {
+    if (row.kind === 'group') return groupNode(doc, enabled, row, posMap);
     if (row.kind === 'section') {
         return {
             type: 'section',
             key: row.key,
-            header: row.header ? leafNode(doc, enabled, row.header, false) : null,
+            header: row.header ? leafNode(doc, enabled, row.header, false, posMap) : null,
             name: containerName(doc, row),
-            nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, enabled, r)),
+            nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, enabled, r, posMap)),
         };
     }
-    return leafNode(doc, enabled, row, false);
+    return leafNode(doc, enabled, row, false, posMap);
 }
 
 /**
@@ -197,10 +203,14 @@ function rowNode(doc, enabled, row) {
 export function buildOutline(doc, loadoutId = doc.activeLoadoutId) {
     const enabled = doc.loadouts?.[loadoutId]?.enabled;
     return {
-        sequences: (doc.sequences ?? []).map((/** @type {any} */ seq) => ({
-            characterId: seq.character_id,
-            nodes: (seq.rows ?? []).map((/** @type {any} */ row) => rowNode(doc, enabled, row)),
-        })),
+        sequences: (doc.sequences ?? []).map((/** @type {any} */ seq) => {
+            /** @type {Map<string, number>} */
+            const posMap = new Map(flattenSeq(seq.rows ?? []).map((e, i) => [e.leaf.key, i + 1]));
+            return {
+                characterId: seq.character_id,
+                nodes: (seq.rows ?? []).map((/** @type {any} */ row) => rowNode(doc, enabled, row, posMap)),
+            };
+        }),
     };
 }
 
