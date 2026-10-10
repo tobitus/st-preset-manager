@@ -7,9 +7,10 @@
  */
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 
-const LIVE = '/home/jon/projects/sillysystem/st/data/default-user/settings.json';
+const LIVE = path.join(process.env.PM_LIVE_DATA ?? path.join(os.homedir(), 'projects/sillysystem/st/data/default-user'), 'settings.json');
 const OUT = process.argv[2] ?? new URL('../dev/data/default-user/settings.json', import.meta.url).pathname;
 
 const settings = JSON.parse(fs.readFileSync(LIVE, 'utf8'));
@@ -25,6 +26,11 @@ if (settings.oai_settings) {
     settings.oai_settings.custom_model = 'mock';
     settings.oai_settings.bind_preset_to_connection = false;
 }
+// image generation: the live set may point at a local backend (e.g. ComfyUI
+// on :8190) that the dev ST pings server-side on every page load; when that
+// backend is down the container log fills with FetchError stacks
+// (check-phase3 #10). 'extras' only talks to the browser-side Extras URL.
+if (settings.extension_settings?.sd) settings.extension_settings.sd.source = 'extras';
 // sanitize existing profiles: no secret ids, no proxy references
 const cm = settings.extension_settings?.connectionManager;
 if (cm?.profiles) {

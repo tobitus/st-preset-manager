@@ -17,13 +17,13 @@ import { clampPoint } from './ext/layout.js';
 const NOTICE_HTML = `
 <div class="pm-install-notice" style="padding:16px;max-width:420px;line-height:1.5">
     <h3 style="margin-top:0">Preset Manager: server plugin not found</h3>
-    <p>The UI extension is loaded, but the required server plugin
-    <code>st-preset-manager</code> is not running on this SillyTavern
-    instance, so there is no preset library to talk to.</p>
-    <p>To install: copy this repository into <code>plugins/st-preset-manager</code>
-    (it is the same folder as this extension — ST mounts the repo at both
-    paths) and make sure <code>enableServerPlugins: true</code> is set in
-    config.yaml, then restart SillyTavern.</p>
+    <p>The UI extension is loaded, but its server plugin
+    <code>st-preset-manager</code> is not running on this SillyTavern,
+    so there is no preset library to talk to.</p>
+    <p>To install: <code>git clone</code> this same repository into SillyTavern's
+    <code>plugins/st-preset-manager</code> folder, set
+    <code>enableServerPlugins: true</code> in <code>config.yaml</code>, then
+    restart SillyTavern.</p>
 </div>`;
 
 /** Module-level singleton so double init (dev hot reload) does not stack. */

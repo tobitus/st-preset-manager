@@ -13,13 +13,14 @@
  */
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { importStPreset } from '../shared/recognizers.js';
 import { flattenSeq, rebuildSeq } from '../shared/outline.js';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const V1_TOOL_DIR = '/home/jon/projects/sillysystem/tools/preset-manager';
+const V1_TOOL_DIR = process.env.PM_V1_TOOL_DIR ?? path.join(os.homedir(), 'projects/sillysystem/tools/preset-manager');
 
 export const PARITY_FILES = [
     'DEUS.EX.MACHINA.V2.5.ST.json',

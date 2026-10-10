@@ -1,4 +1,4 @@
-# Preset Manager v2 — implementation plan
+# Preset Manager v2 — internal design notes (historical)
 
 Spec: `docs/roadmap/014-preset-manager-v2.md` (sillysystem), items 1–23, acceptance 1–18.
 Owner-settled items are constraints; open items are decided here with a one-line reason

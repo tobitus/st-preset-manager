@@ -1,6 +1,6 @@
 {
   "name": "st-preset-manager",
-  "version": "2.0.0-phase1",
+  "version": "2.1.0",
   "description": "Preset Manager v2: SillyTavern UI extension + server plugin managing the live Chat Completion preset through one working slot.",
   "type": "module",
   "main": "plugin/index.js",

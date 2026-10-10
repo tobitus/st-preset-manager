@@ -3,7 +3,9 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-LIVE_DATA="$HOME/projects/sillysystem/st/data/default-user"
+# exported: dev/seed-settings.mjs reads the same variable
+export PM_LIVE_DATA="${PM_LIVE_DATA:-$HOME/projects/sillysystem/st/data/default-user}"
+LIVE_DATA="$PM_LIVE_DATA"
 PORT="${PM_DEV_PORT:-8002}"
 
 if podman ps --format '{{.Names}}' | grep -qx 'st-pm-dev'; then

@@ -16,7 +16,7 @@ mkdir -p "$REPO/dev/config" "$REPO/dev/data" "$REPO/dev/chrome-profile"
 
 # 1. config.yaml: copy from live (READ ONLY source) once, then dev edits
 if [[ ! -f "$REPO/dev/config/config.yaml" ]]; then
-    cp "$HOME/projects/sillysystem/st/config/config.yaml" "$REPO/dev/config/config.yaml"
+    cp "${PM_LIVE_CONFIG:-$HOME/projects/sillysystem/st/config/config.yaml}" "$REPO/dev/config/config.yaml"
     # port 8001 -> 8002, disable plugin/extension auto-update
     sed -i -e "s/^port: 8001\$/port: $PORT/" \
            -e 's/^enableServerPluginsAutoUpdate: true$/enableServerPluginsAutoUpdate: false/' \

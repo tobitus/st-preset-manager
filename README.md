@@ -1,15 +1,81 @@
-# Preset Manager v2 (Phase 1)
+# Preset Manager v2
 
-An ST **UI extension + required server plugin** that manages SillyTavern's live
-Chat Completion preset through one reserved working slot (`⟨PM⟩ working`).
-The library on the plugin side is the source of truth and survives with no
-tab open (roadmap 014, acceptance 4).
+A SillyTavern **UI extension + required server plugin** that keeps a library of
+Chat Completion presets and drives SillyTavern's live preset through one
+working slot (`⟨PM⟩ working`). The library lives on the plugin side, so it
+survives with no browser tab open.
 
-Phase 1 scope: plugin library (import via recognizers, REST, revisions),
-working-slot compile, SSE live bridge, a minimal Library window, and the
-`dev/` tooling. No editor, diff, shelf or Settings UI yet (Phases 2–5).
+## Install
 
-## Layout
+The repository is both the extension and the plugin; you install it twice.
+
+1. **The extension**: SillyTavern → Extensions → *Install extension* → paste
+   this repository's Git URL. SillyTavern clones it into
+   `public/scripts/extensions/third-party/st-preset-manager`.
+2. **The server plugin**: `git clone` the same repository into SillyTavern's
+   `plugins/st-preset-manager` folder, set `enableServerPlugins: true` in
+   `config.yaml`, then restart SillyTavern.
+
+There are no runtime dependencies (no `npm install` needed). `dev/` and
+`test/` are not needed at runtime.
+
+## Without the plugin
+
+If the server plugin is not running, the extension shows only an install notice
+("Preset Manager: server plugin not found") with the same steps as part 2
+above, and does nothing else.
+
+## Update
+
+- Extension: SillyTavern's update button for the extension, or `git pull` in
+  its folder.
+- Plugin: `git pull` in `plugins/st-preset-manager`, then restart
+  SillyTavern.
+
+## Using it
+
+- **Library**: lists your presets with **Load**, **Open** and **Delete**;
+  import and export live in the section at the bottom of the Library pane.
+- **Presets tab**: an outline of the preset with on/off switches, sections,
+  pick-one groups and row numbers; Undo / Redo with Ctrl+Z / Ctrl+Shift+Z.
+- **Loadouts** (the bordered Loadout box): a *root* loadout holds a complete
+  on/off set; a *playstyle* inherits one root and stores only what it changes.
+  Inherited rows are greyed, ↺ resets one row, and *Reset all to inherit*
+  resets the whole playstyle. The outline shows the loadout picked in the box.
+  The parent select re-parents a playstyle. *New* with kind root copies the
+  picked loadout's root; with kind playstyle it inherits from the picked
+  loadout. A root that has playstyles cannot be deleted, nor can the last root.
+- **Models and tunings**: each Model has named tunings with a default; you
+  choose one per loadout × Model in the Model panel's *Loadout override*
+  section. Sliders edited in SillyTavern write into the tuning in effect.
+- **Diff and revisions**: see *Phase 5* under Developer.
+- **Shelf**: reusable blocks; see *Phase 6* under Developer.
+- **MCP**: a stdio MCP server wraps the REST API; see *Phase 7* under
+  Developer.
+
+## Developer
+
+### Publishing
+
+`manifest.json`'s `homePage` is empty until the repository has a public URL;
+set it (and `repository` in `package.json`) when the repository is pushed.
+Keep `manifest.json` and `package.json` versions equal.
+
+### Environment variables
+
+- `PM_DEV_PORT`: dev ST port (default 8002).
+- `PM_CHROME`: chromium used by the checks; use `dev/chromium-podman.sh` when
+  the host has none.
+- `PM_LIVE_DATA`: live ST user data the dev scripts copy settings/presets from
+  (default `$HOME/projects/sillysystem/st/data/default-user`).
+- `PM_LIVE_CONFIG`: live `config.yaml` copied by `dev/up.sh` (default
+  `$HOME/projects/sillysystem/st/config/config.yaml`).
+- `PM_CORPUS`: preset corpus dir for `dev/fixtures.sh` (default
+  `$HOME/projects/sillysystem/presets`).
+- `PM_V1_TOOL_DIR`: v1 tool for `dev/parity.mjs` (default
+  `$HOME/projects/sillysystem/tools/preset-manager`).
+
+### Layout
 
 ```
 manifest.json        ST extension manifest (loads index.js as a module)
@@ -36,12 +102,12 @@ The repo root is **both** the extension root and the plugin package root; the
 dev container bind-mounts it twice
 (`plugins/st-preset-manager` + `public/scripts/extensions/third-party/st-preset-manager`).
 
-## Running the dev environment
+### Running the dev environment
 
 ```
 npm install                 # typescript (+ @types) only, for typecheck
 dev/fixtures.sh             # copy the 20 ST presets + corpus into dev/fixtures/presets
-dev/up.sh                   # st-pm-dev container on 127.0.0.1:8002 + mock LLM on :8099
+dev/up.sh                   # st-pm-dev container on 127.0.0.1:${PM_DEV_PORT:-8002} + mock LLM on :8099
 dev/reset.sh                # clean dev/data (ST presets + seeded settings.json), restart
 dev/up.sh --no-plugin       # acceptance-15 mode (extension shows install notice)
 dev/down.sh                 # stop + remove container and mock; data stays
@@ -55,7 +121,7 @@ Browser probe (raw CDP over system Chromium, zero deps): `dev/probe.mjs oai`,
 set-slider <id> <value>`, `dev/probe.mjs generate hi`, `dev/probe.mjs hold`,
 `dev/probe.mjs stop`.
 
-## REST (Phase 1 subset)
+### REST (Phase 1 subset)
 
 `GET /health` · `GET /library` · `POST /rescan` · `POST /presets` (`{st,name}`
 import running the recognizers, or `{native}`) · `GET/PUT/DELETE
@@ -66,14 +132,14 @@ import running the recognizers, or `{native}`) · `GET/PUT/DELETE
 All non-GET need the session cookie + `x-csrf-token` (as ST requires).
 Errors: 4xx/5xx `{error: message}`.
 
-## Tests
+### Tests
 
 ```
 npm test                    # compile/groups/outline/recognizers/store/slot-routing
 npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 ```
 
-## Known gaps (Phase 1 by design)
+### Known gaps (Phase 1 by design)
 
 - No editor/diff/shelf/Settings UI; the window is Library-only.
 - Panel edits in ST (toggle/sampler) write back through `/slot/panel` — the
@@ -82,7 +148,7 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 - The plugin never writes `settings.json` or any ST preset file; the tab
   writes the slot via ST's own `getPresetManager('openai').savePreset`.
 
-## Dev-environment notes
+### Dev-environment notes
 
 - `dev/up.sh` runs the container with `--security-opt label=disable`: this
   host runs SELinux, and the bind-mounted config file is unreadable inside a
@@ -91,7 +157,7 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
 - The mock LLM answers `/v1/chat/completions` (SSE when `stream:true`) and
   keeps the last request body at `GET :8099/last`.
 
-## Phase 4: Models, tunings, model switching, profile guard and tidy
+### Phase 4: Models, tunings, model switching, profile guard and tidy
 
 - **Models** (`models.json`, keyed by Model name): Settings tab → *Seed from
   profiles* adds one Model per distinct `(source, model)` in the tab's
@@ -143,7 +209,7 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   two-alias table (`oai`, `google`) rather than ST's `CONNECT_API_MAP`.
 - Check: `node dev/check-phase4.mjs` (resets dev data; tidy is destructive).
 
-## Phase 5: Diff and revisions
+### Phase 5: Diff and revisions
 
 - **Diff tab**: side A and side B each pick a preset (open presets first, then
   the whole library), a revision (`current` or any `#n`), and optionally one
@@ -188,7 +254,7 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   bottom row is a unified diff, not two side-by-side columns.
 - Check: `node dev/check-phase5.mjs` (resets dev data).
 
-## Phase 6: Block shelf and cross-preset copy
+### Phase 6: Block shelf and cross-preset copy
 
 - **Shelf** (`shelf/<id>.json`, held in memory and published through the
   store queue with the global rev): a library of reusable blocks. Presets
@@ -229,7 +295,7 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   shelf*).
 - Check: `node dev/check-phase6.mjs` (resets dev data).
 
-## Phase 7: MCP wrapper
+### Phase 7: MCP wrapper
 
 `mcp/server.js` is a zero-dependency Node MCP server (stdio transport:
 newline-delimited JSON-RPC 2.0 — `initialize`, `notifications/initialized`,
@@ -298,7 +364,7 @@ and the session flow against a fake ST). Check: `node dev/check-phase7.mjs`
 (resets dev data; spawns the server behind a recording proxy and a headless
 Chromium on ST).
 
-## Fix round 1 (owner review, 2026-09-29)
+### Fix round 1 (owner review, 2026-09-29)
 
 - **Opening**: a draggable floating button (`#pm-float-btn`, bottom right by
   default; position in localStorage `pm.floatBtn.pos`) opens the window, as
@@ -372,7 +438,7 @@ Chromium on ST).
 Tests: `test/fix1-*.test.js`. Check: `node dev/check-fix1.mjs` (resets dev
 data; real headless Chromium on ST).
 
-## ST-panel reorder keeps the outline (owner decision 2026-09-29)
+### ST-panel reorder keeps the outline (owner decision 2026-09-29)
 
 A drag in SillyTavern's own prompt-manager panel is written back to the
 library without flattening it: only the rows that actually moved (the rows
@@ -388,7 +454,7 @@ headings stay on the row they were above. Rules: PLAN §1.4.
 Tests: `test/reorder-writeback.test.js`. Check: `node dev/check-reorder.mjs`
 (resets dev data; real mouse drags in ST's panel on DEM).
 
-## Group cardinality toggle (temporary)
+### Group cardinality toggle (temporary)
 
 The `1`/`N` badge on every group row is a click control: it flips the group
 between pick-one and pick-one-or-more (`setCardinality`). Switching to
@@ -399,7 +465,7 @@ override; nothing is ever switched off.
 Tests: `test/cardinality.test.js`. Check: `node dev/check-cardinality.mjs`
 (resets dev data; real mouse clicks on the badges in the v2 window).
 
-## Library Delete
+### Library Delete
 
 Each Library row has a **Delete** button. It asks for confirmation in an ST
 popup, then removes the preset file and its revision history. If the preset
@@ -409,7 +475,7 @@ showing; nothing is re-applied). An open Presets tab for it closes.
 Check: `node dev/check-nemo-delete.mjs` (resets dev data; covers Delete
 cancel/confirm and the Nemo import in the v2 window).
 
-## Active in SillyTavern
+### Active in SillyTavern
 
 The window's first line always says what ST is running:
 `Active in SillyTavern: <preset> · <loadout>` (or `Active in SillyTavern:
@@ -433,7 +499,7 @@ Tests: `test/active.test.js`. Check: `node dev/check-active.mjs` (resets dev
 data; Library Load, Make active and HTML-character names in the v2 window;
 screenshots `dev/shots/active-header.png`, `dev/shots/active-not-active-notice.png`).
 
-## Nemo recognizer
+### Nemo recognizer
 
 Presets whose blocks carry ST macro-comment tags `{{// @section-header true }}`
 or `{{// @mutual-exclusive-group X }}` are recognized as Nemo (checked before
