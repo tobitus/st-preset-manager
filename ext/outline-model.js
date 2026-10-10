@@ -4,11 +4,12 @@
  * flags, keyboard mapping, pick-one/none click -> ops, drag -> moveLeaf op,
  * leaf lookup for the editor, and search matches.
  *
- * Pure module: imports only the pure shared/outline.js helper (containerName);
- * no DOM, runs in node and browser.
+ * Pure module: imports only the pure shared/outline.js, shared/groups.js and
+ * shared/loadouts.js helpers; no DOM, runs in node and browser.
  */
 
 import { containerName, flattenSeq } from '../shared/outline.js';
+import { effectiveEnabled } from '../shared/loadouts.js';
 import { isCommentOnly } from '../shared/groups.js';
 
 /**
@@ -25,6 +26,17 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {boolean} hasContent true when a block leaf's content is non-blank and not comment-only
  * @property {boolean} commentOnly content is only {{// }} comments and {{trim}}: sends no text; heading rows render no switch
  * @property {number} pos 1-based position of this leaf in flattenSeq order of its own sequence
+ * @property {boolean} inherited playstyle row whose bit comes from the root loadout
+ * @property {boolean} explicit playstyle row whose bit the playstyle sets itself (resettable)
+ */
+
+/**
+ * The per-build bit context threaded through the node builders.
+ *
+ * @typedef {Object} BitsContext
+ * @property {{[id: string]: boolean}} enabled effective enabled map
+ * @property {{[id: string]: 'root'|'loadout'|'override'}} source where each bit came from
+ * @property {boolean} playstyle true when the loadout is a playstyle
  */
 
 /**
@@ -82,6 +94,8 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {number} [pos]
  * @property {string} [name]
  * @property {boolean} [enabled]
+ * @property {boolean} [inherited] playstyle row whose bit comes from the root
+ * @property {boolean} [explicit] playstyle row whose bit the playstyle sets itself
  * @property {'checkbox'|'radio'|'readonly'} [switchType]
  * @property {LeafNode|null} [header]
  * @property {'pick-one'|'pick-one-or-more'} [cardinality]
@@ -112,13 +126,13 @@ function switchType(leaf, pickOne) {
  * ref for ST-provided entries).
  *
  * @param {any} doc
- * @param {Object|undefined} enabled the loadout's enabled map
+ * @param {BitsContext} bits
  * @param {any} leaf
  * @param {boolean} pickOne
  * @param {Map<string, number>} posMap leaf key -> 1-based flat position in its sequence
  * @returns {LeafNode}
  */
-function leafNode(doc, enabled, leaf, pickOne, posMap) {
+function leafNode(doc, bits, leaf, pickOne, posMap) {
     const identifier = leaf.ref ?? leaf.identifier;
     const content = String(doc.blocks?.[identifier]?.content ?? '');
     const commentOnly = leaf.kind === 'block' && isCommentOnly(content);
@@ -128,11 +142,13 @@ function leafNode(doc, enabled, leaf, pickOne, posMap) {
         identifier,
         leafKind: leaf.kind,
         name: leaf.kind === 'block' ? (doc.blocks?.[identifier]?.name || identifier) : identifier,
-        enabled: !!enabled?.[identifier],
+        enabled: !!bits.enabled?.[identifier],
         switchType: switchType(leaf, pickOne),
         hasContent: leaf.kind === 'block' && content.trim() !== '' && !commentOnly,
         commentOnly,
         pos: posMap.get(leaf.key) ?? 0,
+        inherited: bits.playstyle && bits.source?.[identifier] === 'root',
+        explicit: bits.playstyle && bits.source?.[identifier] === 'loadout',
     };
 }
 
@@ -141,15 +157,15 @@ function leafNode(doc, enabled, leaf, pickOne, posMap) {
  * it still renders as a readonly leaf (never a radio).
  *
  * @param {any} doc
- * @param {Object|undefined} enabled
+ * @param {BitsContext} bits
  * @param {any} row
  * @param {Map<string, number>} posMap
  * @returns {GroupNode}
  */
-function groupNode(doc, enabled, row, posMap) {
+function groupNode(doc, bits, row, posMap) {
     const pickOne = row.cardinality === 'pick-one';
-    const header = row.header ? leafNode(doc, enabled, row.header, pickOne, posMap) : null;
-    const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, enabled, o, pickOne, posMap));
+    const header = row.header ? leafNode(doc, bits, row.header, pickOne, posMap) : null;
+    const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, bits, o, pickOne, posMap));
     const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
     const headerOn = header?.enabled && !header.commentOnly ? 1 : 0;
     // Nemo only (see the GroupNode typedef): FF/DEM/Sola content headings are informational
@@ -174,41 +190,51 @@ function groupNode(doc, enabled, row, posMap) {
  * Render a row of any kind (recursing into sections).
  *
  * @param {any} doc
- * @param {Object|undefined} enabled
+ * @param {BitsContext} bits
  * @param {any} row
  * @param {Map<string, number>} posMap
  * @returns {Node}
  */
-function rowNode(doc, enabled, row, posMap) {
-    if (row.kind === 'group') return groupNode(doc, enabled, row, posMap);
+function rowNode(doc, bits, row, posMap) {
+    if (row.kind === 'group') return groupNode(doc, bits, row, posMap);
     if (row.kind === 'section') {
         return {
             type: 'section',
             key: row.key,
-            header: row.header ? leafNode(doc, enabled, row.header, false, posMap) : null,
+            header: row.header ? leafNode(doc, bits, row.header, false, posMap) : null,
             name: containerName(doc, row),
-            nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, enabled, r, posMap)),
+            nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, bits, r, posMap)),
         };
     }
-    return leafNode(doc, enabled, row, false, posMap);
+    return leafNode(doc, bits, row, false, posMap);
 }
 
 /**
  * Build the outline render tree for one loadout. Never mutates the document.
+ * Bits are the loadout's layered bits (a playstyle inherits its root's) WITHOUT
+ * pick-one normalization, so a stored conflict shows. An unknown loadout id
+ * renders every switch off (structure-only callers such as sourceItems pass
+ * documents without loadouts).
  *
  * @param {any} doc library document
  * @param {string} [loadoutId] defaults to the doc's active loadout
+ * @param {string|null} [modelName] apply this Model's overrides, or none
  * @returns {{ sequences: Array<{ characterId: any, nodes: Node[] }> }}
  */
-export function buildOutline(doc, loadoutId = doc.activeLoadoutId) {
-    const enabled = doc.loadouts?.[loadoutId]?.enabled;
+export function buildOutline(doc, loadoutId = doc.activeLoadoutId, modelName = null) {
+    const known = !!doc.loadouts?.[loadoutId];
+    const { enabled, source } = known
+        ? effectiveEnabled(doc, loadoutId, modelName, { raw: true })
+        : { enabled: {}, source: {} };
+    const playstyle = known && doc.loadouts[loadoutId].kind === 'playstyle';
+    const bits = { enabled, source, playstyle };
     return {
         sequences: (doc.sequences ?? []).map((/** @type {any} */ seq) => {
             /** @type {Map<string, number>} */
             const posMap = new Map(flattenSeq(seq.rows ?? []).map((e, i) => [e.leaf.key, i + 1]));
             return {
                 characterId: seq.character_id,
-                nodes: (seq.rows ?? []).map((/** @type {any} */ row) => rowNode(doc, enabled, row, posMap)),
+                nodes: (seq.rows ?? []).map((/** @type {any} */ row) => rowNode(doc, bits, row, posMap)),
             };
         }),
     };
@@ -270,22 +296,29 @@ export function headingAction(doc, key, kind) {
 /**
  * Ops for a click on a pick-one group member or its "none" radio.
  * A member -> one setGroup; "none" -> toggle off every enabled member
- * (header first, then options in outline order).
+ * (header first, then options in outline order). When `loadoutId` is a
+ * string every op carries it as its last key; otherwise the ops have no
+ * loadoutId key (they target the active loadout).
  *
  * @param {Node} group a group node from buildOutline
  * @param {string|null} identifier the chosen member, or null for "none"
+ * @param {string} [loadoutId] the loadout the ops edit
  * @returns {Array<Object>} op bodies for POST /presets/:id/ops
  */
-export function pickOneOps(group, identifier) {
-    if (identifier != null) {
-        return [{ op: 'setGroup', group: group.key ?? '', identifier }];
-    }
-    const members = group.header ? [group.header, ...(group.options ?? [])] : (group.options ?? []);
+export function pickOneOps(group, identifier, loadoutId) {
     /** @type {Array<Object>} */
     const ops = [];
-    for (const m of members) {
-        if (m === group.header && m.commentOnly) continue;
-        if (m.enabled) ops.push({ op: 'toggle', identifier: m.identifier, value: false });
+    if (identifier != null) {
+        ops.push({ op: 'setGroup', group: group.key ?? '', identifier });
+    } else {
+        const members = group.header ? [group.header, ...(group.options ?? [])] : (group.options ?? []);
+        for (const m of members) {
+            if (m === group.header && m.commentOnly) continue;
+            if (m.enabled) ops.push({ op: 'toggle', identifier: m.identifier, value: false });
+        }
+    }
+    if (typeof loadoutId === 'string') {
+        for (const op of ops) /** @type {any} */ (op).loadoutId = loadoutId;
     }
     return ops;
 }

@@ -9,12 +9,12 @@
  *
  * Checks:
  *   n1 REST: the imported "Nemo Engine 11.5.2 - Default RP" has, in
- *      sequences[0], 18 sections (only `=== … ===` headers) and 45 groups
- *      (30 pick-one, 15 pick-one-or-more under sub headers); every group is
+ *      sequences[0], 18 sections (only `=== … ===` headers) and 44 groups
+ *      (29 pick-one, 15 pick-one-or-more under sub headers); every group is
  *      guessed:false; source.recognizer.kind is 'nemo'; a note names the
  *      split group 'World-Logic' and the moved sub header '<Vex Personas>'
  *   n2 UI: Library -> Open on the Nemo row; the first sequence's outline
- *      renders 18 section and 45 group rows; the `Format` group's member
+ *      renders 18 section and 44 group rows; the `Format` group's member
  *      switches are all radios and its badge reads 1
  *   n4 UI: the `=== 🎭 Vex Personality ===` section row has no switch (its
  *      heading is comment-only); its first child is the group headed
@@ -297,10 +297,13 @@ async function main() {
     const nemoDoc = await getDoc(ids.nemo);
 
     // ------------------------------------------------------------------ n1
-    await check('n1 REST: Nemo imports as 18 sections + 45 groups (30 pick-one, 15 pick-many), kind nemo, World-Logic + moved <Vex Personas> noted', async () => {
+    // F-066 (round 2 A1): the import drops prompt_order 100000 because
+    // 100001 exists, so sequences[0] is now 100001's order: 44 groups
+    // (29 pick-one). The dropped 100000 order had 45 (30 pick-one).
+    await check('n1 REST: Nemo imports as 18 sections + 44 groups (29 pick-one, 15 pick-many), kind nemo, World-Logic + moved <Vex Personas> noted', async () => {
         const seq0 = walk(nemoDoc.sequences[0].rows);
         must(seq0.sections === 18, `sequences[0] has ${seq0.sections} sections, want 18`);
-        must(seq0.groups === 45 && seq0.one === 30 && seq0.many === 15, `sequences[0] has ${seq0.groups} groups (${seq0.one} pick-one, ${seq0.many} pick-many), want 45 (30, 15)`);
+        must(seq0.groups === 44 && seq0.one === 29 && seq0.many === 15, `sequences[0] has ${seq0.groups} groups (${seq0.one} pick-one, ${seq0.many} pick-many), want 44 (29, 15)`);
         let groupsAll = 0;
         for (const [i, seq] of nemoDoc.sequences.entries()) {
             const w = walk(seq.rows);
@@ -318,14 +321,14 @@ async function main() {
     });
 
     // ------------------------------------------------------------------ n2
-    await check('n2 UI: Nemo outline renders 18 sections + 45 groups in its first sequence; Format is radios with badge 1', async () => {
+    await check('n2 UI: Nemo outline renders 18 sections + 44 groups in its first sequence (F-066: 100001\'s order); Format is radios with badge 1', async () => {
         await openFromLibrary(ids.nemo);
         const seq0 = `${view(ids.nemo)} .pm-outline ul.pm-list[data-list="seq"][data-seq-index="0"]`;
         await until(async () => (await count(`${seq0} li.pm-node[data-kind="group"]`)) > 0, 10000, 'first sequence rendered');
         const sections = await count(`${seq0} li.pm-node[data-kind="section"]`);
         const groups = await count(`${seq0} li.pm-node[data-kind="group"]`);
         must(sections === 18, `UI shows ${sections} section rows in the first sequence, want 18`);
-        must(groups === 45, `UI shows ${groups} group rows in the first sequence, want 45`);
+        must(groups === 44, `UI shows ${groups} group rows in the first sequence, want 44`);
         const fmt = findGroupByName(nemoDoc.sequences[0].rows, 'Format');
         must(fmt?.key, `no group named Format in sequences[0] (REST doc)`);
         const fli = `${seq0} li.pm-node[data-kind="group"][data-node-key="${fmt.key}"]`;

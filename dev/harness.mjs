@@ -185,6 +185,19 @@ export function createApi({ jar, onFatal }) {
 /** @param {string} tab */
 function profileDir(tab) { return path.join(REPO, 'dev', `chrome-profile-${tab}`); }
 
+/**
+ * With PM_CHROME=dev/chromium-podman.sh the browser runs in a container that
+ * outlives a SIGKILLed podman client, and `pkill -f user-data-dir=…` also
+ * kills the wrapper's own exit watcher (its argv carries the same flag), so
+ * the container must be removed explicitly or its ST tab stays live on the
+ * dev ST (saving settings.json, writing back to the slot). No-op otherwise.
+ * @param {string} dir profile dir
+ */
+function removeChromeContainer(dir) {
+    if (path.basename(CHROME) !== 'chromium-podman.sh') return;
+    try { execSync(`podman rm -f -t 0 "pm-chromium-${path.basename(dir)}"`, { stdio: 'ignore' }); } catch { /* none */ }
+}
+
 /** @returns {Promise<number>} */
 function freePort() {
     return new Promise((resolve) => {
@@ -315,18 +328,20 @@ export class Probe {
         return res.result?.value;
     }
 
-    /** SIGKILL the child and pkill anything still holding this profile. */
+    /** SIGKILL the child, pkill anything still holding this profile, remove its podman container. */
     kill() {
         try { this.child?.kill('SIGKILL'); } catch { /* gone */ }
         try { execSync(`pkill -9 -f "user-data-dir=${this.profileDir}"`, { stdio: 'ignore' }); } catch { /* none */ }
+        removeChromeContainer(this.profileDir);
         this.child = null;
         this.ws = null;
     }
 }
 
-/** Kill leftover probe chromia by profile dir (dev/chrome-profile-<tab>). @param {string[]} tabs */
+/** Kill leftover probe chromia (and their podman containers) by profile dir (dev/chrome-profile-<tab>). @param {string[]} tabs */
 export function cleanupTabs(tabs) {
     for (const tab of tabs) {
         try { execSync(`pkill -9 -f "user-data-dir=${profileDir(tab)}"`, { stdio: 'ignore' }); } catch { /* none */ }
+        removeChromeContainer(profileDir(tab));
     }
 }

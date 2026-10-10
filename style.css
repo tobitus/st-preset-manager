@@ -198,6 +198,14 @@
     margin-bottom: 6px;
 }
 
+#pm-window .pm-loadout-box { border: 1px solid var(--SmartThemeBorderColor, #888); border-radius: 6px; padding: 4px 8px 6px; margin-bottom: 6px; }
+#pm-window .pm-loadout-box-title { font-size: 0.85em; opacity: 0.8; margin-bottom: 4px; }
+#pm-window .pm-loadout-box .pm-loadout-bar { margin-bottom: 0; }
+#pm-window .pm-node.pm-inherited > .pm-row > .pm-switch { opacity: 0.4; }
+#pm-window .pm-node.pm-inherited > .pm-row > .pm-name { font-style: italic; }
+#pm-window .pm-reset-inherit { margin-left: 6px; padding: 0 4px; border: none; background: none; cursor: pointer; opacity: 0.7; }
+#pm-window .pm-reset-inherit:hover { opacity: 1; }
+
 .pm-rank-bar {
     display: flex;
     align-items: center;
@@ -258,8 +266,11 @@ ul.pm-list {
     padding-left: 0;
 }
 
+/* caret column + handle, plus the row-number column (A2: .pm-row-num
+   min-width 2.2em at 11px + 4px margin + the 6px row gap), so an option's
+   handle starts right of its heading's name */
 ul.pm-list ul.pm-list {
-    padding-left: calc(1.2em + 6px + 12px);
+    padding-left: calc(1.2em + 6px + 12px + 2.2 * 11px + 4px + 6px);
 }
 
 .pm-row {

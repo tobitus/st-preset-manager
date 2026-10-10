@@ -390,9 +390,13 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     const tags = item.tags?.length
         ? ` <span class="pm-tags">${item.tags.map((/** @type {string} */ t) => `<span class="pm-tag">${escapeHtml(t)}</span>`).join('')}</span>`
         : '';
+    /** @param {any} l @returns {string} `name (root)` or `name ↳ parentName`, as the preset view's picker */
+    const loadoutLabel = (l) => (l.kind === 'playstyle'
+        ? `${l.name} ↳ ${item.loadouts.find((/** @type {any} */ p) => p.id === l.parent)?.name ?? l.parent}`
+        : `${l.name} (root)`);
     const loadouts = item.loadouts?.length
         ? `<select class="pm-loadout-select" title="loadout">${item.loadouts
-              .map((/** @type {any} */ l) => `<option value="${escapeHtml(l.id)}"${l.id === item.activeLoadoutId ? ' selected' : ''}>${escapeHtml(l.name)}</option>`)
+              .map((/** @type {any} */ l) => `<option value="${escapeHtml(l.id)}"${l.id === item.activeLoadoutId ? ' selected' : ''}>${escapeHtml(loadoutLabel(l))}</option>`)
               .join('')}</select>`
         : '';
     row.innerHTML = `

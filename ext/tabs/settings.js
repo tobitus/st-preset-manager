@@ -1,6 +1,6 @@
 /**
  * Settings tab (Phase 4, roadmap items 20/22): a Model registry editor
- * (matches, linked connection profiles, per-Model tuning, merge
+ * (matches, linked connection profiles, the names of its tunings, merge
  * suggestions) and a connection-profile list with unlink/backup/tidy.
  *
  * All profile mutation (unlink a preset, delete profiles) goes through
@@ -189,14 +189,14 @@ export function createSettingsTab(pane, bridge) {
                 return `<option value="${escapeHtml(id)}"${sel}>${escapeHtml(label)}</option>`;
             })
             .join('');
-        const tuningEntries = Object.entries(model.tuning ?? {});
-        const tuningText = tuningEntries.length
-            ? tuningEntries.map(([k, v]) => `${k} ${v}`).join(', ')
-            : 'no global tuning';
+        const tuningNames = Object.keys(model.tunings ?? {});
+        const tuningText = tuningNames.length
+            ? 'tunings: ' + tuningNames.map((n) => (n === model.defaultTuning ? `${n} (default)` : n)).join(', ')
+            : 'no tunings';
         const armed = armedModelRemove.has(name);
         return `
             <div class="pm-model-row" data-model="${escapeHtml(name)}">
-                <input type="text" class="pm-model-name text_pole" value="${escapeHtml(name)}" title="Renaming migrates every document reference to this Model (tuning overrides, loadout overrides) to the new name.">
+                <input type="text" class="pm-model-name text_pole" value="${escapeHtml(name)}" title="Renaming migrates every document reference to this Model (loadout overrides and their tuning bindings) to the new name.">
                 <div class="pm-model-matches">
                     ${matchesHtml}
                     <input type="text" class="pm-model-match-source" placeholder="source" value="${escapeHtml((matchInputState.get(name) ?? { source: 'custom', model: '' }).source)}">
@@ -405,7 +405,8 @@ export function createSettingsTab(pane, bridge) {
                 matches: [{ source: c.source, model: c.model }],
                 profiles: c.profileId ? [c.profileId] : [],
                 preferredProfile: c.profileId ?? null,
-                tuning: {},
+                tunings: { default: {} },
+                defaultTuning: 'default',
             };
             void writeRegistry(next, `Added Model "${newName}"`);
         });
@@ -435,7 +436,7 @@ export function createSettingsTab(pane, bridge) {
                 return;
             }
             const next = structuredClone(registry);
-            next.models[newName] = { id: uniqueId(newName), name: newName, matches: [], profiles: [], preferredProfile: null, tuning: {} };
+            next.models[newName] = { id: uniqueId(newName), name: newName, matches: [], profiles: [], preferredProfile: null, tunings: { default: {} }, defaultTuning: 'default' };
             newModelNameInput = '';
             void writeRegistry(next, `Added Model "${newName}"`);
         });

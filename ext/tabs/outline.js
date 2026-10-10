@@ -117,6 +117,20 @@ function conflictSpan() {
     return span;
 }
 
+/**
+ * @param {LeafNode} node
+ * @returns {HTMLButtonElement} the '↺' button that resets a playstyle's explicit bit back to inheriting the root's
+ */
+function resetSpan(node) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'pm-reset-inherit';
+    b.dataset.identifier = node.identifier;
+    b.title = 'Reset to inherit from the root loadout';
+    b.textContent = '↺';
+    return b;
+}
+
 /** @param {GroupNode} node @returns {HTMLLabelElement} the pick-one 'none' radio */
 function noneLabel(node) {
     const label = document.createElement('label');
@@ -220,7 +234,8 @@ function leafLi(node, selectedKey, ctx) {
     const li = document.createElement('li');
     li.className = 'pm-node'
         + (node.leafKind === 'marker' ? ' pm-marker' : '')
-        + (node.leafKind === 'ghost' ? ' pm-ghost' : '');
+        + (node.leafKind === 'ghost' ? ' pm-ghost' : '')
+        + (node.inherited ? ' pm-inherited' : '');
     li.dataset.kind = 'leaf';
     li.dataset.key = node.key;
     li.dataset.identifier = node.identifier ?? '';
@@ -231,6 +246,7 @@ function leafLi(node, selectedKey, ctx) {
     spacer.className = 'pm-caret-spacer';
     spacer.setAttribute('aria-hidden', 'true');
     row.append(spacer, handleSpan(), numSpan(li, node.pos), makeSwitch(node), nameSpan(node.name));
+    if (node.explicit) row.append(resetSpan(node));
     applySearchMatch(row, node.key, ctx);
     li.append(row);
     if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
@@ -251,7 +267,7 @@ function leafLi(node, selectedKey, ctx) {
 function groupLi(node, selectedKey, ctx) {
     const key = node.header?.key ?? '';
     const li = document.createElement('li');
-    li.className = 'pm-node';
+    li.className = 'pm-node' + (node.headerSwitch && node.header?.inherited ? ' pm-inherited' : '');
     li.dataset.kind = 'group';
     li.dataset.key = node.header ? key : node.key;
     li.dataset.identifier = node.header?.identifier ?? '';
@@ -268,6 +284,7 @@ function groupLi(node, selectedKey, ctx) {
         row.append(numSpan(li, node.header.pos));
         if (node.headerSwitch) row.append(makeSwitch(node.header));
         row.append(nameSpan(node.header.name));
+        if (node.headerSwitch && node.header.explicit) row.append(resetSpan(node.header));
         if (node.header.hasContent) row.append(sendsTextSpan());
     } else {
         row.append(nameSpan(node.name || '(options)'));
@@ -301,7 +318,7 @@ function groupLi(node, selectedKey, ctx) {
 function sectionLi(node, selectedKey, ctx) {
     const key = node.header?.key ?? '';
     const li = document.createElement('li');
-    li.className = 'pm-node';
+    li.className = 'pm-node' + (node.header && !node.header.commentOnly && node.header.inherited ? ' pm-inherited' : '');
     li.dataset.kind = 'section';
     li.dataset.key = key;
     li.dataset.identifier = node.header?.identifier ?? '';
@@ -320,6 +337,7 @@ function sectionLi(node, selectedKey, ctx) {
     }
     row.append(nameSpan(node.name || node.header?.name || '(section)'));
     if (node.header?.hasContent) row.append(sendsTextSpan());
+    if (node.header && !node.header.commentOnly && node.header.explicit) row.append(resetSpan(node.header));
     applySearchMatch(row, key, ctx);
     if (collapsedDisplay) li.classList.add('pm-collapsed');
     li.append(row);
@@ -443,10 +461,12 @@ export function dropAnchor(li) {
  * (most recent) key LAST; `[]` clears. Plain click -> `[key]`; Ctrl/Meta click
  * toggles the key; Shift click selects the visible range from the primary key.
  * `render(doc, selectedKey, opts)`: a row is selected when its key is
- * `selectedKey` or in `opts.selectedKeys`.
+ * `selectedKey` or in `opts.selectedKeys`. `opts.loadoutId` picks the loadout
+ * shown (default and fallback: `doc.activeLoadoutId`); every bit op emitted
+ * carries it as `loadoutId`.
  * @param {HTMLElement} container the .pm-outline element
  * @param {{ onSelect(keys: string[]): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void, onHistory?(dir: 'undo'|'redo'): void, onCardinality?(nodeKey: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
- * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
+ * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean }, loadoutId?: string }): void, destroy(): void }}
  */
 export function createOutline(container, handlers) {
     /** group key -> GroupNode from the last buildOutline (radio clicks need it) */
@@ -455,6 +475,8 @@ export function createOutline(container, handlers) {
     let selectedKey = null;
     /** the whole selection (primary included) as of the last render/click */
     let /** @type {Set<string>} */ selectedSet = new Set();
+    /** the loadout the last render showed (every bit op targets it) */
+    let /** @type {string} */ currentLoadoutId = '';
 
     const ac = new AbortController();
 
@@ -483,20 +505,26 @@ export function createOutline(container, handlers) {
         if (input.classList.contains('pm-none')) {
             const group = groupForInput(input);
             if (!group) return;
-            const ops = pickOneOps(group, null);
+            const ops = pickOneOps(group, null, currentLoadoutId);
             if (ops.length) void handlers.onOps(ops).catch(() => {}); // nothing enabled: no-op
             return;
         }
         if (input.classList.contains('pm-switch') && input.type === 'radio') {
             const group = groupForInput(input);
             if (!group) return;
-            void handlers.onOps(pickOneOps(group, input.dataset.identifier || null)).catch(() => {});
+            void handlers.onOps(pickOneOps(group, input.dataset.identifier || null, currentLoadoutId)).catch(() => {});
         }
     }
 
     const onClick = (/** @type {MouseEvent} */ ev) => {
         const t = ev.target;
         if (!(t instanceof Element)) return;
+        const reset = /** @type {HTMLElement|null} */ (t.closest('.pm-reset-inherit'));
+        if (reset) {
+            ev.stopPropagation(); // a button, not an input: it must not select the row
+            void handlers.onOps([{ op: 'resetInherit', loadoutId: currentLoadoutId, identifier: reset.dataset.identifier }]).catch(() => {});
+            return;
+        }
         const input = /** @type {HTMLInputElement|null} */ (t.closest('input'));
         if (input) {
             ev.stopPropagation(); // switches never select the row they sit on
@@ -560,7 +588,7 @@ export function createOutline(container, handlers) {
         if (t.type !== 'checkbox' || !t.classList.contains('pm-switch') || t.disabled) return;
         const identifier = t.dataset.identifier || '';
         if (!identifier) return;
-        void handlers.onOps([{ op: 'toggle', identifier, value: t.checked }]).catch(() => {});
+        void handlers.onOps([{ op: 'toggle', identifier, value: t.checked, loadoutId: currentLoadoutId }]).catch(() => {});
     };
 
     const onKeydown = (/** @type {KeyboardEvent} */ ev) => {
@@ -643,13 +671,15 @@ export function createOutline(container, handlers) {
         }
     };
 
-    const render = (/** @type {any} */ doc, /** @type {string|null} */ sel, /** @type {{ collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }} */ opts = {}) => {
+    const render = (/** @type {any} */ doc, /** @type {string|null} */ sel, /** @type {{ collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean }, loadoutId?: string }} */ opts = {}) => {
         selectedKey = sel;
         selectedSet = opts.selectedKeys ?? new Set();
         const top = container.scrollTop;
         destroySortables();
         groupByKey.clear();
-        const model = buildOutline(doc);
+        const lid = opts.loadoutId && doc.loadouts?.[opts.loadoutId] ? opts.loadoutId : doc.activeLoadoutId;
+        currentLoadoutId = lid;
+        const model = buildOutline(doc, lid);
         const searchKeys = opts.search?.keys ?? new Set();
         const searchActive = searchKeys.size > 0;
         const matches = /** @type {WeakMap<Node, boolean>} */ (new WeakMap());

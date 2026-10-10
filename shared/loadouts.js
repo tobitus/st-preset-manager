@@ -43,13 +43,15 @@ export function rootOf(doc, loadoutId) {
 /**
  * Resolve the enabled map of a loadout: root ⊕ playstyle ⊕ the loadout's own
  * per-Model override, then pick-one normalization preferring every id a layer
- * above the root turned on.
+ * above the root turned on. `opts.raw` skips the normalization: the outline
+ * shows the layered bits as stored so a pick-one conflict stays visible.
  * @param {any} doc
  * @param {string} loadoutId
  * @param {string|null} [modelName]
+ * @param {{ raw?: boolean }} [opts]
  * @returns {{ enabled: Record<string, boolean>, source: Record<string, 'root'|'loadout'|'override'> }}
  */
-export function effectiveEnabled(doc, loadoutId, modelName = null) {
+export function effectiveEnabled(doc, loadoutId, modelName = null, opts = {}) {
     const loadout = doc.loadouts?.[loadoutId];
     if (!loadout) throw new LoadoutError(`document has no loadout ${loadoutId}`, 404);
     const root = rootOf(doc, loadoutId);
@@ -72,6 +74,7 @@ export function effectiveEnabled(doc, loadoutId, modelName = null) {
             source[id] = 'override';
         }
     }
+    if (opts.raw) return { enabled, source };
     const preferred = new Set();
     for (const id of Object.keys(enabled)) {
         if (source[id] !== 'root' && enabled[id] === true) preferred.add(id);

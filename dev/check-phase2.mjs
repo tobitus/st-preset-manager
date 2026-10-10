@@ -255,6 +255,7 @@ async function main() {
             const snapA = J((await until(converged, 10000, 'converged before 6')).order);
             await setValue('#pm-window .pm-loadout-picker', A, 'change');
             await setValue('#pm-window .pm-loadout-name', 'B');
+            await setValue('#pm-window .pm-loadout-kind', 'root', 'change');
             await click('#pm-window .pm-loadout-new');
             const B = await until(async () => {
                 const d = await getDoc();

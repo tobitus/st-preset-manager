@@ -315,7 +315,7 @@ async function main() {
 
     // ------------------------------------------------------------------ a4
     await check('a4 DEM in the slot with a non-active loadout: notice names it (as text), header too; Make active restores the active loadout', async () => {
-        const created = await api('POST', `/presets/${ids.dem}/loadouts`, { name: ALT_LOADOUT, from: ids.demLid });
+        const created = await api('POST', `/presets/${ids.dem}/loadouts`, { name: ALT_LOADOUT, kind: 'root', from: ids.demLid });
         must(created.status === 200 || created.status === 201, `create loadout ${created.status} ${created.text.slice(0, 120)}`);
         ids.altLid = Object.values(created.json.doc.loadouts).find((/** @type {any} */ l) => l.name === ALT_LOADOUT)?.id ?? '';
         must(ids.altLid, 'new loadout id not found');

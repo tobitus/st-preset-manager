@@ -139,8 +139,8 @@ test('buildOutline: loadout argument selects whose bits are shown; default = act
 
 test('buildOutline: leaf fields — key, identifier, kind, name fallbacks, ghost is a checkbox', () => {
     const nodes = buildOutline(tinyDoc()).sequences[0].nodes;
-    assert.deepEqual(nodes[0], { type: 'leaf', key: 'k-m', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', enabled: true, switchType: 'readonly', hasContent: false, commentOnly: false, pos: 1 });
-    assert.deepEqual(nodes[1], { type: 'leaf', key: 'k-g', identifier: 'gone', leafKind: 'ghost', name: 'gone', enabled: false, switchType: 'checkbox', hasContent: false, commentOnly: false, pos: 2 });
+    assert.deepEqual(nodes[0], { type: 'leaf', key: 'k-m', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', enabled: true, switchType: 'readonly', hasContent: false, commentOnly: false, pos: 1, inherited: false, explicit: false });
+    assert.deepEqual(nodes[1], { type: 'leaf', key: 'k-g', identifier: 'gone', leafKind: 'ghost', name: 'gone', enabled: false, switchType: 'checkbox', hasContent: false, commentOnly: false, pos: 2, inherited: false, explicit: false });
     const b = nodes[2].nodes[1].options[0];
     assert.equal(b.name, 'b', 'empty block name falls back to the identifier');
     assert.equal(b.switchType, 'radio');

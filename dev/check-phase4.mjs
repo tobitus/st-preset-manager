@@ -14,7 +14,7 @@
  * Checks:
  *   1  seed from profiles + owner merge in the UI -> one "Kimi K3", 2 matches
  *   2  acceptance 7: toolbar picker switches ST's connection + tuning
- *   3  acceptance 2 (model half): panel temperature -> override / global
+ *   3  acceptance 2 (model half): panel temperature -> hot tuning / default tuning
  *   4  acceptance 16: per-Model loadout override on/off by Model
  *   5  acceptance 17: both Kimi profiles (ST's dropdown) -> same state
  *   6  acceptance 8: profile guard names the profile, Unlink works
@@ -121,6 +121,10 @@ const getSlot = async (/** @type {any} */ raw = null) => (await api('GET', raw
     : '/slot')).json;
 const getModels = async () => (await api('GET', '/models')).json;
 const getDoc = async (/** @type {string} */ id) => (await api('GET', `/presets/${id}`)).json;
+/** One named tuning of a Model (default: "default"), or undefined. */
+const tun = async (/** @type {string} */ m, name = 'default') => (await getModels()).models[m]?.tunings?.[name];
+/** The tuning the preset's ACTIVE loadout binds for a Model (null = inherit the Model's default). */
+const binding = async (/** @type {string} */ id, /** @type {string} */ m) => { const d = await getDoc(id); return d.loadouts[d.activeLoadoutId].overrides?.[m]?.tuning ?? null; };
 
 async function dismissPopups(pr = probe) {
     const closed = await pr.eval(`(() => {
@@ -384,24 +388,29 @@ async function main() {
         must(KIMI in (await getModels()).models && mockName, 'precondition: check 1 registry');
         await openInPresets(ids.ff);
         const p = panelSel(ids.ff);
-        // Kimi global 0.3 (override switch OFF)
+        // Kimi default tuning 0.3 (FF's active loadout binds no Kimi tuning)
         await panelModel(ids.ff, KIMI);
-        must(!(await probe.eval(`document.querySelector(${J(`${p} .pm-tuning-override`)})?.checked`)), 'FF already has a Kimi override');
+        must((await probe.eval(`document.querySelector(${J(`${p} .pm-tuning-name`)})?.value`)) === 'default', 'the panel does not start on the default tuning');
+        must((await binding(ids.ff, KIMI)) === null, 'FF already binds a Kimi tuning');
         await setValue(`${p} .pm-tuning-input[data-key="temperature"]`, '0.3', 'change');
-        await until(async () => (await getModels()).models[KIMI].tuning.temperature === 0.3, 8000, 'Kimi global 0.3');
-        // FF override for Kimi 0.9 (switch ON)
-        await setChecked(`${p} .pm-tuning-override`, true);
-        await until(async () => (await getDoc(ids.ff)).tuningOverrides?.[KIMI] !== undefined, 8000, 'FF override created');
-        await until(() => probe.eval(`document.querySelector(${J(`${p} .pm-tuning-override`)})?.checked === true`), 5000, 'switch shows the override');
+        await until(async () => (await tun(KIMI))?.temperature === 0.3, 8000, 'Kimi default tuning 0.3');
+        // FF hot tuning for Kimi 0.9, bound by FF's active loadout
+        await setValue(`${p} .pm-tuning-new-name`, 'hot');
+        await click(`${p} .pm-tuning-new`);
+        await until(async () => (await tun(KIMI, 'hot')) !== undefined, 8000, 'Kimi hot tuning created');
+        await until(() => probe.eval(`document.querySelector(${J(`${p} .pm-tuning-name`)})?.value === 'hot'`), 5000, 'panel edits the hot tuning');
         await setValue(`${p} .pm-tuning-input[data-key="temperature"]`, '0.9', 'change');
-        await until(async () => (await getDoc(ids.ff)).tuningOverrides?.[KIMI]?.temperature === 0.9, 8000, 'FF override 0.9');
-        must((await getModels()).models[KIMI].tuning.temperature === 0.3, 'the override write touched the global');
+        await until(async () => (await tun(KIMI, 'hot'))?.temperature === 0.9, 8000, 'Kimi hot tuning 0.9');
+        await setValue(`${p} .pm-ov-tuning`, 'hot', 'change');
+        await until(async () => (await binding(ids.ff, KIMI)) === 'hot', 8000, 'FF binds the Kimi hot tuning');
+        must((await tun(KIMI)).temperature === 0.3, 'the hot tuning write touched the default tuning');
         await shot('phase4-tuning.png', `${p}`);
-        // mock global 1.1
+        // mock default tuning 1.1
         await panelModel(ids.ff, mockName);
-        must(!(await probe.eval(`document.querySelector(${J(`${p} .pm-tuning-override`)})?.checked`)), 'FF has a mock override');
+        must((await binding(ids.ff, mockName)) === null, 'FF binds a mock tuning');
+        must((await probe.eval(`document.querySelector(${J(`${p} .pm-tuning-name`)})?.value`)) === 'default', 'the panel does not start on the mock default tuning');
         await setValue(`${p} .pm-tuning-input[data-key="temperature"]`, '1.1', 'change');
-        await until(async () => (await getModels()).models[mockName].tuning.temperature === 1.1, 8000, 'mock global 1.1');
+        await until(async () => (await tun(mockName))?.temperature === 1.1, 8000, 'mock default tuning 1.1');
 
         // precondition: ST is on the mock connection and shows 1.1
         const before = await until(async () => {
@@ -434,21 +443,21 @@ async function main() {
         }, 15000, 'Kimi again at 0.9');
 
         const sola = await loadViaLibrary(ids.sola);
-        must((await getDoc(ids.sola)).tuningOverrides?.[KIMI] === undefined, 'Sola has a Kimi override');
+        must((await binding(ids.sola, KIMI)) === null, 'Sola binds a Kimi tuning');
         const onSola = await until(async () => {
             const c = await converged();
             return c && c.slot.desired.presetId === ids.sola && c.s.temperature === 0.3 ? c : null;
-        }, 10000, 'Sola at the Kimi global 0.3');
+        }, 10000, 'Sola at the Kimi default tuning 0.3');
         void sola;
         return `mock 1.1 -> Kimi: profile="${onKimi.s.profile}" source=${onKimi.s.source} model=${onKimi.s.model} temp=${onKimi.s.temperature}; `
-            + `-> ${onMock.s.profile} ${onMock.s.temperature}; -> Kimi 0.9; Sola (no override) ${onSola.s.temperature}; desired preset/loadout + FF loadouts unchanged`;
+            + `-> ${onMock.s.profile} ${onMock.s.temperature}; -> Kimi 0.9; Sola (no Kimi tuning binding) ${onSola.s.temperature}; desired preset/loadout + FF loadouts unchanged`;
     });
 
     // ------------------------------------------------------------------ 2b
     await check('2b model switch: an unsent ST edit lands on the old Model; ST\'s own transition mutation is never written back', async () => {
         const c0 = await loadViaLibrary(ids.ff);
         must(c0.slot.desired.modelId === KIMI && c0.s.temperature === 0.9, `precondition: FF on Kimi at 0.9 (got ${c0.slot.desired.modelId} ${c0.s.temperature})`);
-        const mockT = (await getModels()).models[mockName].tuning.temperature;
+        const mockT = (await tun(mockName)).temperature;
         // Emulate ST mutating a sampler as part of the switch: openai.js clamps
         // temp_openai for some models while it applies them (5719-5721,
         // before CHATCOMPLETION_MODEL_CHANGED). The custom source used here
@@ -475,25 +484,24 @@ async function main() {
         }, 15000, `ST on mock at ${mockT}`);
         must(await probe.eval('window.__chkClamp') === 1, 'precondition: the transition mutation ran during the switch');
         await sleep(1500); // any debounced write-back has landed
-        const ff = await getDoc(ids.ff);
         const reg = await getModels();
-        must(ff.tuningOverrides[KIMI]?.temperature === 0.95, `FF Kimi override ${ff.tuningOverrides[KIMI]?.temperature} (the genuine 0.95 must land on the OLD Model)`);
-        must(reg.models[mockName].tuning.temperature === mockT, `mock global ${reg.models[mockName].tuning.temperature} (the transition value leaked)`);
-        must(ff.tuningOverrides[mockName] === undefined, 'FF gained a mock override');
+        must(reg.models[KIMI].tunings.hot?.temperature === 0.95, `Kimi hot tuning ${reg.models[KIMI].tunings.hot?.temperature} (the genuine 0.95 must land on the OLD Model)`);
+        must(reg.models[mockName].tunings.default.temperature === mockT, `mock default tuning ${reg.models[mockName].tunings.default.temperature} (the transition value leaked)`);
+        must((await binding(ids.ff, mockName)) === null && reg.models[mockName].tunings.hot === undefined, 'FF gained a mock hot tuning');
         await toolbarPick(KIMI);
         const back = await until(async () => {
             const c = await converged();
             return c && c.s.model === HAP && c.s.temperature === 0.95 ? c : null;
         }, 15000, 'Kimi at 0.95 again');
-        return `genuine 0.95 -> FF Kimi override; transition value 1 ignored; mock shows ${onMock.s.temperature}; back on Kimi ${back.s.temperature}`;
+        return `genuine 0.95 -> Kimi hot tuning; transition value 1 ignored; mock shows ${onMock.s.temperature}; back on Kimi ${back.s.temperature}`;
     });
 
     // ------------------------------------------------------------------ 2c
     await check('2c an ST edit made while the connection switch is still being reported lands on the NEW Model', async () => {
         await loadViaLibrary(ids.ff);
         await ensureModel(KIMI, HAP);
-        const mockT = (await getModels()).models[mockName].tuning.temperature;
-        const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+        const mockT = (await tun(mockName)).temperature;
+        const kimiOv = (await tun(KIMI, 'hot')).temperature;
         must(mockT !== 1.33 && kimiOv !== 1.33, 'precondition: 1.33 is a fresh value');
         try {
             await holdFetch('/api/plugins/st-preset-manager/slot/model');
@@ -506,17 +514,16 @@ async function main() {
         } finally {
             await unhold();
         }
-        await until(async () => (await getModels()).models[mockName].tuning.temperature === 1.33, 8000, 'the edit reached the mock global tuning');
+        await until(async () => (await tun(mockName))?.temperature === 1.33, 8000, 'the edit reached the mock default tuning');
         const c = await until(async () => {
             const x = await converged();
             return x && x.s.model === 'mock' && x.s.temperature === 1.33 ? x : null;
         }, 15000, 'ST on mock at 1.33');
-        const ff = await getDoc(ids.ff);
-        must(ff.tuningOverrides[KIMI].temperature === kimiOv, `FF Kimi override changed to ${ff.tuningOverrides[KIMI].temperature}`);
-        must(ff.tuningOverrides[mockName] === undefined, 'FF gained a mock override');
-        // restore the mock global for the later checks
-        must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: mockT } })).status === 200, 'restore mock tuning');
-        return `edit 1.33 during the held report -> mock global 1.33, ST ${c.s.temperature}; FF Kimi override kept ${kimiOv}; mock restored to ${mockT}`;
+        must((await tun(KIMI, 'hot')).temperature === kimiOv, `Kimi hot tuning changed to ${(await tun(KIMI, 'hot')).temperature}`);
+        must((await binding(ids.ff, mockName)) === null && (await tun(mockName, 'hot')) === undefined, 'FF gained a mock hot tuning');
+        // restore the mock default tuning for the later checks
+        must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: mockT } })).status === 200, 'restore mock tuning');
+        return `edit 1.33 during the held report -> mock default tuning 1.33, ST ${c.s.temperature}; Kimi hot tuning kept ${kimiOv}; mock restored to ${mockT}`;
     });
 
     // ------------------------------------------------------------------ 2d
@@ -529,10 +536,10 @@ async function main() {
       try {
         await loadViaLibrary(ids.ff);
         await ensureModel(KIMI, HAP);
-        const mockT = (await getModels()).models[mockName].tuning.temperature;
-        const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+        const mockT = (await tun(mockName)).temperature;
+        const kimiOv = (await tun(KIMI, 'hot')).temperature;
         must(kimiOv !== V, `precondition: ${V} is a fresh value`);
-        if (mockT === V) must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } })).status === 200, 'reset mock tuning');
+        if (mockT === V) must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 1.1 } })).status === 200, 'reset mock tuning');
         await probe.eval(`(() => {
             window.__chkErrors = [];
             window.__chkConsoleError = window.__chkConsoleError ?? console.error;
@@ -568,24 +575,24 @@ async function main() {
         } finally {
             await unhold();
         }
-        await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+        await until(async () => (await tun(mockName))?.temperature === V, 8000, 'B\'s edit on the mock default tuning');
         const c = await until(async () => {
             const x = await converged();
             return x && x.s.model === cModel ? x : null;
         }, 15000, `ST settled on ${cProfile}`);
         await sleep(1500);
-        const ff = await getDoc(ids.ff);
+        const kimiNow = (await tun(KIMI, 'hot')).temperature;
         const c2 = await st();
-        must(c2.temperature === kimiOv, `ST on ${cProfile} shows ${c2.temperature}, FF Kimi override is now ${ff.tuningOverrides[KIMI].temperature} (was ${kimiOv})`);
-        must(ff.tuningOverrides[KIMI].temperature === kimiOv, `FF Kimi override became ${ff.tuningOverrides[KIMI].temperature} (B's edit went to C's Model)`);
-        must((await getModels()).models[KIMI].tuning.temperature !== V, `Kimi global got ${V}`);
+        must(c2.temperature === kimiOv, `ST on ${cProfile} shows ${c2.temperature}, Kimi hot tuning is now ${kimiNow} (was ${kimiOv})`);
+        must(kimiNow === kimiOv, `Kimi hot tuning became ${kimiNow} (B's edit went to C's Model)`);
+        must((await tun(KIMI)).temperature !== V, `Kimi default tuning got ${V}`);
         const errs = (await probe.eval('window.__chkErrors')).filter((/** @type {string} */ e) => /TypeError|Cannot (set|read) propert/.test(e));
         await probe.eval('(() => { if (window.__chkConsoleError) console.error = window.__chkConsoleError; return true; })()');
         must(errs.length === 0, `errors: ${errs[0]?.slice(0, 200)}`);
-        must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: mockT } })).status === 200, 'restore mock tuning');
-        return `B (mock) edit ${V} -> mock global; C (${cProfile}${clamp ? ', ST clamps to 1 on load' : ''}) at the FF Kimi override ${c.s.temperature}, override unchanged; no errors`;
+        must((await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: mockT } })).status === 200, 'restore mock tuning');
+        return `B (mock) edit ${V} -> mock default tuning; C (${cProfile}${clamp ? ', ST clamps to 1 on load' : ''}) at the Kimi hot tuning ${c.s.temperature}, hot tuning unchanged; no errors`;
       } finally {
-        await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+        await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 1.1 } });
       }
     };
     await check('2d a transition edit in flight when another profile loads (ST clamps on that load) stays on its own Model', () => transitionRace('Kimi via nanogpt', NANO, true, 1.44));
@@ -597,7 +604,7 @@ async function main() {
         try {
             await loadViaLibrary(ids.ff);
             await ensureModel(KIMI, HAP);
-            const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            const kimiOv = (await tun(KIMI, 'hot')).temperature;
             must(kimiOv !== V, 'precondition: fresh value');
             /** is ST's temperature slider covered by v2's blocker (a real click would hit the blocker)? */
             const sliderBlocked = () => probe.eval(`(() => {
@@ -626,21 +633,21 @@ async function main() {
                 await unhold();
             }
             must(during.blocked, `ST's sampler panel accepted input while B's write-back was in flight (${J(during)})`);
-            await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+            await until(async () => (await tun(mockName))?.temperature === V, 8000, 'B\'s edit on the mock default tuning');
             const c1 = await until(async () => { const x = await converged(); return x && x.s.model === HAP && x.s.temperature === kimiOv ? x : null; }, 15000, `A settled at its override ${kimiOv}`);
-            const ffMid = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
-            must(ffMid === kimiOv, `A's override became ${ffMid} (B's value leaked to A)`);
+            const ffMid = (await tun(KIMI, 'hot')).temperature;
+            must(ffMid === kimiOv, `A's hot tuning became ${ffMid} (B's value leaked to A)`);
             // now a genuine A edit to exactly B's value
             must(!(await sliderBlocked()).blocked, 'the blocker stayed up after the new baseline');
             must(await setSlider('temp_openai', V), 'no #temp_openai');
-            await until(async () => (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature === V, 8000, `A's edit ${V} reached the FF Kimi override`);
+            await until(async () => (await tun(KIMI, 'hot'))?.temperature === V, 8000, `A's edit ${V} reached the Kimi hot tuning`);
             await sleep(2500);
             const s2 = await st();
-            const ff2 = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
-            must(s2.temperature === V && ff2 === V, `A's edit reverted: ST ${s2.temperature}, override ${ff2}`);
-            return `during the hold ST's slider was blocked (${J(during)}); after release A at ${c1.s.temperature}, B's ${V} on mock; A edit ${V} -> FF Kimi override ${ff2}, ST ${s2.temperature} (kept)`;
+            const ff2 = (await tun(KIMI, 'hot')).temperature;
+            must(s2.temperature === V && ff2 === V, `A's edit reverted: ST ${s2.temperature}, hot tuning ${ff2}`);
+            return `during the hold ST's slider was blocked (${J(during)}); after release A at ${c1.s.temperature}, B's ${V} on mock; A edit ${V} -> Kimi hot tuning ${ff2}, ST ${s2.temperature} (kept)`;
         } finally {
-            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 1.1 } });
         }
     });
 
@@ -650,8 +657,8 @@ async function main() {
         try {
             await loadViaLibrary(ids.ff);
             await ensureModel(KIMI, HAP);
-            const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
-            const kimiG = (await getModels()).models[KIMI].tuning.temperature;
+            const kimiOv = (await tun(KIMI, 'hot')).temperature;
+            const kimiG = (await tun(KIMI)).temperature;
             must(kimiOv !== V, 'precondition: fresh value');
             try {
                 await holdFetch('/api/plugins/st-preset-manager/slot/model');
@@ -673,18 +680,17 @@ async function main() {
             } finally {
                 await unhold();
             }
-            await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+            await until(async () => (await tun(mockName))?.temperature === V, 8000, 'B\'s edit on the mock default tuning');
             const c = await until(async () => { const x = await converged(); return x && x.s.model === HAP ? x : null; }, 15000, 'ST settled on A (hapuppy)');
             await sleep(2000);
-            const ff = await getDoc(ids.ff);
             const reg = await getModels();
             const s2 = await st();
-            must(ff.tuningOverrides[KIMI].temperature === kimiOv, `A's override became ${ff.tuningOverrides[KIMI].temperature} (was ${kimiOv})`);
-            must(reg.models[KIMI].tuning.temperature === kimiG, `A's global became ${reg.models[KIMI].tuning.temperature} (was ${kimiG})`);
+            must(reg.models[KIMI].tunings.hot.temperature === kimiOv, `A's hot tuning became ${reg.models[KIMI].tunings.hot.temperature} (was ${kimiOv})`);
+            must(reg.models[KIMI].tunings.default.temperature === kimiG, `A's default tuning became ${reg.models[KIMI].tunings.default.temperature} (was ${kimiG})`);
             must(s2.temperature === kimiOv, `ST on A shows ${s2.temperature}, expected A's ${kimiOv}`);
-            return `B (mock) ${V} -> mock global; queued picker switch -> ST on ${c.s.model} at ${s2.temperature}; A override ${kimiOv} and global ${kimiG} unchanged`;
+            return `B (mock) ${V} -> mock default tuning; queued picker switch -> ST on ${c.s.model} at ${s2.temperature}; A hot tuning ${kimiOv} and default tuning ${kimiG} unchanged`;
         } finally {
-            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 1.1 } });
         }
     });
 
@@ -723,7 +729,7 @@ async function main() {
             return `install save held while "Mock links Default" loaded Default: ST stayed on ${s1.preset}, detached=${detached}, guard open, no blocker`;
         } finally {
             await closeGuard();
-            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 1.1 } });
             await loadViaLibrary(ids.ff);
         }
     });
@@ -734,8 +740,8 @@ async function main() {
         try {
             await loadViaLibrary(ids.ff);
             await ensureModel(KIMI, HAP);
-            const kimiOv = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
-            const kimiG = (await getModels()).models[KIMI].tuning.temperature;
+            const kimiOv = (await tun(KIMI, 'hot')).temperature;
+            const kimiG = (await tun(KIMI)).temperature;
             must(kimiOv !== V, 'precondition: fresh value');
             try {
                 await holdFetch('/api/plugins/st-preset-manager/slot/model');
@@ -755,62 +761,64 @@ async function main() {
             } finally {
                 await unhold();
             }
-            await until(async () => (await getModels()).models[mockName].tuning.temperature === V, 8000, 'B\'s edit on the mock global');
+            await until(async () => (await tun(mockName))?.temperature === V, 8000, 'B\'s edit on the mock default tuning');
             const c = await until(async () => { const x = await converged(); return x && x.s.model === HAP ? x : null; }, 20000, 'ST settled on A (hapuppy)');
             await sleep(2000);
-            const ff = await getDoc(ids.ff);
             const reg = await getModels();
             const s2 = await st();
-            must(ff.tuningOverrides[KIMI].temperature === kimiOv, `A's override became ${ff.tuningOverrides[KIMI].temperature} (was ${kimiOv})`);
-            must(reg.models[KIMI].tuning.temperature === kimiG, `A's global became ${reg.models[KIMI].tuning.temperature} (was ${kimiG})`);
+            must(reg.models[KIMI].tunings.hot.temperature === kimiOv, `A's hot tuning became ${reg.models[KIMI].tunings.hot.temperature} (was ${kimiOv})`);
+            must(reg.models[KIMI].tunings.default.temperature === kimiG, `A's default tuning became ${reg.models[KIMI].tunings.default.temperature} (was ${kimiG})`);
             must(s2.temperature === kimiOv, `ST on A shows ${s2.temperature}, expected ${kimiOv}`);
-            return `B (mock) ${V} -> mock global; install save failed; queued picker switch -> ST on ${c.s.model} at ${s2.temperature}; A override ${kimiOv}, global ${kimiG} unchanged`;
+            return `B (mock) ${V} -> mock default tuning; install save failed; queued picker switch -> ST on ${c.s.model} at ${s2.temperature}; A hot tuning ${kimiOv}, default tuning ${kimiG} unchanged`;
         } finally {
-            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tuning`, { set: { temperature: 1.1 } });
+            await api('PATCH', `/models/${encodeURIComponent(mockName)}/tunings/default`, { set: { temperature: 1.1 } });
         }
     });
 
     // ------------------------------------------------------------------ 3
-    await check('3 acceptance 2 (model half): panel temperature -> FF override, else the Kimi global', async () => {
+    await check('3 acceptance 2 (model half): panel temperature -> FF hot tuning, else the Kimi default tuning', async () => {
         await loadViaLibrary(ids.ff);
         const c0 = await ensureModel(KIMI, HAP);
-        const ffT = (await getDoc(ids.ff)).tuningOverrides?.[KIMI]?.temperature;
-        must(c0.slot.desired.modelId === KIMI && c0.s.temperature === ffT, `precondition: FF on Kimi at its override ${ffT} (got ${c0.slot.desired.modelId} ${c0.s.temperature})`);
+        const ffT = (await tun(KIMI, 'hot'))?.temperature;
+        must(c0.slot.desired.modelId === KIMI && c0.s.temperature === ffT, `precondition: FF on Kimi at its hot tuning ${ffT} (got ${c0.slot.desired.modelId} ${c0.s.temperature})`);
         must(await setSlider('temp_openai', 0.55), 'no #temp_openai');
-        await until(async () => (await getDoc(ids.ff)).tuningOverrides?.[KIMI]?.temperature === 0.55, 8000, 'FF override 0.55');
-        const g1 = (await getModels()).models[KIMI].tuning.temperature;
-        must(g1 === 0.3, `global changed to ${g1} by an override-routed edit`);
+        await until(async () => (await tun(KIMI, 'hot'))?.temperature === 0.55, 8000, 'Kimi hot tuning 0.55');
+        const g1 = (await tun(KIMI)).temperature;
+        must(g1 === 0.3, `default tuning changed to ${g1} by a hot-tuning-routed edit`);
 
         const c1 = await loadViaLibrary(ids.sola);
-        must(c1.s.temperature === 0.3, `precondition: Sola at the global 0.3 (got ${c1.s.temperature})`);
+        must(c1.s.temperature === 0.3, `precondition: Sola at the default tuning 0.3 (got ${c1.s.temperature})`);
         const solaSettingsTemp = (await getDoc(ids.sola)).settings?.temperature;
         must(await setSlider('temp_openai', 0.55), 'no #temp_openai');
-        await until(async () => (await getModels()).models[KIMI].tuning.temperature === 0.55, 8000, 'Kimi global 0.55');
+        await until(async () => (await tun(KIMI))?.temperature === 0.55, 8000, 'Kimi default tuning 0.55');
         const sola = await getDoc(ids.sola);
-        must(sola.tuningOverrides?.[KIMI] === undefined, 'Sola gained a Kimi override');
+        must((await binding(ids.sola, KIMI)) === null, 'Sola gained a Kimi tuning binding');
         must(sola.settings?.temperature === solaSettingsTemp, 'Sola settings.temperature changed');
-        return `FF (override) ${ffT} -> 0.55 in tuningOverrides["Kimi K3"], global stayed 0.3; Sola (no override) -> GET /models Kimi global 0.55`;
+        return `FF (hot tuning) ${ffT} -> 0.55 in models["Kimi K3"].tunings.hot, default tuning stayed 0.3; Sola (no binding) -> GET /models Kimi default tuning 0.55`;
     });
 
     // ------------------------------------------------------------------ 3b
-    await check('3b tuning panel edit right after an unsent ST slider edit: both reach the override', async () => {
+    await check('3b tuning panel edit right after an unsent ST slider edit: both reach the hot tuning', async () => {
         await loadViaLibrary(ids.ff);
         const c0 = await ensureModel(KIMI, HAP);
         must(c0.slot.desired.modelId === KIMI, 'precondition: Kimi active');
         await openInPresets(ids.ff);
         const p = panelSel(ids.ff);
         await panelModel(ids.ff, KIMI);
-        await until(() => probe.eval(`document.querySelector(${J(`${p} .pm-tuning-override`)})?.checked === true`), 5000, 'precondition: FF Kimi override on');
+        await setValue(`${p} .pm-tuning-name`, 'hot', 'change');
+        await until(() => probe.eval(`document.querySelector(${J(`${p} .pm-tuning-name`)})?.value === 'hot'`), 5000, 'precondition: panel on the Kimi hot tuning');
+        const dTopP = (await tun(KIMI)).top_p;
         must(await setSlider('temp_openai', 0.66), 'no #temp_openai');
         must(await setValue(`${p} .pm-tuning-input[data-key="top_p"]`, '0.77', 'change'), 'no top_p input');
         await sleep(2500); // the edit op, the debounced ST save and any reconcile
-        const o = (await getDoc(ids.ff)).tuningOverrides[KIMI];
-        must(o.temperature === 0.66 && o.top_p === 0.77, `override ${J(o)}`);
+        const o = await tun(KIMI, 'hot');
+        must(o.temperature === 0.66 && o.top_p === 0.77, `hot tuning ${J(o)}`);
+        must((await tun(KIMI)).top_p === dTopP, `the default tuning top_p changed to ${(await tun(KIMI)).top_p} (was ${dTopP})`);
         const c1 = await until(async () => {
             const c = await converged();
             return c && c.s.temperature === 0.66 ? c : null;
         }, 8000, 'ST shows 0.66');
-        return `override ${J(o)}; ST ${c1.s.temperature}`;
+        return `hot tuning ${J(o)}; default tuning top_p unchanged ${dTopP}; ST ${c1.s.temperature}`;
     });
 
     // ------------------------------------------------------------------ 4
@@ -822,7 +830,7 @@ async function main() {
         const d0 = await getDoc(ids.ff);
         const lid = d0.activeLoadoutId;
         must(d0.loadouts[lid].enabled[K] === false, 'precondition: loadout has the Kimi block off');
-        must(!d0.loadouts[lid].overrides?.[KIMI], 'precondition: no Kimi override yet');
+        must(d0.loadouts[lid].overrides?.[KIMI]?.enabled?.[K] === undefined, 'precondition: no Kimi block override yet');
         await until(async () => (await domOn(K)) === false, 5000, 'dom shows the block off');
 
         await openInPresets(ids.ff);
@@ -885,7 +893,7 @@ async function main() {
         const b2 = await until(() => converged(), 8000, 'settled');
         const bOn = await domOn(K);
         must(a.slot.desired.modelId === KIMI && b2.slot.desired.modelId === KIMI, `Models ${a.slot.desired.modelId} / ${b2.slot.desired.modelId}`);
-        const ffT = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+        const ffT = (await tun(KIMI, 'hot')).temperature;
         must(a.s.temperature === b2.s.temperature && a.s.temperature === ffT, `temperatures ${a.s.temperature} / ${b2.s.temperature}`);
         must(aOn === true && bOn === true, `Kimi block ${aOn} / ${bOn}`);
         must(J(a.s.order) === J(b2.s.order) && a.slot.hash === b2.slot.hash, 'compiled slot differs between the two providers');
@@ -896,7 +904,7 @@ async function main() {
     // ------------------------------------------------------------------ 5b
     await check('5b two tabs on different Models: each shows its own Model\'s tuning and routes its own edits', async () => {
         try {
-            const T = (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature;
+            const T = (await tun(KIMI, 'hot')).temperature;
             await until(async () => {
                 const c = await converged();
                 return c && c.s.model === NANO && c.s.temperature === T ? c : null;
@@ -907,7 +915,7 @@ async function main() {
                 return converged(probeB);
             }, 30000, 'tab B on the slot');
             must(await pickStProfile('Mock', probeB), 'tab B dropdown');
-            const mockT = (await getModels()).models[mockName].tuning.temperature;
+            const mockT = (await tun(mockName)).temperature;
             await until(async () => {
                 await dismissPopups(probeB);
                 const c = await converged(probeB);
@@ -918,16 +926,16 @@ async function main() {
             must(a1.model === NANO && a1.temperature === T && a1.preset === SLOT_NAME, `tab A changed to ${a1.model} ${a1.temperature} after tab B's switch`);
 
             must(await setSlider('temp_openai', 0.58), 'tab A slider');
-            await until(async () => (await getDoc(ids.ff)).tuningOverrides[KIMI].temperature === 0.58, 8000, 'tab A edit -> FF Kimi override');
+            await until(async () => (await tun(KIMI, 'hot'))?.temperature === 0.58, 8000, 'tab A edit -> Kimi hot tuning');
             must(await setSlider('temp_openai', 1.25, probeB), 'tab B slider');
-            await until(async () => (await getModels()).models[mockName].tuning.temperature === 1.25, 8000, 'tab B edit -> mock global');
+            await until(async () => (await tun(mockName))?.temperature === 1.25, 8000, 'tab B edit -> mock default tuning');
             await sleep(2000);
-            const d = await getDoc(ids.ff);
-            must(d.tuningOverrides[KIMI].temperature === 0.58, `FF Kimi override ${d.tuningOverrides[KIMI].temperature} after tab B's edit`);
-            must(d.tuningOverrides[mockName] === undefined, 'tab B\'s edit created a mock override on FF');
+            const hotT = (await tun(KIMI, 'hot')).temperature;
+            must(hotT === 0.58, `Kimi hot tuning ${hotT} after tab B's edit`);
+            must((await binding(ids.ff, mockName)) === null && (await tun(mockName, 'hot')) === undefined, 'tab B\'s edit created a mock hot tuning on FF');
             const a2 = await until(async () => { const c = await converged(); return c && c.s.temperature === 0.58 ? c : null; }, 8000, 'tab A shows 0.58');
             const b2 = await until(async () => { const c = await converged(probeB); return c && c.s.temperature === 1.25 ? c : null; }, 8000, 'tab B shows 1.25');
-            return `A (${a2.s.model}) ${T} -> edit 0.58 -> FF Kimi override; B (${b2.s.model}) ${mockT} -> edit 1.25 -> mock global; A stayed ${a2.s.temperature}, B ${b2.s.temperature}`;
+            return `A (${a2.s.model}) ${T} -> edit 0.58 -> Kimi hot tuning; B (${b2.s.model}) ${mockT} -> edit 1.25 -> mock default tuning; A stayed ${a2.s.temperature}, B ${b2.s.temperature}`;
         } finally {
             probeB.kill();
         }
@@ -984,7 +992,7 @@ async function main() {
     await check('6 acceptance 8: profile guard names "Mock links Default"; Unlink excludes preset and re-attaches', async () => {
         await closeGuard();
         must(await pickStProfile('Mock'), 'dropdown pick failed');
-        const mockT = (await getModels()).models[mockName].tuning.temperature;
+        const mockT = (await tun(mockName)).temperature;
         await until(async () => {
             const c = await converged();
             return c && c.s.model === 'mock' && c.s.temperature === mockT ? c : null;
@@ -1027,7 +1035,7 @@ async function main() {
         await until(async () => { const c = await converged(); return c && c.s.selectedProfile === prof.Mock ? c : null; }, 15000, 'on Mock');
         must(!(await exists('#pm-guard-dialog')), 'precondition: no guard dialog');
         const reg = await getModels();
-        reg.models['Linked Only'] = { id: 'm_linked_only', name: 'Linked Only', matches: [], profiles: [lid], preferredProfile: lid, tuning: {} };
+        reg.models['Linked Only'] = { id: 'm_linked_only', name: 'Linked Only', matches: [], profiles: [lid], preferredProfile: lid, tunings: { default: {} }, defaultTuning: 'default' };
         must((await api('PUT', '/models', reg)).status === 200, 'PUT /models');
         await toolbarPick('Linked Only');
         await until(() => exists('#pm-window .pm-model-unlink-switch'), 10000, 'refusal with an Unlink offer');
@@ -1138,11 +1146,11 @@ async function main() {
     });
 
     // ------------------------------------------------------------------ 7b
-    await check('7b renaming a Model in the Settings tab migrates the presets\' overrides; ST keeps the same state', async () => {
+    await check('7b renaming a Model in the Settings tab migrates the presets\' hot tuning binding; ST keeps the same state', async () => {
         const d0 = await getDoc(ids.ff);
         const lid = d0.activeLoadoutId;
-        const T = d0.tuningOverrides[KIMI]?.temperature;
-        must(T !== undefined && d0.loadouts[lid].overrides?.[KIMI], 'precondition: FF has Kimi tuning + loadout overrides');
+        const T = (await tun(KIMI, 'hot'))?.temperature;
+        must(T !== undefined && d0.loadouts[lid].overrides?.[KIMI]?.tuning === 'hot', 'precondition: FF binds the Kimi hot tuning');
         must(await pickStProfile('Kimi via hapuppy'), 'dropdown pick failed');
         await until(async () => { const c = await converged(); return c && c.s.model === HAP && c.s.temperature === T ? c : null; }, 15000, `on Kimi at ${T}`);
         await showTab('settings');
@@ -1150,15 +1158,16 @@ async function main() {
         await setValue(`#pm-window .pm-model-row[data-model="${KIMI}"] .pm-model-name`, 'Kimi', 'change');
         const d1 = await until(async () => {
             const d = await getDoc(ids.ff);
-            return d.tuningOverrides?.Kimi && !d.tuningOverrides[KIMI] ? d : null;
-        }, 8000, 'FF tuning override re-keyed to "Kimi"');
+            const o = d.loadouts[d.activeLoadoutId].overrides ?? {};
+            return o.Kimi?.tuning === 'hot' && !o[KIMI] && (await tun('Kimi', 'hot')) !== undefined ? d : null;
+        }, 8000, 'FF hot tuning binding re-keyed to "Kimi"');
         must(d1.loadouts[lid].overrides?.Kimi && !d1.loadouts[lid].overrides[KIMI], 'loadout override not re-keyed');
         const reg = await getModels();
         must(reg.models.Kimi && !reg.models[KIMI], 'registry not renamed');
         const c = await until(async () => { const x = await converged(); return x && x.slot.desired.modelId === 'Kimi' ? x : null; }, 10000, 'slot resolves "Kimi"');
         must(c.s.temperature === T, `ST temperature ${c.s.temperature}, expected ${T}`);
         must((await domOn(ids.kimiBlock)) === true, 'the Kimi block override stopped applying');
-        return `Kimi K3 -> Kimi: FF tuningOverrides ${J(Object.keys(d1.tuningOverrides))}, loadout overrides ${J(Object.keys(d1.loadouts[lid].overrides))}; ST ${c.s.temperature}, Kimi block on`;
+        return `Kimi K3 -> Kimi: FF loadout overrides ${J(Object.keys(d1.loadouts[lid].overrides))} (Kimi tuning ${d1.loadouts[lid].overrides.Kimi.tuning}), models.Kimi.tunings ${J(Object.keys(reg.models.Kimi.tunings))}; ST ${c.s.temperature}, Kimi block on`;
     });
 
     // ------------------------------------------------------------------ 8

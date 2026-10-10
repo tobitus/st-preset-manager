@@ -39,6 +39,7 @@ import { createEditor, findGroupRow } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
 import { findLeaf, headingAction, searchMatches } from '../outline-model.js';
+import { rootOf } from '../../shared/loadouts.js';
 import { createEditGuard } from '../dirty.js';
 
 /**
@@ -50,6 +51,9 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLElement} statusEl the `.pm-status` one-liner
  * @property {HTMLSelectElement} picker loadout picker
  * @property {HTMLInputElement} loadoutName typed loadout name
+ * @property {HTMLSelectElement} parentSelect root a playstyle inherits from
+ * @property {HTMLSelectElement} kindSelect kind of the loadout 'New' creates
+ * @property {HTMLButtonElement} resetAllBtn 'Reset all to inherit' (playstyles only)
  * @property {HTMLButtonElement} deleteBtn two-click-armed loadout delete
  * @property {HTMLButtonElement[]} rankButtons promote/demote/move up/down/make section/make group
  * @property {HTMLButtonElement} shelfSaveBtn 'Save to shelf' button
@@ -299,14 +303,19 @@ export function createPresetsTab(pane, bridge) {
         root.dataset.presetId = id;
         root.innerHTML = `
             <div class="pm-not-active" hidden><span class="pm-not-active-text"></span><button class="pm-make-active menu_button" title="Load this preset with its active loadout into SillyTavern (same as Library → Load)">Make active</button></div>
-            <div class="pm-loadout-bar">
-                <label class="pm-loadout-label">Loadout</label>
-                <select class="pm-loadout-picker text_pole" title="loadout"></select>
-                <input class="pm-loadout-name text_pole" type="text" placeholder="name…">
-                <button class="pm-loadout-new menu_button" title="Create a loadout from the selected one">New from selected</button>
-                <button class="pm-loadout-rename menu_button" title="Rename the selected loadout to the typed name">Rename</button>
-                <button class="pm-loadout-delete menu_button" title="Delete the selected loadout">Delete</button>
-                <button class="pm-loadout-activate menu_button" title="Make the selected loadout the active one">Activate</button>
+            <div class="pm-loadout-box">
+                <div class="pm-loadout-box-title">Loadout</div>
+                <div class="pm-loadout-bar">
+                    <select class="pm-loadout-picker text_pole" title="loadout"></select>
+                    <select class="pm-loadout-parent text_pole" title="Root this playstyle inherits from" hidden></select>
+                    <button class="pm-loadout-activate menu_button" title="Make the selected loadout the active one">Activate</button>
+                    <button class="pm-loadout-reset-all menu_button" title="Drop every explicit setting of this playstyle: it inherits everything from its root" hidden>Reset all to inherit</button>
+                    <input class="pm-loadout-name text_pole" type="text" placeholder="name…">
+                    <select class="pm-loadout-kind text_pole" title="Kind of the new loadout"><option value="root">root</option><option value="playstyle">playstyle</option></select>
+                    <button class="pm-loadout-new menu_button" title="Create a loadout: a root copies the selected loadout's root; a playstyle inherits from it">New</button>
+                    <button class="pm-loadout-rename menu_button" title="Rename the selected loadout to the typed name">Rename</button>
+                    <button class="pm-loadout-delete menu_button" title="Delete the selected loadout">Delete loadout</button>
+                </div>
             </div>
             <div class="pm-rank-bar">
                 <button class="pm-rank-promote menu_button" title="Promote the selected row">Promote (Tab)</button>
@@ -369,6 +378,9 @@ export function createPresetsTab(pane, bridge) {
             makeActiveBtn: q('.pm-make-active'),
             picker: q('.pm-loadout-picker'),
             loadoutName: q('.pm-loadout-name'),
+            parentSelect: q('.pm-loadout-parent'),
+            kindSelect: q('.pm-loadout-kind'),
+            resetAllBtn: q('.pm-loadout-reset-all'),
             deleteBtn: q('.pm-loadout-delete'),
             rankButtons: [q('.pm-rank-promote'), q('.pm-rank-demote'), q('.pm-move-up'), q('.pm-move-down'), q('.pm-rank-make-section'), q('.pm-rank-make-group')],
             shelfSaveBtn: q('.pm-shelf-save'),
@@ -434,7 +446,11 @@ export function createPresetsTab(pane, bridge) {
             setSource: (/** @type {string} */ s) => { shelfSource = s; },
             onCopy: (/** @type {any} */ src, /** @type {{ before: string|null, outsideGroup: boolean }} */ anchor) => copyInto(id, src, anchor),
         });
-        nextView.picker.addEventListener('change', () => nextView.modelPanel.render());
+        nextView.picker.addEventListener('change', () => refreshView());
+        nextView.parentSelect.addEventListener('change', () => void reparentLoadout(nextView));
+        nextView.resetAllBtn.addEventListener('click', () => {
+            void runOps(id, [{ op: 'resetAllInherit', loadoutId: nextView.picker.value }]).catch(() => {});
+        });
         q('.pm-loadout-new').addEventListener('click', () => void newLoadout(nextView));
         q('.pm-loadout-rename').addEventListener('click', () => void renameLoadout(nextView));
         q('.pm-loadout-delete').addEventListener('click', () => void deleteLoadout(nextView));
@@ -796,7 +812,10 @@ export function createPresetsTab(pane, bridge) {
         view.picker.replaceChildren(...loadouts.map((/** @type {any} */ l) => {
             const opt = document.createElement('option');
             opt.value = l.id;
-            opt.textContent = l.name + (l.id === doc.activeLoadoutId ? ' (active)' : '');
+            const label = l.kind === 'playstyle'
+                ? `${l.name} ↳ ${doc.loadouts[l.parent]?.name ?? l.parent}`
+                : `${l.name} (root)`;
+            opt.textContent = label + (l.id === doc.activeLoadoutId ? ' (active)' : '');
             return opt;
         }));
         const has = (/** @type {string} */ lid) => loadouts.some((/** @type {any} */ l) => l.id === lid);
@@ -807,6 +826,20 @@ export function createPresetsTab(pane, bridge) {
                 : (doc.activeLoadoutId && has(doc.activeLoadoutId) ? doc.activeLoadoutId : (loadouts[0]?.id ?? '')));
         view.selectNextLid = null;
         view.picker.value = wanted ?? '';
+        const sel = doc.loadouts?.[view.picker.value];
+        const isPlay = sel?.kind === 'playstyle';
+        view.parentSelect.hidden = !isPlay;
+        if (isPlay) {
+            view.parentSelect.replaceChildren(...loadouts.filter((/** @type {any} */ l) => l.kind !== 'playstyle').map((/** @type {any} */ l) => {
+                const opt = document.createElement('option');
+                opt.value = l.id;
+                opt.textContent = l.name;
+                return opt;
+            }));
+            view.parentSelect.value = sel.parent;
+        }
+        view.resetAllBtn.hidden = !isPlay;
+        view.resetAllBtn.disabled = isPlay && Object.keys(sel.enabled ?? {}).length === 0;
     }
 
     /** Targeted refresh: picker, rank/edit bars, notes (if not dirty), outline+editor. */
@@ -848,6 +881,7 @@ export function createPresetsTab(pane, bridge) {
             collapsed: view.collapsed,
             selectedKeys: multi.get(view.id),
             search: q ? { keys: new Set(matches), current: view.search.index >= 0 ? matches[view.search.index] : null, filter: view.search.filter } : undefined,
+            loadoutId: view.picker.value,
         });
         view.editor.show(doc, key);
         applyHistoryButtons(view);
@@ -868,9 +902,12 @@ export function createPresetsTab(pane, bridge) {
         const id = v.id;
         const name = v.loadoutName.value.trim();
         if (!name) { setStatus('Loadout name is required', true); return; }
+        const kind = v.kindSelect.value;
+        const rootId = rootOf(docs.get(id), v.picker.value).id;
         const oldLids = new Set(Object.values(docs.get(id)?.loadouts ?? {}).map((/** @type {any} */ l) => l.id));
         try {
-            const res = await bridge.edit(() => api('POST', `/presets/${id}/loadouts`, { name, from: v.picker.value }));
+            const body = kind === 'playstyle' ? { name, kind, parent: rootId } : { name, kind, from: rootId };
+            const res = await bridge.edit(() => api('POST', `/presets/${id}/loadouts`, body));
             setDoc(id, res.doc);
             const fresh = Object.values(res.doc?.loadouts ?? {});
             const byName = fresh.find((/** @type {any} */ l) => l.name === name && !oldLids.has(l.id));
@@ -902,6 +939,22 @@ export function createPresetsTab(pane, bridge) {
         refreshView();
     }
 
+    /** Re-parent the selected playstyle onto the root chosen in the parent select. */
+    async function reparentLoadout(/** @type {PresetView} */ v) {
+        const id = v.id;
+        const lid = v.picker.value;
+        if (!lid) return;
+        try {
+            const res = await bridge.edit(() => api('PATCH', `/presets/${id}/loadouts/${lid}`, { parent: v.parentSelect.value }));
+            setDoc(id, res.doc);
+            setStatus('');
+        } catch (err) {
+            setStatus(errText(err), true);
+            await regetDoc(id);
+        }
+        refreshView();
+    }
+
     /** First click arms (4 s timer); second click within the window deletes. */
     async function deleteLoadout(/** @type {PresetView} */ v) {
         const id = v.id;
@@ -912,19 +965,22 @@ export function createPresetsTab(pane, bridge) {
             v.deleteBtn.textContent = 'Confirm delete';
             v.deleteTimer = setTimeout(() => {
                 v.deleteArmed = false;
-                v.deleteBtn.textContent = 'Delete';
+                v.deleteBtn.textContent = 'Delete loadout';
             }, 4000);
             return;
         }
-        if (v.deleteTimer) clearTimeout(v.deleteTimer);
+        clearTimeout(v.deleteTimer);
         v.deleteArmed = false;
-        v.deleteBtn.textContent = 'Delete';
+        v.deleteBtn.textContent = 'Delete loadout';
         try {
             const res = await bridge.edit(() => api('DELETE', `/presets/${id}/loadouts/${lid}`));
             setDoc(id, res.doc);
             setStatus('');
-        } catch (err) {
+        } catch (/** @type {any} */ err) {
             setStatus(errText(err), true);
+            const msg = document.createElement('p');
+            msg.textContent = err?.body?.error ?? errText(err);
+            void ctx().callGenericPopup(msg, ctx().POPUP_TYPE.TEXT);
             await regetDoc(id);
         }
         refreshView();
