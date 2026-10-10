@@ -62,6 +62,7 @@ const TOOL_NAMES = [
     'models_rename', 'models_merge', 'models_seed', 'profiles_list', 'profiles_backup',
     'slot_get', 'slot_load', 'slot_set_model', 'diff_presets', 'diff_blocks',
     'revisions_list', 'revision_get', 'revision_create', 'revision_restore',
+    'preset_undo', 'preset_redo', 'preset_history',
     'shelf_list', 'shelf_get', 'shelf_add', 'shelf_update', 'shelf_remove',
 ];
 

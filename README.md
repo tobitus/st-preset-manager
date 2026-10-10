@@ -340,6 +340,14 @@ Chromium on ST).
   shows the group in the editor pane: rename it (`renameGroup`), switch
   1 ↔ N (`setCardinality`) and *Dissolve* it (`dissolveGroup`: heading and
   options become plain rows in place; order, switches and loadouts are kept).
+- **Undo / Redo** (edit bar; Ctrl/Cmd+Z and Ctrl/Cmd+Shift+Z in the
+  outline): server-side, per preset, whole-document snapshots, newest 100.
+  Every change to a document counts (ops, loadout/override/meta edits, ticks
+  made in ST's own prompt panel, copies); an import with replace, a revision
+  restore and a Model rename/merge clear the history. The history lives in
+  memory only: it is lost when SillyTavern (the plugin) restarts. REST
+  `POST /presets/:id/undo|redo`, `GET /presets/:id/history`; MCP
+  `preset_undo`, `preset_redo`, `preset_history`.
 - **Search**: names + content, case-insensitive, client-side over the loaded
   document; a match count, Enter / Shift+Enter walk the matches (the editor
   follows), *Filter* keeps only matches and their ancestor headings, and a

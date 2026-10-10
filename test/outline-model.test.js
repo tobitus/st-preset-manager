@@ -184,6 +184,19 @@ test('keyAction: Tab promote, Shift+Tab demote, Alt+Up/Down move; everything els
     assert.equal(k({ key: 'a' }), null);
 });
 
+test('keyAction: Ctrl/Cmd+Z undo, Ctrl/Cmd+Shift+Z redo; with Alt, or other ctrl keys, null', () => {
+    const k = (/** @type {any} */ o) => keyAction({ key: '', code: '', shiftKey: false, altKey: false, ctrlKey: false, metaKey: false, ...o });
+    assert.deepEqual(k({ key: 'z', code: 'KeyZ', ctrlKey: true }), { op: 'undo' });
+    assert.deepEqual(k({ key: 'z', code: 'KeyZ', metaKey: true }), { op: 'undo' });
+    assert.deepEqual(k({ key: 'Z', code: 'KeyZ', ctrlKey: true, shiftKey: true }), { op: 'redo' });
+    assert.deepEqual(k({ key: 'Z', code: 'KeyZ', metaKey: true, shiftKey: true }), { op: 'redo' });
+    assert.deepEqual(k({ key: 'z', code: 'KeyW', ctrlKey: true }), { op: 'undo' }, 'by produced key (AZERTY z)');
+    assert.equal(k({ key: 'z', code: 'KeyZ' }), null, 'bare z is typing');
+    assert.equal(k({ key: 'z', code: 'KeyZ', ctrlKey: true, altKey: true }), null);
+    assert.equal(k({ key: 'y', code: 'KeyY', ctrlKey: true }), null);
+    assert.equal(k({ key: 'Tab', ctrlKey: true }), null);
+});
+
 // ------------------------------------------------------------ pickOneOps
 
 test('pickOneOps: choosing a member -> one setGroup; none -> toggles off every member that is on', () => {

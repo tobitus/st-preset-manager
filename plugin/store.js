@@ -74,6 +74,9 @@ function isPlainObject(value) {
 /** shelf item id: `b_` + 26-char Crockford base32 ULID */
 const SHELF_ID = /^b_[0-9A-Z]{26}$/;
 
+/** max undo (and redo) snapshots kept per preset */
+const UNDO_CAP = 100;
+
 export class Store {
     /** @param {string} root plugin data root (<user>/preset-manager) */
     constructor(root) {
@@ -99,6 +102,8 @@ export class Store {
          * no longer the desired one, so replaying it onto the current
          * document would pour the old preset's state into the new one. */
         this.slotChangedRev = 0;
+        /** @type {Map<string, {undo: any[], redo: any[]}>} per-preset in-memory undo/redo stacks of whole-document snapshots (lost on restart) */
+        this._undo = new Map();
     }
 
     /** Serialize a mutation. @param {() => any} fn */
@@ -201,9 +206,9 @@ export class Store {
      * never call directly from a route. Docs must already be indexed and
      * keep their name/folder (this is a content transaction, not a
      * rename/move — `_savePresetNow` handles those).
-     * @param {{ registry?: any, docs?: any[], revisionLabel?: string, shelf?: { id: string, entry: any }[] }} [opts]
+     * @param {{ registry?: any, docs?: any[], revisionLabel?: string, shelf?: { id: string, entry: any }[], undoable?: boolean }} [opts] undoable: push each doc's pre-commit snapshot onto its undo stack; otherwise its stacks are cleared
      */
-    async _commit({ registry = undefined, docs = [], revisionLabel = undefined, shelf = [] } = {}) {
+    async _commit({ registry = undefined, docs = [], revisionLabel = undefined, shelf = [], undoable = false } = {}) {
         if (registry !== undefined) {
             const errs = validateRegistry(registry);
             if (errs.length) throw new StoreError(`invalid registry: ${errs.join(', ')}`, 400);
@@ -223,7 +228,10 @@ export class Store {
             targets.push({ entry, doc });
         }
 
+        /** @type {Map<string, any>} pre-commit document clones, for undo */
+        const prevClones = new Map();
         for (const { entry, doc } of targets) {
+            prevClones.set(doc.id, structuredClone(entry.doc));
             await this._writeRevision(entry.doc, revisionLabel);
             doc.rev = (entry.doc.rev ?? 0) + 1;
             doc.updatedAt = new Date().toISOString();
@@ -270,6 +278,11 @@ export class Store {
 
         for (const { entry, doc } of targets) {
             this.index.set(doc.id, { ...entry, updatedAt: doc.updatedAt, tags: doc.tags ?? [], doc: structuredClone(doc) });
+            // Model rename/merge rewrite references: older snapshots would
+            // name a Model that no longer exists, so they are dropped
+            const prevClone = prevClones.get(doc.id);
+            if (undoable && prevClone) this._pushUndo(doc.id, prevClone);
+            else this._undo.delete(doc.id);
         }
         for (const { id, entry } of shelf) {
             if (entry) this.shelf.set(id, structuredClone(entry));
@@ -494,7 +507,7 @@ export class Store {
      * + save). Never call outside the queue — the single-writer invariant
      * is what makes its reads trustworthy.
      * @param {any} doc
-     * @param {{ label?: string, onPublish?: (indexedDoc: any) => void }} [opts]
+     * @param {{ label?: string, onPublish?: (indexedDoc: any) => void, history?: 'push'|'keep' }} [opts] history: 'push' (default) records the pre-save doc for undo; 'keep' leaves the stacks alone
      */
     async _savePresetNow(doc, opts = {}) {
         {
@@ -502,6 +515,7 @@ export class Store {
             if (errs.length) throw new StoreError(`invalid document: ${errs.join(', ')}`);
             const entry = this.index.get(doc.id);
             if (!entry) throw new StoreError(`preset ${doc.id} not found`, 404);
+            const prev = structuredClone(entry.doc);
             const oldNamePath = entry.path;
             doc.updatedAt = new Date().toISOString();
             doc.rev = (entry.doc.rev ?? 0) + 1;
@@ -515,6 +529,7 @@ export class Store {
             }
             await this._writeDoc(doc, path.dirname(newPath), opts.onPublish);
             await this._bumpRev();
+            if (opts.history !== 'keep') this._pushUndo(doc.id, prev);
             return structuredClone(doc);
         }
     }
@@ -531,9 +546,10 @@ export class Store {
      * @param {any} existing index entry of the document being replaced
      * @param {any} doc the new content
      * @param {string} label revision label for the pre-replace snapshot
+     * @param {'clear'|'keep'} [history] 'clear' (default) drops the preset's undo/redo stacks; 'keep' leaves them to the caller (undo/redo)
      * @returns {Promise<{ saved: any, desired: boolean }>}
      */
-    async _replaceDocNow(existing, doc, label) {
+    async _replaceDocNow(existing, doc, label, history = 'clear') {
         doc.id = existing.id;
         doc.createdAt = existing.doc.createdAt;
         const desired = this.state.presetId === existing.id;
@@ -545,6 +561,7 @@ export class Store {
         // observe the new doc with a stale loadout id in between).
         // onPublish runs synchronously right after this.index.set.
         const saved = await this._savePresetNow(doc, {
+            history: 'keep',
             label,
             onPublish: (indexedDoc) => {
                 if (!desired) return;
@@ -559,7 +576,68 @@ export class Store {
                 }
             },
         });
+        if (history === 'clear') this._undo.delete(existing.id);
         return { saved, desired };
+    }
+
+    /**
+     * Push a pre-save snapshot onto a preset's undo stack (cap UNDO_CAP) and
+     * drop its redo stack.
+     * @param {string} id
+     * @param {any} prevDoc already a private clone
+     */
+    _pushUndo(id, prevDoc) {
+        let h = this._undo.get(id);
+        if (!h) {
+            h = { undo: [], redo: [] };
+            this._undo.set(id, h);
+        }
+        h.undo.push(prevDoc);
+        while (h.undo.length > UNDO_CAP) h.undo.shift();
+        h.redo = [];
+    }
+
+    /**
+     * @param {string} id
+     * @returns {{ undo: number, redo: number }}
+     */
+    historyDepth(id) {
+        if (!this.index.has(id)) throw new StoreError(`preset ${id} not found`, 404);
+        const h = this._undo.get(id);
+        return { undo: h?.undo.length ?? 0, redo: h?.redo.length ?? 0 };
+    }
+
+    /**
+     * Move one snapshot `from` -> `to` stack by restoring it as the
+     * document. The stacks change only after the restore succeeded.
+     * @param {string} id
+     * @param {'undo'|'redo'} from
+     * @param {'undo'|'redo'} to
+     * @param {string} label
+     * @returns {Promise<{ doc: any, wasDesired: boolean, history: { undo: number, redo: number } }>}
+     */
+    async _stepHistory(id, from, to, label) {
+        const entry = this.index.get(id);
+        if (!entry) throw new StoreError(`preset ${id} not found`, 404);
+        const h = this._undo.get(id);
+        if (!h || h[from].length === 0) throw new StoreError(`nothing to ${label}`, 409);
+        const target = structuredClone(h[from].at(-1));
+        const cur = structuredClone(entry.doc);
+        const { saved, desired } = await this._replaceDocNow(entry, target, label, 'keep');
+        h[from].pop();
+        h[to].push(cur);
+        while (h[to].length > UNDO_CAP) h[to].shift();
+        return { doc: saved, wasDesired: desired, history: this.historyDepth(id) };
+    }
+
+    /** @param {string} id */
+    undo(id) {
+        return this.enqueue(() => this._stepHistory(id, 'undo', 'redo', 'undo'));
+    }
+
+    /** @param {string} id */
+    redo(id) {
+        return this.enqueue(() => this._stepHistory(id, 'redo', 'undo', 'redo'));
     }
 
     /**
@@ -573,6 +651,7 @@ export class Store {
             await fsp.rm(entry.path, { force: true });
             await fsp.rm(path.join(this.revisionsDir, id), { recursive: true, force: true });
             this.index.delete(id);
+            this._undo.delete(id);
             // a dangling slot preset id makes /slot/panel 409 forever; clear it
             // (mirrors the loadout delete route). The state write bumps rev itself.
             const wasDesired = this.state.presetId === id;
@@ -1303,7 +1382,7 @@ export class Store {
                 payload = copyPayloadFromDoc(src, a);
             }
             const res = copyIntoDoc(doc, payload, body.before ?? null, { outsideGroup: body.outsideGroup, after: body.after });
-            await this._commit({ docs: [doc] });
+            await this._commit({ docs: [doc], undoable: true });
             return { doc: structuredClone(doc), identifiers: res.identifiers, keys: res.keys, group: res.group, warnings: res.warnings };
         });
     }

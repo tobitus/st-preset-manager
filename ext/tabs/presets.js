@@ -58,6 +58,8 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLTextAreaElement} notes preset notes textarea
  * @property {HTMLElement} insertMenu the `.pm-insert-menu` popup
  * @property {HTMLButtonElement} dupBtn 'Duplicate' button
+ * @property {HTMLButtonElement} undoBtn 'Undo' button
+ * @property {HTMLButtonElement} redoBtn 'Redo' button
  * @property {HTMLButtonElement} delBtn two-click-armed block delete button
  * @property {HTMLInputElement} searchInput the `.pm-search-input` box
  * @property {HTMLElement} searchCount the `.pm-search-count` match counter
@@ -94,6 +96,8 @@ export function createPresetsTab(pane, bridge) {
     const /** @type {Map<string, string|null>} */ selected = new Map();
     /** the whole multi-selection per preset (primary key included); mirrors `selected` */
     const /** @type {Map<string, Set<string>>} */ multi = new Map();
+    /** undo/redo depths per preset, valid for the doc rev they were read at */
+    const /** @type {Map<string, {rev: number, undo: number, redo: number}>} */ history = new Map();
     /** Select exactly one key (or nothing) for a preset. */
     function setSelection(/** @type {string} */ id, /** @type {string|null} */ key) {
         selected.set(id, key);
@@ -139,6 +143,30 @@ export function createPresetsTab(pane, bridge) {
         try {
             setDoc(id, await api('GET', `/presets/${id}`));
         } catch { /* keep the last known doc */ }
+    }
+
+    /** Enable undo/redo buttons from the cached depths. */
+    function applyHistoryButtons(/** @type {PresetView} */ v) {
+        const h = history.get(v.id);
+        v.undoBtn.disabled = !h || h.undo === 0;
+        v.redoBtn.disabled = !h || h.redo === 0;
+    }
+
+    /** Fetch undo/redo depths for a preset unless cached for its current rev. */
+    async function refreshHistory(/** @type {string} */ id) {
+        const doc = docs.get(id);
+        if (!doc) return;
+        const cached = history.get(id);
+        if (cached && cached.rev === doc.rev) {
+            if (view?.id === id) applyHistoryButtons(view);
+            return;
+        }
+        try {
+            const res = await api('GET', `/presets/${id}/history`);
+            if (docs.get(id)?.rev !== doc.rev) return; // stale answer
+            history.set(id, { rev: doc.rev, ...res });
+            if (view?.id === id) applyHistoryButtons(view);
+        } catch { /* keep the buttons as they are */ }
     }
 
     /** Persist the open tab set + active tab across reloads. */
@@ -235,6 +263,7 @@ export function createPresetsTab(pane, bridge) {
         docs.delete(id);
         selected.delete(id);
         multi.delete(id);
+        history.delete(id);
         if (active === id) {
             active = null;
             destroyView();
@@ -290,6 +319,7 @@ export function createPresetsTab(pane, bridge) {
                 <button class="pm-shelf-toggle menu_button" title="Show the shelf list (drag blocks into this preset)">Shelf ▸</button>
             </div>
             <div class="pm-edit-bar">
+                <button class="pm-undo menu_button" title="Undo the last change to this preset (Ctrl+Z)">Undo</button><button class="pm-redo menu_button" title="Redo (Ctrl+Shift+Z)">Redo</button>
                 <span class="pm-insert">
                     <button class="pm-insert-toggle menu_button" title="Insert at the selected row (or at the end)">Insert ▾</button>
                     <span class="pm-insert-menu" hidden>
@@ -347,6 +377,8 @@ export function createPresetsTab(pane, bridge) {
             notes: q('.pm-preset-notes'),
             insertMenu: q('.pm-insert-menu'),
             dupBtn: q('.pm-block-duplicate'),
+            undoBtn: q('.pm-undo'),
+            redoBtn: q('.pm-redo'),
             delBtn: q('.pm-block-delete'),
             searchInput: q('.pm-search-input'),
             searchCount: q('.pm-search-count'),
@@ -372,6 +404,7 @@ export function createPresetsTab(pane, bridge) {
                     refreshView();
                 },
                 onHeading: (/** @type {'section'|'group'} */ kind) => headingOp(id, kind),
+                onHistory: (/** @type {'undo'|'redo'} */ dir) => void historyOp(id, dir),
                 onCardinality: (/** @type {string} */ key, /** @type {'pick-one'|'pick-one-or-more'} */ c) => cardinalityOp(id, key, c),
             }),
             editor: createEditor(editorEl, {
@@ -428,7 +461,11 @@ export function createPresetsTab(pane, bridge) {
         q('.pm-insert-section').addEventListener('click', () => void insertSection(nextView));
         q('.pm-insert-block').addEventListener('click', () => void insertBlock(nextView));
         nextView.dupBtn.addEventListener('click', () => void duplicateBlock(nextView));
+        nextView.undoBtn.addEventListener('click', () => void historyOp(id, 'undo'));
+        nextView.redoBtn.addEventListener('click', () => void historyOp(id, 'redo'));
         nextView.delBtn.addEventListener('click', () => void deleteSelectedBlock(nextView));
+        nextView.undoBtn.disabled = true;
+        nextView.redoBtn.disabled = true;
         nextView.searchInput.addEventListener('input', () => {
             nextView.search.query = nextView.searchInput.value;
             nextView.search.index = -1;
@@ -550,6 +587,23 @@ export function createPresetsTab(pane, bridge) {
         // the editor relies on the rejection to keep its dirty flag (a failed
         // save's text would otherwise be lost on the next refresh)
         if (failedErr) throw failedErr;
+    }
+
+    /** Undo/redo the whole-document snapshot stack of a preset (server side). */
+    async function historyOp(/** @type {string} */ id, /** @type {'undo'|'redo'} */ dir) {
+        const hadFocus = !!view && view.id === id && document.activeElement === view.outlineEl;
+        if (view?.id === id) { view.undoBtn.disabled = true; view.redoBtn.disabled = true; }
+        try {
+            const res = await bridge.edit(() => api('POST', `/presets/${id}/${dir}`));
+            setDoc(id, res?.doc);
+            if (res?.history && res?.doc) history.set(id, { rev: res.doc.rev, ...res.history });
+            setStatus('');
+        } catch (err) {
+            setStatus(errText(err), true);
+            await regetDoc(id);
+        }
+        refreshView();
+        if (hadFocus && view && view.id === id) view.outlineEl.focus({ preventScroll: true });
     }
 
     /** Scroll the outline row for `key` (in the active view) into view. */
@@ -796,6 +850,8 @@ export function createPresetsTab(pane, bridge) {
             search: q ? { keys: new Set(matches), current: view.search.index >= 0 ? matches[view.search.index] : null, filter: view.search.filter } : undefined,
         });
         view.editor.show(doc, key);
+        applyHistoryButtons(view);
+        void refreshHistory(view.id);
         view.modelPanel.render();
         updateNotice();
     }

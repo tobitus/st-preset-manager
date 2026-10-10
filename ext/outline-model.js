@@ -216,15 +216,16 @@ export function buildOutline(doc, loadoutId = doc.activeLoadoutId) {
 
 /**
  * Map a keyboard event on the outline to an op, or null when the key is not
- * ours. Any ctrl/meta combination is never ours; Tab must not carry alt;
+ * ours except Ctrl/Cmd+Z (undo) and Ctrl/Cmd+Shift+Z (redo, no alt); Tab must not carry alt;
  * arrow moves need alt and no shift. Alt+S toggles the section heading and
  * Alt+G the group heading on the selected row (by physical key, so macOS
  * Option+S producing 'ß' still works).
  *
  * @param {{ key: string, code?: string, shiftKey: boolean, altKey: boolean, ctrlKey: boolean, metaKey: boolean }} ev
- * @returns {{ op: 'promote' } | { op: 'demote' } | { op: 'moveLeaf', delta: -1|1 } | { op: 'heading', kind: 'section'|'group' } | null}
+ * @returns {{ op: 'promote' } | { op: 'demote' } | { op: 'moveLeaf', delta: -1|1 } | { op: 'heading', kind: 'section'|'group' } | { op: 'undo' } | { op: 'redo' } | null}
  */
 export function keyAction(ev) {
+    if ((ev.ctrlKey || ev.metaKey) && !ev.altKey && ev.key.toLowerCase() === 'z') return ev.shiftKey ? { op: 'redo' } : { op: 'undo' };
     if (ev.ctrlKey || ev.metaKey) return null;
     if (ev.altKey && !ev.shiftKey && (ev.code === 'KeyS' || ev.code === 'KeyG')) return { op: 'heading', kind: ev.code === 'KeyS' ? 'section' : 'group' };
     if (ev.key === 'Tab') {

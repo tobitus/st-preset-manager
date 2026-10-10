@@ -445,7 +445,7 @@ export function dropAnchor(li) {
  * `render(doc, selectedKey, opts)`: a row is selected when its key is
  * `selectedKey` or in `opts.selectedKeys`.
  * @param {HTMLElement} container the .pm-outline element
- * @param {{ onSelect(keys: string[]): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void, onCardinality?(nodeKey: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
+ * @param {{ onSelect(keys: string[]): void, onOps(ops: any[]): Promise<void>, onToggleCollapse?(nodeKey: string): void, onHeading?(kind: 'section'|'group'): void, onHistory?(dir: 'undo'|'redo'): void, onCardinality?(nodeKey: string, cardinality: 'pick-one'|'pick-one-or-more'): void }} handlers
  * @returns {{ render(doc: any, selectedKey: string|null, opts?: { collapsed?: Set<string>, selectedKeys?: Set<string>, search?: { keys: Set<string>, current: string|null, filter: boolean } }): void, destroy(): void }}
  */
 export function createOutline(container, handlers) {
@@ -567,6 +567,11 @@ export function createOutline(container, handlers) {
         const a = keyAction(ev);
         const key = selectedKey;
         if (!a) return;
+        if (a.op === 'undo' || a.op === 'redo') {
+            ev.preventDefault();
+            handlers.onHistory?.(a.op);
+            return;
+        }
         if (a.op === 'heading') {
             if (!key) return;
             ev.preventDefault();

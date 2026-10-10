@@ -3,7 +3,7 @@
  * Phase 1 subset: /health, /library, /presets (import + get/put/delete +
  * /ops toggle|setSettings), /presets/:id/export, /slot/* (load, model —
  * per-tab GET/POST raw, review-1 W2 —, panel), /events, /rescan,
- * /revisions (list/get/snapshot/restore), /diff, /diff/blocks, /models
+ * /revisions (list/get/snapshot/restore), /presets/:id/undo|redo|history, /diff, /diff/blocks, /models
  * (GET/PUT + :modelId/tuning PUT/PATCH + seed + rename/merge),
  * /presets/:id/tuning-overrides/:modelId and
  * /presets/:id/loadouts/:lid/overrides/:modelId (PUT/DELETE/PATCH),
@@ -255,6 +255,31 @@ export function makeRouter() {
             const out = await store.restoreRevision(req.params.id, revNo);
             broadcast(req, out.wasDesired ? 'slot' : 'preset', out.wasDesired ? null : req.params.id);
             res.json({ doc: out.doc, snapshotRev: out.snapshotRev, rev: store.rev });
+        } catch (err) { next(err); }
+    });
+
+    // POST /presets/:id/undo|redo -> {doc, rev, history:{undo,redo}}: step the in-memory per-preset history (whole-document snapshots, cap 100; every save pushes, import replace / restore / Model rename+merge clear it). 409 on an empty stack. Same slot semantics as restore.
+    router.post('/presets/:id/undo', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const out = await store.undo(req.params.id);
+            broadcast(req, out.wasDesired ? 'slot' : 'preset', out.wasDesired ? null : req.params.id);
+            res.json({ doc: out.doc, rev: store.rev, history: out.history });
+        } catch (err) { next(err); }
+    });
+
+    router.post('/presets/:id/redo', async (req, res, next) => {
+        try {
+            const store = req.pm.store;
+            const out = await store.redo(req.params.id);
+            broadcast(req, out.wasDesired ? 'slot' : 'preset', out.wasDesired ? null : req.params.id);
+            res.json({ doc: out.doc, rev: store.rev, history: out.history });
+        } catch (err) { next(err); }
+    });
+
+    router.get('/presets/:id/history', (req, res, next) => {
+        try {
+            res.json(req.pm.store.historyDepth(req.params.id));
         } catch (err) { next(err); }
     });
 

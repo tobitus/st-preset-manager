@@ -357,6 +357,93 @@ async function sectionA2() {
     });
 }
 
+// ------------------------------------------------------------------ a3
+
+/** Count page POSTs to /slot/panel from now on (window.__chkPanel). */
+const recordPanel = () => probe.eval(`(() => {
+    window.__chkPanel = 0;
+    window.__chkFetchP = window.__chkFetchP ?? window.fetch;
+    const orig = window.__chkFetchP;
+    window.fetch = (...args) => {
+        const url = String(args[0]?.url ?? args[0]);
+        if (url.includes('/api/plugins/st-preset-manager/slot/panel')) window.__chkPanel += 1;
+        return orig(...args);
+    };
+    return true; })()`);
+
+/** A real key press via CDP (modifiers: 2 = Ctrl, 8 = Shift). */
+async function pressKey(/** @type {string} */ key, /** @type {string} */ code, /** @type {number} */ vk, modifiers = 0) {
+    await probe.cdp('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, modifiers });
+    await probe.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers });
+}
+
+async function sectionA3() {
+    await showTab('presets');
+    await until(() => exists(`${view(ids.sola)} .pm-outline li.pm-node`), 10000, 'Sola view');
+    const bits = async () => {
+        const d = await getDoc(ids.sola);
+        return d.loadouts[d.activeLoadoutId].enabled;
+    };
+    const stBit = async (/** @type {string} */ ident) => (await st()).order.find((/** @type {any} */ o) => o.identifier === ident)?.enabled;
+    // a plain top-level block row with a checkbox switch
+    const f = flat(await getDoc(ids.sola));
+    const e = f.find((x, i) => i > 3 && x.rank === 'item' && x.leaf.kind === 'block');
+    must(e, 'no plain block row in Sola');
+    const KEY = e.leaf.key;
+    const ID = identOf(e.leaf);
+    const sw = `${rowLi(ids.sola, KEY)} > .pm-row input.pm-switch[type="checkbox"]`;
+
+    await check('a3 toggle a block, Ctrl+Z in the outline: the bit reverts in the doc AND in ST\'s loaded preset; the bridge settles', async () => {
+        await convergedOn(ids.sola, 'converged before the toggle');
+        const b0 = (await bits())[ID];
+        await until(() => exists(sw), 5000, 'checkbox switch');
+        await mouseClickSel(`${rowLi(ids.sola, KEY)} > .pm-row .pm-name`);
+        await mouseClickSel(sw);
+        await until(async () => (await bits())[ID] === !b0, 8000, 'toggle landed in the doc');
+        await until(async () => (await converged()) && (await stBit(ID)) === !b0, 15000, 'ST shows the toggled bit');
+        await until(() => probe.eval(`!document.querySelector(${J(`${view(ids.sola)} .pm-undo`)}).disabled`), 5000, 'Undo enabled');
+        await recordPanel();
+        await probe.eval(`document.querySelector(${J(`${view(ids.sola)} .pm-outline`)}).focus()`);
+        await pressKey('z', 'KeyZ', 90, 2);
+        await until(async () => (await bits())[ID] === b0, 8000, 'Ctrl+Z reverted the doc bit');
+        const c = await until(async () => { const cv = await converged(); return cv && (await stBit(ID)) === b0 ? cv : null; }, 15000, 'ST loaded preset shows the reverted bit');
+        const posts1 = await probe.eval('window.__chkPanel');
+        await sleep(3000);
+        const posts2 = await probe.eval('window.__chkPanel');
+        must(posts2 === posts1, `bridge still posting /slot/panel after converging (${posts1} -> ${posts2})`);
+        must(posts2 <= 2, `${posts2} /slot/panel posts after one undo`);
+        must(!!(await converged()), 'not converged 3 s later');
+        await shot('round2-a3-undo.png');
+        return `${ID}: ${b0} -> ${!b0} -> Ctrl+Z -> doc ${b0}, ST prompt_order ${J(c.s.order.find((/** @type {any} */ o) => o.identifier === ID))}; /slot/panel posts after the undo: ${posts2}, none in the next 3 s`;
+    });
+
+    await check('a3 the Redo button re-applies the toggle (doc + ST); Redo is disabled at redo depth 0', async () => {
+        const b0 = (await bits())[ID];
+        must(!(await probe.eval(`document.querySelector(${J(`${view(ids.sola)} .pm-redo`)}).disabled`)), 'Redo disabled after an undo');
+        await click(`${view(ids.sola)} .pm-redo`);
+        await until(async () => (await bits())[ID] === !b0, 8000, 'Redo re-applied the doc bit');
+        await until(async () => (await converged()) && (await stBit(ID)) === !b0, 15000, 'ST shows the re-applied bit');
+        const h = (await api('GET', `/presets/${ids.sola}/history`)).json;
+        must(h.redo === 0, `history ${J(h)}`);
+        await until(() => probe.eval(`document.querySelector(${J(`${view(ids.sola)} .pm-redo`)}).disabled`), 5000, 'Redo disabled at depth 0');
+        return `${ID} back to ${!b0} in doc + ST; history ${J(h)}; Redo disabled`;
+    });
+
+    await check('a3 Undo is disabled at undo depth 0', async () => {
+        let n = 0;
+        for (; n < 200; n++) {
+            const r = await api('POST', `/presets/${ids.sola}/undo`);
+            if (r.status === 409) break;
+            must(r.status === 200, `undo -> ${r.status}`);
+        }
+        const h = (await api('GET', `/presets/${ids.sola}/history`)).json;
+        must(h.undo === 0, `history ${J(h)}`);
+        await until(() => probe.eval(`document.querySelector(${J(`${view(ids.sola)} .pm-undo`)}).disabled && !document.querySelector(${J(`${view(ids.sola)} .pm-redo`)}).disabled`), 8000, 'Undo disabled, Redo enabled');
+        await convergedOn(ids.sola, 'converged after the undos');
+        return `${n} REST undos to depth 0 -> history ${J(h)}; Undo disabled, Redo enabled; ST converged`;
+    });
+}
+
 // ------------------------------------------------------------------ main
 
 async function main() {
@@ -398,6 +485,7 @@ async function main() {
 
     if (wanted('a1')) await sectionA1();
     if (wanted('a2')) await sectionA2();
+    if (wanted('a3')) await sectionA3();
 
     finish();
 }
