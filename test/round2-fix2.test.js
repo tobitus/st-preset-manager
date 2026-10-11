@@ -433,3 +433,30 @@ test('a dead binding already on disk does not block unrelated saves or registry 
     await store.patchLoadoutOverride('p_stale', 'R', 'M', { tuning: null });
     assertCompiles(store, 'p_stale');
 });
+
+test('restoring a revision is refused (409) on ANY dead binding, even one already dead on disk: making a dead inactive loadout active cannot break the slot', async (t) => {
+    quietConsole(t);
+    const root = tmpRoot();
+    fs.writeFileSync(path.join(root, 'models.json'), JSON.stringify({ version: 1, models: { M: MODEL() } }));
+    const stale = mkDoc('p_stale');
+    stale.loadouts.P.overrides = { M: { enabled: {}, tuning: 'ghost' } }; // inactive loadout, dead binding
+    fs.mkdirSync(path.join(root, 'presets'), { recursive: true });
+    const file = path.join(root, 'presets', 'Stale.json');
+    fs.writeFileSync(file, JSON.stringify(stale, null, 2));
+    const revived = structuredClone(stale);
+    revived.activeLoadoutId = 'P';
+    const dir = path.join(root, 'revisions', 'p_stale');
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '1.json'), JSON.stringify({ rev: 1, at: '2025-01-01T00:00:00.000Z', label: null, doc: revived }, null, 2));
+    const store = new Store(root);
+    await store.init();
+    const diskBefore = fs.readFileSync(file, 'utf8');
+    const docBefore = JSON.stringify(store.getPreset('p_stale'));
+    await assert.rejects(store.restoreRevision('p_stale', 1), status(409, 'Play', 'M', 'ghost'));
+    assert.equal(fs.readFileSync(file, 'utf8'), diskBefore);
+    assert.equal(JSON.stringify(store.getPreset('p_stale')), docBefore);
+    assert.deepEqual(store.listRevisions('p_stale').map((r) => r.rev), [1], 'no pre-restore revision written');
+    const doc = store.getPreset('p_stale');
+    assert.equal(doc.activeLoadoutId, 'R');
+    assert.doesNotThrow(() => compile(doc, store.models.models.M, {}, doc.activeLoadoutId));
+});

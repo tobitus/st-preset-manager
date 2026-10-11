@@ -1158,7 +1158,8 @@ export class Store {
      * `_replaceDocNow` — same shape as DELETE loadout.
      * A revision written before an upgrade is brought to the current shape
      * on restore (the snapshot on disk is unchanged). A revision whose
-     * overrides bind a tuning its (registered) Model lacks is
+     * overrides bind a tuning its (registered) Model lacks — anywhere in the
+     * revision, even a binding already dead in the current doc — is
      * refused with 409 naming it (recreate the tuning, or restore another
      * revision); nothing is written.
      * @param {string} presetId @param {number} revNo
@@ -1174,6 +1175,13 @@ export class Store {
             deriveStructure(doc);
             stripLeafEnabled(doc);
             upgradeDoc(doc);
+            // the whole revision, not just bindings new versus the current
+            // doc: restore may activate a loadout whose binding was already dead
+            const dead = deadTuningBindings(doc, this.models);
+            if (dead.length) {
+                const msgs = dead.map((b) => `${entry.doc.name} / ${b.loadoutName}: binds tuning "${b.tuning}" of Model ${b.model}, which the registry does not have`);
+                throw new StoreError(`tuning binding conflict: ${msgs.join('; ')} (recreate the tuning or unbind it first)`, 409);
+            }
             doc.name = entry.doc.name;
             if (entry.doc.folder === undefined) delete doc.folder;
             else doc.folder = entry.doc.folder;
