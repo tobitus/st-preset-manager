@@ -60,6 +60,14 @@ above, and does nothing else.
 - **Models and tunings**: each Model has named tunings with a default; you
   choose one per loadout × Model in the Model panel's *Loadout override*
   section. Sliders edited in SillyTavern write into the tuning in effect.
+  A change that would leave a loadout bound to a tuning its Model no longer
+  has is refused with a message naming preset, loadout, Model and tuning:
+  replacing the registry, saving, undo/redo, and restoring a revision (recreate the
+  tuning or unbind it first). Deleting a tuning clears the undo history of
+  presets that referenced it; renaming one carries the new name into it.
+- **Old revisions**: a revision written before an upgrade restores in the
+  current shape; the first save after an upgrade always keeps the
+  pre-upgrade document as its own revision labelled *before upgrade*.
 - **Diff and revisions**: see *Phase 5* under Developer.
 - **Shelf**: reusable blocks; see *Phase 6* under Developer.
 - **MCP**: a stdio MCP server wraps the REST API; see *Phase 7* under

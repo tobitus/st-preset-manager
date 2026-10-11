@@ -16,7 +16,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { validateDoc, validateRegistry, nativeShapeErrors, upgradeDoc, upgradeRegistry } from '../shared/schema.js';
+import { validateDoc, validateRegistry, nativeShapeErrors, upgradeDoc, upgradeRegistry, deadTuningBindings } from '../shared/schema.js';
 import { copyPayloadFromDoc, copyIntoDoc } from '../shared/docops.js';
 import { canonicalHash, newId, ulid } from '../shared/util.js';
 import { ensureAllLeaves, completeOverride, iterLeaves, collectGroups, pickOneMembers } from '../shared/groups.js';
@@ -64,6 +64,9 @@ async function atomicWrite(/** @type {string} */ file, /** @type {string} */ dat
     await fsp.writeFile(tmp, data);
     await fsp.rename(tmp, file);
 }
+
+/** @param {{ loadoutId: string, model: string, tuning: string }} b */
+const bindingKey = (b) => `${b.loadoutId}\u0000${b.model}\u0000${b.tuning}`;
 
 /** @param {any} value */
 function isPlainObject(value) {
@@ -197,6 +200,21 @@ export class Store {
     }
 
     /**
+     * Tuning bindings `doc` would newly leave dead under `registry`: dead
+     * there and not already dead in `prevDoc` under `prevRegistry` (an
+     * on-disk dead binding is tolerated so it never blocks unrelated edits).
+     * One message per binding, naming preset, loadout, Model and tuning.
+     * @param {any} doc @param {any} registry @param {any} prevDoc @param {any} prevRegistry
+     * @returns {string[]}
+     */
+    _newDeadBindings(doc, registry, prevDoc, prevRegistry) {
+        const stale = new Set(prevDoc ? deadTuningBindings(prevDoc, prevRegistry).map(bindingKey) : []);
+        return deadTuningBindings(doc, registry)
+            .filter((b) => !stale.has(bindingKey(b)))
+            .map((b) => `${doc.name} / ${b.loadoutName}: binds tuning "${b.tuning}" of Model ${b.model}, which the registry does not have`);
+    }
+
+    /**
      * Publish a multi-file transaction atomically: validates everything
      * first (a bad registry or doc throws before any write), snapshots a
      * revision of each touched doc, writes every file, and only then, with
@@ -207,9 +225,9 @@ export class Store {
      * never call directly from a route. Docs must already be indexed and
      * keep their name/folder (this is a content transaction, not a
      * rename/move — `_savePresetNow` handles those).
-     * @param {{ registry?: any, docs?: any[], revisionLabel?: string, shelf?: { id: string, entry: any }[], undoable?: boolean }} [opts] undoable: push each doc's pre-commit snapshot onto its undo stack; otherwise its stacks are cleared
+     * @param {{ registry?: any, docs?: any[], revisionLabel?: string, shelf?: { id: string, entry: any }[], undoable?: boolean, migrateHistory?: ((snapshot: any) => void) | undefined }} [opts] undoable: push each doc's pre-commit snapshot onto its undo stack; otherwise its stacks are cleared. migrateHistory: applied in place to every undo/redo snapshot of presets NOT in `docs`, after a successful publish
      */
-    async _commit({ registry = undefined, docs = [], revisionLabel = undefined, shelf = [], undoable = false } = {}) {
+    async _commit({ registry = undefined, docs = [], revisionLabel = undefined, shelf = [], undoable = false, migrateHistory = undefined } = {}) {
         if (registry !== undefined) {
             const errs = validateRegistry(registry);
             if (errs.length) throw new StoreError(`invalid registry: ${errs.join(', ')}`, 400);
@@ -229,11 +247,28 @@ export class Store {
             targets.push({ entry, doc });
         }
 
+        const reg = registry ?? this.models;
+        const incoming = new Map(targets.map((t) => [t.doc.id, t.doc]));
+        /** @type {string[]} */
+        const msgs = [];
+        if (registry !== undefined) {
+            for (const entry of this.index.values()) {
+                const doc = incoming.get(entry.id) ?? entry.doc;
+                msgs.push(...this._newDeadBindings(doc, reg, entry.doc, this.models));
+            }
+        } else {
+            for (const t of targets) msgs.push(...this._newDeadBindings(t.doc, reg, t.entry.doc, this.models));
+        }
+        if (msgs.length) {
+            throw new StoreError(`tuning binding conflict: ${msgs.join('; ')} (recreate the tuning or unbind it first)`, 409);
+        }
         /** @type {Map<string, any>} pre-commit document clones, for undo */
         const prevClones = new Map();
         for (const { entry, doc } of targets) {
             prevClones.set(doc.id, structuredClone(entry.doc));
-            await this._writeRevision(entry.legacyDoc ?? entry.doc, revisionLabel);
+            // the pre-upgrade state is written as a labelled revision so it is never coalesced away (a label always writes)
+            if (entry.legacyDoc) await this._writeRevision(entry.legacyDoc, revisionLabel ?? 'before upgrade');
+            else await this._writeRevision(entry.doc, revisionLabel);
             doc.rev = (entry.doc.rev ?? 0) + 1;
             doc.updatedAt = new Date().toISOString();
         }
@@ -291,7 +326,17 @@ export class Store {
             if (entry) this.shelf.set(id, structuredClone(entry));
             else this.shelf.delete(id);
         }
-        if (registry !== undefined) this.models = registry;
+        if (registry !== undefined) {
+            for (const [id, h] of [...this._undo]) {
+                if (migrateHistory && !incoming.has(id)) {
+                    for (const s of h.undo) migrateHistory(s);
+                    for (const s of h.redo) migrateHistory(s);
+                }
+                // an undo/redo could otherwise republish a binding the new registry lacks
+                if ([...h.undo, ...h.redo].some((s) => deadTuningBindings(s, registry).length > 0)) this._undo.delete(id);
+            }
+            this.models = registry;
+        }
         this.state = nextState;
         this.rev = nextState.rev;
     }
@@ -582,11 +627,19 @@ export class Store {
             if (errs.length) throw new StoreError(`invalid document: ${errs.join(', ')}`);
             const entry = this.index.get(doc.id);
             if (!entry) throw new StoreError(`preset ${doc.id} not found`, 404);
+            {
+                const msgs = this._newDeadBindings(doc, this.models, entry.doc, this.models);
+                if (msgs.length) {
+                    throw new StoreError(`tuning binding conflict: ${msgs.join('; ')} (recreate the tuning or unbind it first)`, 409);
+                }
+            }
             const prev = structuredClone(entry.doc);
             const oldNamePath = entry.path;
             doc.updatedAt = new Date().toISOString();
             doc.rev = (entry.doc.rev ?? 0) + 1;
-            await this._writeRevision(entry.legacyDoc ?? entry.doc, opts.label);
+            // the pre-upgrade state is written as a labelled revision so it is never coalesced away (a label always writes)
+            if (entry.legacyDoc) await this._writeRevision(entry.legacyDoc, opts.label ?? 'before upgrade');
+            else await this._writeRevision(entry.doc, opts.label);
             // rename = move (name or folder change)
             const newPath = path.join(this._safeDir(doc.folder), `${sanitizeName(doc.name)}.json`);
             if (path.resolve(newPath) !== path.resolve(oldNamePath)) {
@@ -1103,6 +1156,11 @@ export class Store {
      * folder and createdAt (restore is content, not identity/location).
      * Slot-marking and the desired-loadout fallback are done by
      * `_replaceDocNow` — same shape as DELETE loadout.
+     * A revision written before an upgrade is brought to the current shape
+     * on restore (the snapshot on disk is unchanged). A revision whose
+     * overrides bind a tuning its (registered) Model lacks is
+     * refused with 409 naming it (recreate the tuning, or restore another
+     * revision); nothing is written.
      * @param {string} presetId @param {number} revNo
      * @returns {Promise<{doc: any, snapshotRev: number, wasDesired: boolean}>}
      */
@@ -1112,6 +1170,10 @@ export class Store {
             if (!entry) throw new StoreError(`preset ${presetId} not found`, 404);
             const snap = this.getRevision(presetId, revNo);
             const doc = structuredClone(snap.doc);
+            // same normalisation rescan() applies on load; only the clone is mutated
+            deriveStructure(doc);
+            stripLeafEnabled(doc);
+            upgradeDoc(doc);
             doc.name = entry.doc.name;
             if (entry.doc.folder === undefined) delete doc.folder;
             else doc.folder = entry.doc.folder;
@@ -1165,7 +1227,10 @@ export class Store {
      * Replace the whole registry (validated). Registry writes never mark
      * the slot changed or touch state — a panel base is never invalidated
      * by a Model/registry change; each panel post carries the raw its base
-     * was compiled for and routes by that.
+     * was compiled for and routes by that. A registry that would leave any
+     * document's loadout override bound to a tuning its Model lacks is
+     * refused with 409 naming preset/loadout/Model/tuning; undo/redo history
+     * referencing a removed tuning is cleared.
      * @param {any} reg
      */
     async replaceModels(reg) {
@@ -1447,7 +1512,8 @@ export class Store {
 
     /**
      * Delete a named Model tuning. 404 when missing; 409 when it is the
-     * Model's default or any loadout override binds it.
+     * Model's default or any loadout override binds it. The undo/redo
+     * history of any preset that references the deleted tuning is cleared.
      * @param {string} name
      * @param {string} tuningName
      */
@@ -1470,7 +1536,9 @@ export class Store {
      * Rename a named Model tuning: the registry key (order kept), the
      * Model's `defaultTuning` when it names it, and every loadout override
      * binding it, in ONE `_commit` (a labelled revision of each touched doc
-     * is snapshotted first; their undo stacks are cleared).
+     * is snapshotted first; their undo stacks are cleared). The undo/redo
+     * history of presets the rename did not touch is migrated to the new
+     * name; touched presets' stacks are cleared.
      * @param {string} name
      * @param {string} from
      * @param {string} to
@@ -1510,7 +1578,16 @@ export class Store {
                 if (touched) docs.push(doc);
             }
 
-            await this._commit({ registry: reg, docs, revisionLabel: `Model tuning rename: ${name} ${from} -> ${trimmed}` });
+            await this._commit({
+                registry: reg,
+                docs,
+                revisionLabel: `Model tuning rename: ${name} ${from} -> ${trimmed}`,
+                migrateHistory: (snapshot) => {
+                    for (const loadout of Object.values(snapshot.loadouts ?? {})) {
+                        if (loadout?.overrides?.[name]?.tuning === from) loadout.overrides[name].tuning = trimmed;
+                    }
+                },
+            });
             return { model: structuredClone(this.models.models[name]), migrated: docs.map((d) => d.id) };
         });
     }

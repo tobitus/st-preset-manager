@@ -220,6 +220,10 @@ export function validateRegistry(reg) {
         return errs;
     }
     for (const [name, m] of Object.entries(reg.models)) {
+        if (typeof m !== 'object' || m === null || Array.isArray(m)) {
+            errs.push(`models.${name}`);
+            continue;
+        }
         const model = /** @type {any} */ (m);
         if (typeof model?.id !== 'string' || !model.id) errs.push(`models.${name}.id`);
         if (model?.name !== name) errs.push(`models.${name}.name`);
@@ -234,7 +238,7 @@ export function validateRegistry(reg) {
         if (model?.preferredProfile !== null && typeof model?.preferredProfile !== 'string') {
             errs.push(`models.${name}.preferredProfile`);
         }
-        if ('tuning' in (model ?? {})) errs.push(`models.${name}.tuning (removed)`);
+        if ('tuning' in model) errs.push(`models.${name}.tuning (removed)`);
         const tunings = model?.tunings;
         if (typeof tunings !== 'object' || tunings === null || Array.isArray(tunings) || Object.keys(tunings).length < 1) {
             errs.push(`models.${name}.tunings`);
@@ -254,6 +258,41 @@ export function validateRegistry(reg) {
         }
     }
     return errs;
+}
+
+/**
+ * Loadout override tuning bindings the registry cannot satisfy: a
+ * non-null string `tuning` whose Model the registry has but whose
+ * `tunings` lacks that name (own key) — exactly the bindings compile()
+ * throws on. An override for a Model the registry lacks is inert (compile
+ * only reads the resolved Model's override) and is not reported.
+ * Non-object loadouts/overrides are skipped (validateDoc reports them).
+ * Order: loadouts in key order, overrides in key order.
+ * @param {any} doc
+ * @param {any} registry
+ * @returns {{ loadoutId: string, loadoutName: string, model: string, tuning: string }[]}
+ */
+export function deadTuningBindings(doc, registry) {
+    const has = (/** @type {any} */ o, /** @type {string} */ k) => Object.prototype.hasOwnProperty.call(o, k);
+    const isObj = (/** @type {any} */ v) => typeof v === 'object' && v !== null;
+    const models = registry?.models;
+    /** @type {{ loadoutId: string, loadoutName: string, model: string, tuning: string }[]} */
+    const out = [];
+    for (const [loadoutId, loadout] of Object.entries(doc?.loadouts ?? {})) {
+        if (!isObj(loadout)) continue;
+        const l = /** @type {any} */ (loadout);
+        if (!isObj(l.overrides)) continue;
+        for (const [model, override] of Object.entries(l.overrides)) {
+            if (!isObj(override)) continue;
+            const tuning = override.tuning;
+            if (typeof tuning !== 'string') continue;
+            if (!isObj(models) || !has(models, model)) continue;
+            const tunings = isObj(models[model]) ? models[model].tunings : undefined;
+            if (isObj(tunings) && has(tunings, tuning)) continue;
+            out.push({ loadoutId, loadoutName: typeof l.name === 'string' ? l.name : loadoutId, model, tuning });
+        }
+    }
+    return out;
 }
 
 /**
