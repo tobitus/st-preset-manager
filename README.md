@@ -10,10 +10,10 @@ survives with no browser tab open.
 The repository is both the extension and the plugin; you install it twice.
 
 1. **The extension**: SillyTavern → Extensions → *Install extension* → paste
-   this repository's Git URL. In SillyTavern 1.19 it clones into
+   `https://github.com/tobitus/st-preset-manager`. In SillyTavern 1.19 it clones into
    `data/<user>/extensions/st-preset-manager` (served at
    `/scripts/extensions/third-party/st-preset-manager`).
-2. **The server plugin**: `git clone` the same repository into SillyTavern's
+2. **The server plugin**: `git clone https://github.com/tobitus/st-preset-manager` into SillyTavern's
    `plugins/st-preset-manager` folder, set `enableServerPlugins: true` in
    `config.yaml`, then restart SillyTavern.
 
@@ -73,12 +73,16 @@ above, and does nothing else.
 - **MCP**: a stdio MCP server wraps the REST API; see *Phase 7* under
   Developer.
 
+## Licence
+
+AGPL-3.0-only, the same licence as SillyTavern. See `LICENSE`.
+
 ## Developer
 
 ### Publishing
 
-`manifest.json`'s `homePage` is empty until the repository has a public URL;
-set it (and `repository` in `package.json`) when the repository is pushed.
+The repository is `https://github.com/tobitus/st-preset-manager` (`homePage` in
+`manifest.json`, `repository` in `package.json`).
 Keep `manifest.json` and `package.json` versions equal. The plugin reports
 `package.json`'s version in `/health` and `info`, and `test/fix-round.test.js`
 checks that `manifest.json` matches.
