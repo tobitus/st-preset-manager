@@ -314,6 +314,13 @@ async function main() {
         fatal('setup', /** @type {Error} */ (err).message);
     }
     S.sola0 = flat(await getDoc(ids.sola)).map((e) => identOf(e.leaf));
+    // m1/m2's copy of Sola, taken before i1-i4/g1-g3 insert rows into Sola
+    // (i4 appends a trailing section, so a later copy has no top-level last row)
+    {
+        const r = await api('POST', `/presets/${ids.sola}/fork`, { name: 'Sola M' });
+        if (r.status !== 201) fatal('setup', `fork Sola M ${r.status} ${r.text}`);
+        ids.m = r.json.doc.id;
+    }
     report('setup: reset, FF/DEM/Sola imported, FF in the slot, clean pm.* localStorage', true,
         `ff=${ids.ff} dem=${ids.dem} sola=${ids.sola}`);
 
@@ -564,9 +571,6 @@ async function main() {
 
     // ------------------------------------------------------------------ m1
     await check('m1 ↓ moves the row above an empty trailing section into it (ONE moveLeaf); Alt+↑ moves it back out byte-identically; ST converges each time', async () => {
-        const r = await api('POST', `/presets/${ids.sola}/fork`, { name: 'Sola M' });
-        must(r.status === 201, `setup fork ${r.status}`);
-        ids.m = r.json.doc.id;
         must((await api('POST', '/slot/load', { presetId: ids.m })).status === 200, 'slot_load Sola M');
         await convergedOn(ids.m, 'Sola M in the slot');
         await openPreset(ids.m);
