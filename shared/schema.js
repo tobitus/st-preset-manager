@@ -3,6 +3,9 @@
  * list of problem paths; the REST layer turns a non-empty list into a 400.
  */
 import { TUNING_KEYS, CONNECTION_KEYS } from './st-keys.js';
+import { nemoTags } from './recognizers.js';
+import { usedIdentifiers, headingId, makeHeadingBlock } from './headings.js';
+import { newKey } from './canonical.js';
 import { ensureAllLeaves } from './groups.js';
 
 /**
@@ -296,11 +299,69 @@ export function deadTuningBindings(doc, registry) {
 }
 
 /**
+ * Walk every group row of every sequence (defensively), calling `fn(group)`.
+ * @param {any[]} sequences
+ * @param {(grp: any) => void} fn
+ */
+function walkGroups(sequences, fn) {
+    /** @param {any} rows */
+    const walk = (rows) => {
+        if (!Array.isArray(rows)) return;
+        for (const row of rows) {
+            if (typeof row !== 'object' || row === null) continue;
+            if (row.kind === 'group') fn(row);
+            walk(row.rows);
+            walk(row.options);
+        }
+    };
+    for (const seq of sequences) if (typeof seq === 'object' && seq !== null) walk(seq.rows);
+}
+
+/**
+ * Nemo upgrade step of `upgradeDoc` (see there).
+ * @param {any} doc
+ */
+function upgradeNemoHeadings(doc) {
+    if (doc?.source?.recognizer?.kind !== 'nemo') return;
+    if (typeof doc.blocks !== 'object' || doc.blocks === null || !Array.isArray(doc.sequences)) return;
+    /** @type {Set<string> | null} */
+    let used = null;
+    walkGroups(doc.sequences, (grp) => {
+        const header = grp.header;
+        if (grp.cardinality !== 'pick-one' || typeof header !== 'object' || header === null) return;
+        if (header.kind !== 'block' || typeof header.ref !== 'string' || !Array.isArray(grp.options)) return;
+        const tags = nemoTags(doc.blocks[header.ref]?.content);
+        if (tags.get('section-header') === 'true' || (tags.get('mutual-exclusive-group') ?? '') === '') return;
+        used ??= usedIdentifiers(doc);
+        const id = headingId(used);
+        const name = grp.name || tags.get('mutual-exclusive-group');
+        doc.blocks[id] = makeHeadingBlock(id, name);
+        const leaf = { kind: 'block', ref: id, key: newKey('row') };
+        grp.options.unshift(header);
+        grp.header = leaf;
+        grp.key = 'grp:' + leaf.key;
+        if (typeof doc.loadouts === 'object' && doc.loadouts !== null) {
+            for (const l of Object.values(/** @type {Record<string, any>} */ (doc.loadouts))) {
+                if (l?.kind === 'root' && typeof l.enabled === 'object' && l.enabled !== null) l.enabled[id] = true;
+            }
+        }
+        const rec = doc.source.recognizer;
+        if (!Array.isArray(rec.notes)) rec.notes = [];
+        rec.notes.push(
+            `upgrade: group '${name}' got a default heading; its former heading ` +
+                `'${doc.blocks[header.ref]?.name || header.ref}' is now an option`,
+        );
+    });
+}
+
+/**
  * Bring a pre-inheritance document up to the current shape, in place:
  * a loadout without `kind` becomes a complete root; an override without
  * `tuning` gets `tuning: null`; `tuningOverrides` is dropped. Idempotent;
  * a loadout that already has a `kind` is left alone. A non-object loadout or
- * override is skipped and left for validateDoc to report.
+ * override is skipped and left for validateDoc to report. A Nemo document
+ * whose pick-one group is headed by a former first-member option gets a
+ * synthesized comment-only default heading; the old heading becomes an option.
  * @param {any} doc
  * @returns {any} the same doc
  */
@@ -323,6 +384,7 @@ export function upgradeDoc(doc) {
             }
         }
     }
+    upgradeNemoHeadings(doc);
     delete doc.tuningOverrides;
     return doc;
 }

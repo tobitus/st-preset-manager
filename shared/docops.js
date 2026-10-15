@@ -26,6 +26,7 @@ import { effectiveEnabled, inheritResetKeys } from './loadouts.js';
 import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError, containerName, syncHeadingNames, makeSection, unmakeSection } from './outline.js';
 import { newId } from './util.js';
 import { newKey } from './canonical.js';
+import { defaultFields } from './headings.js';
 
 /**
  * Op-level failure with an HTTP status (the route forwards it verbatim).
@@ -47,19 +48,6 @@ export class OpError extends OutlineError {
 export function rejectConnectionKeys(/** @type {Record<string, any>} */ obj) {
     const bad = Object.keys(obj ?? {}).filter((k) => CONNECTION_KEYS.includes(k));
     if (bad.length) throw new OpError(`connection keys are never stored: ${bad.join(', ')}`);
-}
-
-/** v1 add_option defaults for a fresh ST prompt's fields */
-function defaultFields() {
-    return {
-        system_prompt: false,
-        marker: false,
-        injection_position: 0,
-        injection_depth: 4,
-        injection_order: 100,
-        injection_trigger: [],
-        forbid_overrides: false,
-    };
 }
 
 const isPlaystyle = (/** @type {any} */ l) => l?.kind === 'playstyle';

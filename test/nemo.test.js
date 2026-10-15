@@ -91,6 +91,10 @@ function nemoSt() {
 }
 
 const leafId = (/** @type {any} */ l) => l.ref ?? l.identifier;
+/** a synthesized default heading identifier (round 3) */
+const PMH = /^pmh-[0-9a-f]{8}$/;
+/** leaf id with a synthesized heading shown as 'pmh' */
+const shownId = (/** @type {any} */ l) => (PMH.test(leafId(l)) ? 'pmh' : leafId(l));
 
 /** @param {any[]} rows */
 function collect(rows) {
@@ -249,7 +253,7 @@ function subSt() {
 function shape(/** @type {any[]} */ rows) {
     return rows.map((r) => {
         if (r.kind === 'section') return ['section', r.name, leafId(r.header), shape(r.rows)];
-        if (r.kind === 'group') return ['group', r.name, r.header ? leafId(r.header) : null, r.options.map(leafId), r.cardinality, r.guessed];
+        if (r.kind === 'group') return ['group', r.name, r.header ? shownId(r.header) : null, r.options.map(leafId), r.cardinality, r.guessed];
         return leafId(r);
     });
 }
@@ -262,7 +266,7 @@ const SUB_EXPECTED = [
     ['section', '=== 📁 Core ===', 'T2', [
         ['group', 'S', 'CS', ['s1', 's2'], 'pick-one', false],
         ['group', '<Authors>', 'AU', ['a1', 'a2'], 'pick-one-or-more', false],
-        ['group', 'Y', 'y1', ['y2'], 'pick-one', false],
+        ['group', 'Y', 'pmh', ['y1', 'y2'], 'pick-one', false],
         'x', 'EH',
     ]],
     ['section', '=== Last ===', 'T3', ['SH', 'chatHistory', 'z']],
@@ -275,13 +279,20 @@ const subOrder = (/** @type {string[]} */ ids) => {
     return out;
 };
 
+/** subOrder plus the default heading of Y (it directly follows <Authors>), right before y1. */
+const subOrderHeaded = (/** @type {string[]} */ ids) => {
+    const out = subOrder(ids);
+    out.splice(out.indexOf('y1'), 0, 'pmh');
+    return out;
+};
+
 test('nemo sub headers: exclusive run -> pick-one, plain run -> pick-many, else plain; moved header noted', () => {
     const st = subSt();
     const doc = importStPreset(st, 'sub');
     assert.equal(doc.source.recognizer.kind, 'nemo');
     assert.deepEqual(shape(doc.sequences[0].rows), SUB_EXPECTED);
     // order: unchanged except the moved sub header
-    assert.deepEqual(flattenSeq(doc.sequences[0].rows).map((e) => leafId(e.leaf)), subOrder(st.orderIds));
+    assert.deepEqual(flattenSeq(doc.sequences[0].rows).map((e) => shownId(e.leaf)), subOrderHeaded(st.orderIds));
     const notes = doc.source.recognizer.notes;
     const moved = notes.filter((n) => n.includes('moved sub header'));
     assert.equal(moved.length, 1, notes.join(' | '));
@@ -339,7 +350,7 @@ test('nemo sub headers: survive the store round-trip unchanged', async () => {
     const doc = await store.importPreset({ st, name: 'sub' });
     const strip = (/** @type {any[]} */ s) => JSON.parse(JSON.stringify(s));
     assert.deepEqual(strip(shape(doc.sequences[0].rows)), SUB_EXPECTED);
-    assert.deepEqual(flattenSeq(doc.sequences[0].rows).map((e) => leafId(e.leaf)), subOrder(st.orderIds));
+    assert.deepEqual(flattenSeq(doc.sequences[0].rows).map((e) => shownId(e.leaf)), subOrderHeaded(st.orderIds));
 });
 
 test('isCommentOnly: {{// }} comments and {{trim}} only, never blank or text', () => {
@@ -451,8 +462,9 @@ test('a heading that sends text is NOT a member either: it is a checkbox beside 
 /**
  * Adjacent groups: H (section), p1 p2 (P), q1 q2 q3 (Q), r1 r2 (R), z plain,
  * s1 s2 (S). The outline model folds directly adjacent headerless groups
- * into one (rebuildSeq), so a group that directly follows another group is
- * headed by its own first member (headings count as pick-one members).
+ * into one (rebuildSeq), so a group that directly follows another group gets
+ * a synthesized comment-only default heading named after the group (round 3:
+ * a heading is never a choice, so its first member can no longer head it).
  */
 function adjacentSt() {
     /** @type {[string, string, string][]} */
@@ -465,34 +477,48 @@ function adjacentSt() {
         ['s1', 'S one', grp('S')], ['s2', 'S two', grp('S')],
     ];
     return {
-        // options send text (a first-member heading that sends text is a pick-one member)
         prompts: spec.map(([identifier, name, content]) => ({ identifier, name, content: `${content}\n${identifier} text`, role: 'system' })),
         prompt_order: [{ character_id: 100001, order: spec.map(([identifier]) => ({ identifier, enabled: false })) }],
         orderIds: spec.map(([id]) => id),
     };
 }
 
-const groupShape = (/** @type {any[]} */ groups) => groups.map((g) => [
-    g.name, g.header ? leafId(g.header) : null, g.options.map(leafId), g.cardinality, g.guessed,
-]);
+/** a synthesized heading shows as `pmh:<block name>` */
+const groupShape = (/** @type {any} */ doc, /** @type {any[]} */ groups) => groups.map((g) => {
+    const h = g.header ? leafId(g.header) : null;
+    return [g.name, h && PMH.test(h) ? `pmh:${doc.blocks[h].name}` : h, g.options.map(leafId), g.cardinality, g.guessed];
+});
 
 const ADJ_EXPECTED = [
     ['P', null, ['p1', 'p2'], 'pick-one', false],
-    ['Q', 'q1', ['q2', 'q3'], 'pick-one', false],
-    ['R', 'r1', ['r2'], 'pick-one', false],
+    ['Q', 'pmh:Q', ['q1', 'q2', 'q3'], 'pick-one', false],
+    ['R', 'pmh:R', ['r1', 'r2'], 'pick-one', false],
     ['S', null, ['s1', 's2'], 'pick-one', false],
 ];
 
-test('nemo: a group directly after another group is headed by its first member; others stay headerless', () => {
+test('nemo: a group directly after another group gets a comment-only default heading; others stay headerless', () => {
     const st = adjacentSt();
     const doc = importStPreset(st, 'adj');
     const rows = doc.sequences[0].rows;
-    assert.deepEqual(groupShape(collect(rows).groups), ADJ_EXPECTED);
-    assert.deepEqual(flattenSeq(rows).map((e) => leafId(e.leaf)), st.orderIds);
+    const { groups } = collect(rows);
+    assert.deepEqual(groupShape(doc, groups), ADJ_EXPECTED);
+    for (const g of [groups[1], groups[2]]) {
+        const id = leafId(g.header);
+        assert.equal(g.header.kind, 'block');
+        assert.equal(g.header.enabled, true, 'the default heading is imported ON');
+        assert.equal(doc.blocks[id].content, `{{// ${g.name} }}{{trim}}`);
+        assert.equal(isCommentOnly(doc.blocks[id].content), true);
+        assert.equal(doc.blocks[id].fields.marker, false);
+    }
+    // the original prompt order is unchanged; only the headings are inserted
+    assert.deepEqual(flattenSeq(rows).map((e) => leafId(e.leaf)).filter((id) => !PMH.test(id)), st.orderIds);
+    assert.deepEqual(flattenSeq(rows).map((e) => leafId(e.leaf)).map((id) => (PMH.test(id) ? doc.blocks[id].name : id)),
+        ['H', 'p1', 'p2', 'Q', 'q1', 'q2', 'q3', 'R', 'r1', 'r2', 'z', 's1', 's2']);
     const notes = doc.source.recognizer.notes;
-    assert.ok(notes.some((n) => n.includes("group 'Q' directly follows group 'P'")), notes.join(' | '));
-    assert.ok(notes.some((n) => n.includes("group 'R' directly follows group 'Q'")), notes.join(' | '));
+    assert.ok(notes.includes("nemo: group 'Q' directly follows group 'P'; it gets a default heading 'Q' (comment-only, sends nothing) so the groups stay apart"), notes.join(' | '));
+    assert.ok(notes.includes("nemo: group 'R' directly follows group 'Q'; it gets a default heading 'R' (comment-only, sends nothing) so the groups stay apart"), notes.join(' | '));
     assert.ok(!notes.some((n) => n.includes("group 'S' directly follows")), 'S follows a plain block');
+    assert.ok(!notes.some((n) => n.includes('heads it')), 'the old first-member note is gone');
 });
 
 test('nemo: adjacent groups survive the store round-trip and keep separate exclusivity', async () => {
@@ -500,10 +526,14 @@ test('nemo: adjacent groups survive the store round-trip and keep separate exclu
     const store = new Store(root);
     await store.init();
     const doc = await store.importPreset({ st: adjacentSt(), name: 'adj' });
-    assert.deepEqual(groupShape(collect(doc.sequences[0].rows).groups), ADJ_EXPECTED);
-    // one pick per group: q2+q3 collapse to one; p1, r2, s1 are untouched
-    const on = normalize(doc, { p1: true, q2: true, q3: true, r2: true, s1: true });
-    assert.equal(Number(on.q2) + Number(on.q3), 1);
+    const { groups } = collect(doc.sequences[0].rows);
+    assert.deepEqual(groupShape(doc, groups), ADJ_EXPECTED);
+    const en = doc.loadouts[doc.activeLoadoutId].enabled;
+    assert.equal(en[leafId(groups[1].header)], true, 'default heading ON in the default loadout');
+    assert.equal(en[leafId(groups[2].header)], true);
+    // one pick per group: q1+q3 collapse to one; p1, r2, s1 are untouched
+    const on = normalize(doc, { p1: true, q1: true, q3: true, r2: true, s1: true });
+    assert.equal(Number(on.q1) + Number(on.q3), 1);
     assert.equal(on.p1, true);
     assert.equal(on.r2, true);
     assert.equal(on.s1, true);
@@ -595,8 +625,11 @@ test('nemo: real Nemo Engine 11.5.2 file (skips when absent)', () => {
         // order: unchanged except moved sub headers
         const orig = order100001.order.map((/** @type {any} */ o) => o.identifier);
         const now = flattenSeq(s.rows).map((e) => leafId(e.leaf));
-        assert.deepEqual(now.filter((id) => !subIds.has(id)), orig.filter((/** @type {string} */ id) => !subIds.has(id)));
-        assert.equal(now.length, orig.length);
+        assert.deepEqual(now.filter((id) => !subIds.has(id) && !PMH.test(id)), orig.filter((/** @type {string} */ id) => !subIds.has(id)));
+        const synthesized = now.filter((id) => PMH.test(id));
+        assert.equal(now.length, orig.length + synthesized.length);
+        // every synthesized heading is a comment-only heading of a group that directly follows another group
+        for (const id of synthesized) assert.equal(isCommentOnly(doc.blocks[id].content), true, id);
         // the store's normalization (rebuildSeq) keeps every group apart
         const shapeOf = (/** @type {any[]} */ rows) => collect(rows).groups.map((g) => [g.name, g.header ? leafId(g.header) : null, g.options.length]);
         assert.deepEqual(shapeOf(rebuildSeq(flattenSeq(s.rows))), shapeOf(s.rows));

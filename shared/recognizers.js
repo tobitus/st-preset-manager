@@ -9,6 +9,7 @@
  */
 import { isStMarkerIdentifier, CONNECTION_KEYS } from './st-keys.js';
 import { newKey } from './canonical.js';
+import { headGroupsAfterGroups } from './headings.js';
 import { isCommentOnly } from './groups.js';
 
 export const PICK_HEADER = /^🔻PICK:\s*(.+?)\s*🔻$/;
@@ -253,39 +254,28 @@ function isNemoRow(prompt) {
 }
 
 /**
- * Close a Nemo group: >=2 options -> group; 1 option -> plain leaf. Records the run.
- * A group directly after another group takes its first row as heading, because
- * the store's rebuildSeq merges adjacent headerless groups.
+ * Close a Nemo group: >=2 options -> headerless group; 1 option -> plain leaf.
+ * Records the run. A group that directly follows another group gets its
+ * default heading later, in runNemo (headGroupsAfterGroups).
  * @param {any} state
  * @param {any[]} container
  * @param {Map<string, any[][]>} runs
  * @param {{ singles: number, groups: number }} counts
- * @param {string[]} notes
- * @param {(row: any) => string} nameOf
  */
-function closeNemoGroup(state, container, runs, counts, notes, nameOf) {
+function closeNemoGroup(state, container, runs, counts) {
     if (state === null) return;
     const list = runs.get(state.name) ?? [];
     list.push(state.options);
     runs.set(state.name, list);
     if (state.options.length >= 2) {
-        const prev = container[container.length - 1];
-        const headed = prev?.kind === 'group';
-        if (headed) {
-            notes.push(
-                `nemo: group '${state.name}' directly follows group '${prev.name}'; ` +
-                    `its first member '${nameOf(state.options[0])}' heads it ` +
-                    `(adjacent headerless groups would merge; the heading is a pick-one member)`,
-            );
-        }
         container.push({
             kind: 'group',
             key: newKey('grp'),
             name: state.name,
             cardinality: 'pick-one',
             guessed: false,
-            header: headed ? state.options[0] : null,
-            options: headed ? state.options.slice(1) : state.options,
+            header: null,
+            options: state.options,
         });
         counts.groups += 1;
     } else {
@@ -303,12 +293,14 @@ function closeNemoGroup(state, container, runs, counts, notes, nameOf) {
  * text and every content block never move). A sub header
  * before a run of plain blocks heads them as a pick-one-or-more group; any
  * other sub header stays a plain leaf. Headerless exclusive runs of >=2 are
- * pick-one groups, runs of 1 stay plain.
+ * pick-one groups, runs of 1 stay plain. A group that directly follows another
+ * group gets a synthesized comment-only default heading named after the group.
  * @param {any[]} rows
  * @param {Map<string, any>} byid
+ * @param {{ blocks: Record<string, any>, used: Set<string> }} ctx
  * @returns {[any[], string[]]}
  */
-function runNemo(rows, byid) {
+function runNemo(rows, byid, ctx) {
     let /** @type {any} */ section = null;
     let /** @type {any} */ group = null;
     /** @type {any[]} */
@@ -360,13 +352,13 @@ function runNemo(rows, byid) {
         const row = ordered[i];
         const cls = classify(row);
         if (cls.type === 'top') {
-            closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+            closeNemoGroup(group, container(), runs, counts);
             group = null;
             flushSection(section, out);
             section = { name: nameOf(row).trim(), header: row, rows: [] };
             sections += 1;
         } else if (cls.type === 'sub') {
-            closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+            closeNemoGroup(group, container(), runs, counts);
             group = null;
             const next = i + 1 < ordered.length ? classify(ordered[i + 1]) : { type: 'other', tag: '' };
             if (next.type === 'excl') {
@@ -412,17 +404,17 @@ function runNemo(rows, byid) {
             if (group !== null && group.name === cls.tag) {
                 group.options.push(row);
             } else {
-                closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+                closeNemoGroup(group, container(), runs, counts);
                 group = new GroupState(null, cls.tag, 'pick-one', false);
                 group.options.push(row);
             }
         } else {
-            closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+            closeNemoGroup(group, container(), runs, counts);
             group = null;
             pushLeaf(row);
         }
     }
-    closeNemoGroup(group, container(), runs, counts, notes, nameOf);
+    closeNemoGroup(group, container(), runs, counts);
     flushSection(section, out);
     for (const [name, list] of runs) {
         if (list.length < 2) continue;
@@ -432,6 +424,7 @@ function runNemo(rows, byid) {
                 `(kept in prompt order; runs of 1 stay plain): ${members}`,
         );
     }
+    headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'nemo');
     notes.push(
         `nemo: ${sections} sections, ${counts.groups} pick-one groups from @mutual-exclusive-group ` +
             `(${counts.singles} single-row runs left plain), ${counts.many} pick-many groups under sub headers`,
@@ -697,7 +690,7 @@ const RECOGNIZERS = {
     sola: runSola,
     ff5: runFf5,
     casus: runCasus,
-    flat: (rows) => [rows, ['flat: no grouping convention recognized; imported as independent toggles']],
+    flat: (rows, _byid, _ctx) => [rows, ['flat: no grouping convention recognized; imported as independent toggles']],
 };
 
 /**
@@ -736,6 +729,12 @@ export function importStPreset(data, name, ids = {}) {
     for (const p of data.prompts ?? []) byid.set(p?.identifier, p);
 
     const { blocks, markers } = buildBlocksAndMarkers(data);
+    const used = new Set([...Object.keys(blocks), ...markers.map((m) => m.identifier)]);
+    for (const p of data.prompts ?? []) if (typeof p?.identifier === 'string') used.add(p.identifier);
+    for (const seq of data.prompt_order ?? []) {
+        if (!Array.isArray(seq?.order)) continue;
+        for (const e of seq.order) if (typeof e?.identifier === 'string') used.add(e.identifier);
+    }
     /** @type {string[]} */
     const notes = [];
     /** @type {any[]} */
@@ -752,7 +751,7 @@ export function importStPreset(data, name, ids = {}) {
         const rows = seqRows(data, seq?.order ?? [], byid, kind);
         const recognizer = pickRecognizer(rows, byid);
         picked.push(recognizer);
-        const [structured, seqNotes] = RECOGNIZERS[recognizer](rows, byid);
+        const [structured, seqNotes] = RECOGNIZERS[recognizer](rows, byid, { blocks, used });
         notes.push(...seqNotes);
         sequences.push({ character_id: seq?.character_id, rows: structured });
     }
