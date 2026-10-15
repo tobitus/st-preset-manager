@@ -46,8 +46,9 @@ above, and does nothing else.
 
 ## Using it
 
-- **Library**: lists your presets with **Load**, **Open** and **Delete**;
-  import and export live in the section at the bottom of the Library pane.
+- **Library**: lists your presets with **Open**, **Fork**, **Load** and
+  **Delete**; import and export live in the section at the bottom of the
+  Library pane.
 - **Presets tab**: an outline of the preset with on/off switches, sections,
   pick-one groups and row numbers; Undo / Redo with Ctrl+Z / Ctrl+Shift+Z.
 - **Groups**: a group's heading is never one of its choices. A heading that
@@ -423,11 +424,13 @@ Chromium on ST).
   `● Active` marker (see *Active in SillyTavern* below).
 - **Presets tab edit bar**: *Insert ▾ → Section heading* asks for a name
   (default `New section`, stored as `== <Name> ==`) and runs ONE `addSection`
-  op: an empty heading, ON in the active loadout, whose section takes the rows
-  below it up to the next section heading. *Insert ▾ → Block* adds an empty
-  block; *Duplicate* copies the selected block directly below it (`copyBlock`
-  from the same preset, fresh identifier); *Delete* needs a second click on
-  the SAME row. Markers and order-only rows refuse both (toast).
+  op: an empty heading, ON in the active loadout, directly below the selected
+  row (or at the end; see Fix round 4), whose section takes the rows below it
+  up to the next section heading. *Insert ▾ → Block* adds an
+  empty block below the selected row; *Duplicate* copies the selected block
+  directly below it (`copyBlock` from the same preset, fresh identifier);
+  *Delete* needs a second click on the SAME row. Markers and order-only rows
+  refuse both (toast).
 - **Collapse**: section AND group rows (headerless "(options)" groups too)
   have a caret; the state is display-only, per preset
   (`pm.collapsed.<presetId>`). A collapsed section or group moves as one unit
@@ -440,11 +443,12 @@ Chromium on ST).
   the selected plain row into a section heading directly (one `makeSection`
   op; the rows below it up to the next section heading become its children)
   and *Unmake section heading* reverses it exactly (`unmakeSection`). *Make
-  group heading* (Alt+G) is the item→group promote, *Unmake group heading*
-  the demote back. Content, name and switch are untouched (an empty heading
-  is still left out of the slot). Options and the other kind of heading are
-  refused with a toast ("make it a plain row first"), as are markers and
-  order-only rows.
+  group heading* (Alt+G) is the item→group promote, *Unmake group heading* the
+  demote back. Content, name and switch are untouched (an empty heading is
+  still left out of the slot). Options and a group heading (for *Make section
+  heading*) are refused with a toast ("make it a plain row first"), as are
+  markers and order-only rows; *Make group heading* on a section heading is
+  allowed since fix round 4.
 - **Container names**: a section's or group's name IS its heading block's
   name (outline, shelf list, copies). Renaming the heading block (*Save
   content*, `editBlock`/`renameBlock`, or a rename in ST's panel) or a headed
@@ -519,6 +523,20 @@ showing; nothing is re-applied). An open Presets tab for it closes.
 
 Check: `node dev/check-nemo-delete.mjs` (resets dev data; covers Delete
 cancel/confirm and the Nemo import in the v2 window).
+
+### Library Fork
+
+Each Library row has a **Fork** button (between Open and Load). It asks for
+a name in an ST popup (default `<name> fork`), then copies the preset under
+that name (`POST /presets/:id/fork`) and opens the copy in the Presets tab.
+The copy gets fresh block identifiers, except SillyTavern's fixed system
+prompts (`main`, `nsfw`, `jailbreak`, `enhanceDefinitions`), which keep
+theirs: ST re-adds any of them a preset lacks, so a fork that renamed them
+could never load. Folder, tags and notes are the source's;
+`source.forkedFrom` names the source. A name that is already taken shows the
+server's error atop the Library list (it stays there until the next
+successful Library action); nothing is copied. Cancel or a blank name does
+nothing.
 
 ### Active in SillyTavern
 
@@ -622,3 +640,40 @@ pre-round-3 Nemo fixture (`dev/fixtures/native/nemo-adjacent-pre-r3.json`)
 upgrades with unchanged bits and unchanged slot text; s1 Sola V3 Flame
 imports through the Library (`dev/fixtures.sh` copies the owner's file into
 `dev/fixtures/presets/Sola V3 Flame.json`).
+
+### Fix round 4 (owner review, 2026-10-15)
+
+- **Fork** in the Library (see *Library Fork* above).
+- **Insert ▾ lands below the selection**, for every entry, and selects the
+  new row, so repeated inserts run downward (`addBlock` / `addSection` /
+  `addGroup` take `after: <row key>`; `before` still works over REST/MCP;
+  not both). *Block* after a plain row lands directly below it, in the same
+  section; after a section heading it is the section's first row; after a
+  group heading it is the group's first option; after an option it is the
+  next option of that group. *Section heading* after a group heading or
+  option lands after the whole group; after a section heading it is an
+  empty section right after that whole section. With nothing selected, every
+  insert goes to the end.
+- **Insert ▾ → Group heading** asks for a name (default `New group`, stored
+  as typed) and *Pick one (1)* / *Pick many (N)*, and runs ONE `addGroup`
+  op: an empty group heading, ON in the active loadout, with no options yet.
+  Select it and *Insert ▾ → Block* to add its options one by one. After a
+  section heading the new group is the section's first row; it never splits
+  a group or takes over a headerless group's rows.
+- **Make group heading on a section heading** turns it into a group heading
+  (one `demote`, Ctrl+Z undoes it). The section's rows stay below it as plain
+  rows; select them and *Demote* to make them options (the button title and
+  the status line say so).
+- **Moving across section headings**: ↑ / ↓, Alt+↑ / Alt+↓ and a drag in the
+  same list move a row or a whole group past a section heading one row at a
+  time: ↓ on the row just above a heading makes it that section's first
+  row, ↑ on a section's first row moves it out above the heading. An empty
+  section can receive rows this way. Options still stop at their group's
+  edge, and section headings move as whole sections as before.
+
+Tests: `test/fix4-*.test.js`. Check: `node dev/check-fix-insert.mjs`
+(resets dev data; real headless Chromium on ST): k1 Fork; i0–i4 insert
+placement; m1–m2 moving into an empty section (keys and a real drag); g1–g3
+the group path (Insert → Group heading, Make group heading on a section
+heading, the 1/N badge on an empty group). `node dev/check-fix1.mjs` f1/f8
+expect inserts below the selection.
