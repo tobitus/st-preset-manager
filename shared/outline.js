@@ -472,8 +472,8 @@ function blockStart(entries, j) {
  * The block ENDING at position b0 (the tiling neighbor above).
  * - the row above is an option -> its option run plus the group heading
  *   that owns it (if any)
- * - the row above is a section heading -> that single heading (a boundary:
- *   moveLeaf refuses crossing it unless the mover is a section)
+ * - the row above is a section heading -> that single heading (an item or
+ *   group mover swaps with the heading entry only)
  * - otherwise (item) -> that single row
  * @param {any[]} entries
  * @param {number} b0
@@ -492,15 +492,19 @@ function blockBefore(entries, b0) {
  * Swap the row (or its whole block, for headings) with the adjacent sibling
  * block at the same level. Never changes enabled bits.
  *
- * Sections are move limits: a row inside a section cannot swap across the
- * section's heading (promote the heading down first); section blocks swap
- * with whole sibling blocks (items, groups, whole sections).
+ * An item or group crosses a section heading one row per step: one step
+ * swaps its block with THAT HEADING ENTRY ONLY (up: it leaves the section
+ * and becomes the last row of the previous section or leading run; down: it
+ * becomes the section's first row(s)). This is exactly one-step invertible.
+ * Moving a group down into a section that starts with a headerless option
+ * run is refused (the run would merge into the group on rebuild). Options
+ * stay inside their group. Section headings swap whole sibling blocks
+ * (items, groups, whole sections).
  *
  * Note (v1 parity): a section moving up across the document's leading run
  * takes the run with it (sections cannot sit above their own rows); its
  * single-step inverse is therefore two presses, not one, when a run rode
- * along. Only section headings are affected — every option/item/group move
- * is exactly one-step invertible.
+ * along. Only section headings are affected.
  * @param {any} doc
  * @param {string} key
  * @param {number} delta -1 = up one sibling block, +1 = down one, 0 = no-op
@@ -528,13 +532,6 @@ export function moveLeaf(doc, key, delta) {
         } else {
             const [q0, q1] = blockBefore(entries, b0);
             p = [q0, q1];
-            // level check: walk back from my block; if a section heading sits
-            // at or above the neighbor's start, the swap would cross sections
-            let j = b0 - 1;
-            while (j >= p[0] && entries[j].rank !== 'section') j--;
-            if (j >= p[0]) {
-                throw new OutlineError('cannot move above the section heading (demote the section first)');
-            }
         }
         entries.splice(p[0], b1 - p[0], ...entries.slice(b0, b1), ...entries.slice(p[0], p[1]));
     } else {
@@ -547,8 +544,11 @@ export function moveLeaf(doc, key, delta) {
         } else {
             const [q0, q1] = blockStart(entries, b1);
             p = [q0, q1];
-            if (entries[p[0]].rank === 'section' && r !== 'section') {
-                throw new OutlineError('cannot move below the section (bottom of it)');
+            if (entries[b1].rank === 'section' && r !== 'section') {
+                if (r === 'group' && entries[b1 + 1]?.rank === 'option') {
+                    throw new OutlineError('cannot move the group into the section: its first rows are a headerless group');
+                }
+                p = [b1, b1 + 1]; // the heading entry only
             }
         }
         entries.splice(b0, p[1] - b0, ...entries.slice(p[0], p[1]), ...entries.slice(b0, b0 + (p[0] - b0)));
