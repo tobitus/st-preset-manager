@@ -273,6 +273,13 @@ ul.pm-list ul.pm-list {
     padding-left: calc(1.2em + 6px + 12px + 2.2 * 11px + 4px + 6px);
 }
 
+/* a group heading with its own checkbox (round 3) pushes its name right by
+   the switch (ST sizes it var(--mainFontSize), plus its margins and the 6px
+   row gap), so its options move right by as much */
+li.pm-node[data-kind="group"]:has(> .pm-row > .pm-switch) > ul.pm-list {
+    padding-left: calc(1.2em + 6px + 12px + 2.2 * 11px + 4px + 6px + var(--mainFontSize, 15px) + 14px);
+}
+
 .pm-row {
     display: flex;
     align-items: center;

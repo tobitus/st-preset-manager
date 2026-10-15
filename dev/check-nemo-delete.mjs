@@ -26,9 +26,10 @@
  *   n5 UI: the same indentation rule on a DEM outline (a section holding a
  *      plain row and a group)
  *   n3 UI: a folded-apart group (`Tense`, else `Tracker-Theme`) is headed by
- *      its first member; its heading row renders a radio switch. A real click
- *      on it makes the doc enable the heading and disable every option (and
- *      the radios/`.pm-none` follow); a click on `.pm-none` clears all
+ *      a synthesized `pmh-` comment-only default heading named after the
+ *      group (no switch); its first member is the first radio. A real click
+ *      on that radio enables it and disables every other option; a click on
+ *      `.pm-none` clears every option and leaves the heading bit alone
  *   d1 Delete, Cancel: the Library row's Delete opens an ST popup naming the
  *      preset; Cancel leaves the row, the REST doc and the file untouched
  *   d2 Delete, Confirm, on the slot-bound preset (also open in the Presets
@@ -38,7 +39,7 @@
  *      `Active in SillyTavern: none`, the Presets tab closes the deleted preset's tab, no
  *      popup remains, and ST's prompt manager still lists its prompts
  * Screenshots (dev/shots/): nemo-outline.png, nemo-vex-section.png,
- * dem-outline-indent.png, nemo-heading-radio.png, delete-confirm.png.
+ * dem-outline-indent.png, nemo-default-heading.png, delete-confirm.png.
  *
  * Environment: the dev container st-pm-dev on 127.0.0.1:8002 with the plugin
  * (dev/up.sh); NEVER :8001. It RESETS the dev data (dev/reset.sh) first.
@@ -403,51 +404,61 @@ async function main() {
     });
 
     // ------------------------------------------------------------------ n3
-    await check("n3 UI: a folded-apart group's heading radio selects it", async () => {
+    await check("n3 UI: a folded-apart group has a default heading (no switch); its first member's radio selects it", async () => {
         const grp = ['Tense', 'Tracker-Theme']
             .map((n) => findGroupByName(nemoDoc.sequences[0].rows, n))
             .find((g) => g?.header);
         must(grp, 'neither Tense nor Tracker-Theme is a headed group in sequences[0] (REST doc)');
         const headRef = grp.header.ref ?? grp.header.identifier;
         const optRefs = (grp.options ?? []).map((/** @type {any} */ o) => o.ref ?? o.identifier);
-        must(headRef && optRefs.length > 0, `${grp.name}: header ref ${J(headRef)}, ${optRefs.length} options`);
+        must(/^pmh-[0-9a-f]{8}$/.test(headRef), `${grp.name}: heading ${J(headRef)} is not a synthesized pmh- block`);
+        const headBlock = nemoDoc.blocks?.[headRef];
+        must(headBlock?.name === grp.name && /^\{\{\/\/.*\}\}\{\{trim\}\}$/.test(headBlock?.content ?? ''),
+            `${grp.name}: heading block ${J({ name: headBlock?.name, content: headBlock?.content })} is not a comment-only default heading`);
+        must(optRefs.length >= 2, `${grp.name}: ${optRefs.length} options`);
         const seq0 = `${view(ids.nemo)} .pm-outline ul.pm-list[data-list="seq"][data-seq-index="0"]`;
         const gli = `${seq0} li.pm-node[data-kind="group"][data-node-key="${grp.key}"]`;
-        must(await exists(gli), `no ${grp.name} group row ${grp.key} in the outline`);
-        const headSel = `${gli} > .pm-row > input.pm-switch`;
+        if (!(await until(() => exists(gli), 10000, 'group row').catch(() => false))) {
+            const seen = await probe.eval(`(() => { const all = [...document.querySelectorAll(${J(`${view(ids.nemo)} li.pm-node[data-kind="group"]`)})].map((li) => li.dataset.nodeKey + '=' + (li.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '')); return { views: document.querySelectorAll('#pm-window .pm-preset-view').length, nemoView: !!document.querySelector(${J(view(ids.nemo))}), groups: all.length, match: all.filter((s) => /Tense|Tracker|pmh/.test(s)) }; })()`);
+            throw new Error(`no ${grp.name} group row ${grp.key} in the outline; ${J(seen)}`);
+        }
+        const headSwitches = await probe.eval(`document.querySelectorAll(${J(`${gli} > .pm-row > input.pm-switch`)}).length`);
+        must(headSwitches === 0, `${grp.name}: comment-only heading renders ${headSwitches} switch(es), want none`);
         const noneSel = `${gli} > .pm-row .pm-none`;
         const optSel = `${gli} > ul.pm-list > li.pm-node .pm-switch`;
-        must(await exists(headSel), `${grp.name}: heading row has no input.pm-switch`);
-        const type = await probe.eval(`document.querySelector(${J(headSel)}).type`);
-        must(type === 'radio', `${grp.name}: heading switch type ${J(type)}, want radio`);
+        const firstSel = `${gli} > ul.pm-list > li.pm-node[data-identifier="${optRefs[0]}"] .pm-switch`;
+        const firstType = await probe.eval(`document.querySelector(${J(optSel)})?.type`);
+        const firstId = await probe.eval(`document.querySelector(${J(`${gli} > ul.pm-list > li.pm-node`)})?.dataset.identifier`);
+        must(firstType === 'radio' && firstId === optRefs[0], `${grp.name}: first option switch ${J({ firstType, firstId })}, want radio of ${optRefs[0]}`);
 
         const docNow = async () => getDoc(ids.nemo);
-        if (enabledOf(await docNow())[headRef] === true) {
-            await mouseClickSel(optSel);
-            await until(async () => enabledOf(await docNow())[optRefs[0]] === true, 8000, 'first option enabled in the doc');
+        const head0 = enabledOf(await docNow())[headRef];
+        if (enabledOf(await docNow())[optRefs[0]] === true) {
+            await mouseClickSel(`${gli} > ul.pm-list > li.pm-node[data-identifier="${optRefs[1]}"] .pm-switch`);
+            await until(async () => enabledOf(await docNow())[optRefs[1]] === true, 8000, 'second option enabled in the doc');
         }
 
-        await mouseClickSel(headSel);
+        await mouseClickSel(firstSel);
         const bits = await until(async () => {
             const en = enabledOf(await docNow());
-            return en[headRef] === true && optRefs.every((r) => en[r] === false) ? `head=${en[headRef]} options=${optRefs.map((r) => en[r]).join(',')}` : null;
-        }, 8000, `${grp.name}: heading on and every option off in the doc`);
+            return en[optRefs[0]] === true && optRefs.slice(1).every((r) => en[r] === false) && en[headRef] === head0
+                ? `head=${en[headRef]} options=${optRefs.map((r) => en[r]).join(',')}` : null;
+        }, 8000, `${grp.name}: first option on, the others off, heading unchanged in the doc`);
         const dom = await until(async () => {
-            const [h] = await checkedOf(headSel);
             const opts = await checkedOf(optSel);
             const [none] = await checkedOf(noneSel);
-            return h === true && opts.length === optRefs.length && opts.every((c) => c === false) && none === false ? { h, opts, none } : null;
-        }, 8000, `${grp.name}: heading radio checked, options and .pm-none unchecked in the DOM`);
-        const out = await shot('nemo-heading-radio.png');
+            return opts.length === optRefs.length && opts[0] === true && opts.slice(1).every((c) => c === false) && none === false ? { opts, none } : null;
+        }, 8000, `${grp.name}: first radio checked, others and .pm-none unchecked in the DOM`);
+        const out = await shot('nemo-default-heading.png');
 
         await mouseClickSel(noneSel);
         await until(async () => {
             const en = enabledOf(await docNow());
-            return en[headRef] === false && optRefs.every((r) => en[r] === false);
-        }, 8000, `${grp.name}: .pm-none clears the heading and every option in the doc`);
-        await until(async () => (await checkedOf(noneSel))[0] === true && (await checkedOf(headSel))[0] === false,
-            8000, `${grp.name}: .pm-none checked, heading radio unchecked in the DOM`);
-        return `group ${J(grp.name)}, heading ${J(nemoDoc.blocks?.[headRef]?.name ?? '')} (${headRef}); after heading click: ${bits}, DOM heading checked=${dom.h}, options checked=[${dom.opts.join(',')}], none=${dom.none}; .pm-none click clears heading + ${optRefs.length} options; screenshot ${out}`;
+            return optRefs.every((r) => en[r] === false) && en[headRef] === head0;
+        }, 8000, `${grp.name}: .pm-none clears every option and leaves the heading bit in the doc`);
+        await until(async () => (await checkedOf(noneSel))[0] === true && (await checkedOf(optSel)).every((c) => c === false),
+            8000, `${grp.name}: .pm-none checked, every option radio unchecked in the DOM`);
+        return `group ${J(grp.name)}, default heading ${J(headBlock.name)} (${headRef}, no switch, bit ${head0}); after first-radio click: ${bits}, DOM options checked=[${dom.opts.join(',')}], none=${dom.none}; .pm-none clears ${optRefs.length} options, heading bit stays ${head0}; screenshot ${out}`;
     });
 
     // ------------------------------------------------------------------ d1

@@ -214,9 +214,10 @@ async function main() {
     }
 
     // ----------------------------------------------------------- heading
-    // A pick-one group's HEADING is not a choice (v1: no switch on headings,
-    // only options count): clicking anywhere on the heading row never changes
-    // which option is chosen, in the library or in ST.
+    // A pick-one group's HEADING is never a choice (round 3): a heading gets an
+    // ordinary checkbox unless it is comment-only, and FF's POV heading is
+    // comment-only, so its row renders no switch. Clicking anywhere on the
+    // heading row never changes which option is chosen, in the library or in ST.
     if (wanted('heading')) {
         const name = 'heading: clicking a pick-one heading row never changes the chosen option';
         try {

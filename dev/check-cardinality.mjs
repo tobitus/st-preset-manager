@@ -336,7 +336,7 @@ async function main() {
         const loadouts = Object.values(d0.loadouts);
         must(loadouts.length === 1, `expected 1 loadout after the fresh import, found ${loadouts.length}`);
         must(loadouts.every((/** @type {any} */ l) => !l.overrides || Object.keys(l.overrides).length === 0), `loadout overrides present: ${J(loadouts.map((/** @type {any} */ l) => l.overrides))}`);
-        // heading off, option 1 on, option 2 off (a heading that is on would make the switch refuse)
+        // heading off, option 1 on, option 2 off (the heading is never a member; round3 h2 covers it on)
         await setOn(H, false);
         await setOn(O1, true);
         await setOn(O2, false);
