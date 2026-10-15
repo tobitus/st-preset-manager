@@ -26,7 +26,7 @@ import { effectiveEnabled, inheritResetKeys } from './loadouts.js';
 import { flattenSeq, rebuildSeq, promote, demote, moveLeaf, OutlineError, containerName, syncHeadingNames, makeSection, unmakeSection } from './outline.js';
 import { newId } from './util.js';
 import { newKey } from './canonical.js';
-import { defaultFields } from './headings.js';
+import { defaultFields, HEADING_SEMANTICS } from './headings.js';
 
 /**
  * Op-level failure with an HTTP status (the route forwards it verbatim).
@@ -560,6 +560,7 @@ function opCreateGroup(doc, a) {
     // (d) pick-one needs at most one currently-selected option
     if (gmeta.cardinality === 'pick-one') refusePickOneConflict(doc, newGroup);
     host.seq.rows = rows;
+    if (headerEntry) doc.source.headingSemantics = HEADING_SEMANTICS;
     const grp = collectGroups(doc).find((g) => g.header === (headerEntry?.leaf ?? null)
         && (g.options ?? []).some((o) => members.some((m) => m.leaf === o)));
     return { groupKey: grp?.key ?? null, options: (grp?.options ?? []).length };

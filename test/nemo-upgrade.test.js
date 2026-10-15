@@ -203,3 +203,104 @@ test('store: a native upload of the pre-round-3 fixture is upgraded too', async 
     assert.match(idOf(q.header), PMH);
     assert.deepEqual(validateDoc(doc), []);
 });
+
+// ----------------------------------------------------- heading-semantics marker
+
+import { applyDocOp } from '../shared/docops.js';
+import { deriveStructure } from '../shared/outline.js';
+import { HEADING_SEMANTICS } from '../shared/headings.js';
+import { Store as Store2 } from '../plugin/store.js';
+
+/**
+ * A round-3 Nemo document whose Q group was dissolved and re-created with
+ * "Make group from selection" (createGroup) using the TAGGED first block q1
+ * as the heading, then heading + one option enabled: valid under
+ * heading-not-a-choice, and it must survive every upgrade path unchanged.
+ * Returns { doc, qKey }.
+ */
+function postRound3UserHeading() {
+    const doc = upgradeDoc(structuredClone(loadOld()));
+    deriveStructure(doc);
+    // dissolve Q: q1, q2, q3 become plain items again
+    const qKey = collectGroups(doc).find((g) => g.name === 'Q').key;
+    applyDocOp(doc, 'dissolveGroup', { key: qKey });
+    // Make group from selection: q1 is the heading, q2 the option (adjacent)
+    const flat = (/** @type {any} */ d) => {
+        const out = /** @type {any[]} */ ([]);
+        const walk = (/** @type {any[]} */ rows) => {
+            for (const r of rows ?? []) {
+                if (r.kind === 'group') { out.push({ id: null, leaf: r.header, rank: 'group' }); for (const o of r.options ?? []) out.push({ id: null, leaf: o, rank: 'option' }); }
+                else if (r.kind === 'section') walk(r.rows);
+                else out.push({ leaf: r, rank: 'item' });
+            }
+        };
+        walk(d.sequences[0].rows);
+        return out;
+    };
+    const q1 = flat(doc).find((e) => idOf(e.leaf) === 'q1');
+    const q2 = flat(doc).find((e) => idOf(e.leaf) === 'q2');
+    applyDocOp(doc, 'createGroup', { headerKey: q1.leaf.key, keys: [q2.leaf.key], cardinality: 'pick-one' });
+    // heading + one option on (valid under heading-not-a-choice)
+    applyDocOp(doc, 'toggle', { identifier: 'q1', value: true });
+    applyDocOp(doc, 'toggle', { identifier: 'q2', value: true });
+    return { doc, qKey };
+}
+
+test('a post-round-3 user heading keeps its text through upgradeDoc and compiles', () => {
+    const { doc } = postRound3UserHeading();
+    assert.equal(doc.source.headingSemantics, HEADING_SEMANTICS, 'the ops stamped the marker');
+    assert.deepEqual(validateDoc(doc), []);
+    const textBefore = sent(doc, doc.activeLoadoutId).text;
+    assert.ok(textBefore.includes('q2 text'), 'q2 text is sent');
+    assert.ok(textBefore.includes('q1 text'), 'the heading q1 still sends its text');
+
+    const again = upgradeDoc(structuredClone(doc));
+    assert.deepEqual(again, doc, 'upgradeDoc is a no-op on a marked doc');
+    const q = collectGroups(again).find((g) => idOf(g.header) === 'q1');
+    assert.equal(idOf(q.header), 'q1', 'q1 is still the heading');
+    assert.deepEqual(q.options.map(idOf), ['q2'], 'options unchanged (q3 stays a plain item after the group)');
+    assert.equal(sent(again, again.activeLoadoutId).text, textBefore, 'sent text unchanged');
+});
+
+test('a revision of the post-round-3 heading restores unchanged', async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'st-pm-hsmark-'));
+    const store = new Store2(root);
+    await store.init();
+    const { doc } = postRound3UserHeading();
+    await store.importPreset({ native: doc });
+    const stored = store.getPreset(doc.id);
+    assert.equal(idOf(collectGroups(stored).find((g) => idOf(g.header) === 'q1').header), 'q1', 'stored with q1 as heading');
+    await store.snapshotRevision(doc.id, 'user heading');
+    const restored = await store.restoreRevision(doc.id, 1);
+    const q = collectGroups(restored.doc).find((g) => idOf(g.header) === 'q1');
+    assert.equal(idOf(q.header), 'q1', 'q1 survived the restore');
+    assert.deepEqual(q.options.map(idOf), ['q2']);
+    assert.equal(restored.doc.source.headingSemantics, HEADING_SEMANTICS);
+    assert.deepEqual(validateDoc(restored.doc), []);
+});
+
+test('a legacy unmarked Nemo doc still migrates, idempotently, and carries the marker afterwards', () => {
+    const once = upgradeDoc(structuredClone(loadOld()));
+    assert.equal(once.source.headingSemantics, HEADING_SEMANTICS, 'the upgrade stamps the marker');
+    const shape1 = JSON.stringify(collectGroups(once).map((g) => [g.name, idOf(g.header), g.options.map(idOf)]));
+    const twice = upgradeDoc(structuredClone(once));
+    assert.deepEqual(twice, once, 'idempotent');
+    assert.equal(JSON.stringify(collectGroups(twice).map((g) => [g.name, idOf(g.header), g.options.map(idOf)])), shape1);
+
+    // a marker hand-stamped on a legacy-shaped doc also skips the conversion
+    // (the owner declared the semantics; the shape is theirs)
+    const declared = structuredClone(loadOld());
+    declared.source.headingSemantics = HEADING_SEMANTICS;
+    const snap = structuredClone(declared);
+    assert.deepEqual(upgradeDoc(declared), snap);
+});
+
+test('validateDoc accepts the marker and rejects a foreign value', () => {
+    const doc = upgradeDoc(structuredClone(loadOld()));
+    assert.deepEqual(validateDoc(doc), []);
+    const bad = structuredClone(doc);
+    bad.source.headingSemantics = 'heading-semantics/999';
+    assert.deepEqual(validateDoc(bad), ['source.headingSemantics']);
+    const old = loadOld();
+    assert.deepEqual(validateDoc(old), [], 'absent (legacy) is valid');
+});

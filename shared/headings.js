@@ -7,6 +7,15 @@
 import { newKey } from './canonical.js';
 import { iterLeaves } from './groups.js';
 
+/**
+ * `source.headingSemantics` value of a document whose group headings already
+ * follow the round-3 rules (a heading is never a pick-one choice). Set by the
+ * pre-round-3 Nemo upgrade in `upgradeDoc` and by every import/creation under
+ * round-3 code, so the legacy first-member-heading conversion never rewrites
+ * a legitimate heading created afterwards.
+ */
+export const HEADING_SEMANTICS = 'heading-semantics/1';
+
 /** v1 add_option defaults for a fresh ST prompt's fields */
 export function defaultFields() {
     return {
@@ -84,16 +93,19 @@ export function makeHeadingBlock(identifier, name) {
  * @param {Set<string>} used
  * @param {string[]} notes
  * @param {string} label
+ * @param {any} [source] the document's `source` object, stamped with
+ *   `headingSemantics` when a heading is synthesized
  */
-export function headGroupsAfterGroups(rows, blocks, used, notes, label) {
+export function headGroupsAfterGroups(rows, blocks, used, notes, label, source) {
     for (let i = 0; i < rows.length; i++) {
         const g = rows[i];
-        if (g?.kind === 'section' && Array.isArray(g.rows)) headGroupsAfterGroups(g.rows, blocks, used, notes, label);
+        if (g?.kind === 'section' && Array.isArray(g.rows)) headGroupsAfterGroups(g.rows, blocks, used, notes, label, source);
         const prev = rows[i - 1];
         if (i > 0 && g?.kind === 'group' && g.header == null && prev?.kind === 'group') {
             const id = headingId(used);
             blocks[id] = makeHeadingBlock(id, g.name);
             g.header = { kind: 'block', ref: id, key: newKey('row'), enabled: true };
+            if (source && typeof source === 'object') source.headingSemantics = HEADING_SEMANTICS;
             notes.push(
                 `${label}: group '${g.name}' directly follows group '${prev.name}'; ` +
                     `it gets a default heading '${g.name}' (comment-only, sends nothing) so the groups stay apart`,

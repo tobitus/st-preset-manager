@@ -9,7 +9,7 @@
  */
 import { isStMarkerIdentifier, CONNECTION_KEYS } from './st-keys.js';
 import { newKey } from './canonical.js';
-import { headGroupsAfterGroups } from './headings.js';
+import { headGroupsAfterGroups, HEADING_SEMANTICS } from './headings.js';
 import { isCommentOnly } from './groups.js';
 
 export const PICK_HEADER = /^🔻PICK:\s*(.+?)\s*🔻$/;
@@ -301,7 +301,7 @@ function closeNemoGroup(state, container, runs, counts) {
  * group gets a synthesized comment-only default heading named after the group.
  * @param {any[]} rows
  * @param {Map<string, any>} byid
- * @param {{ blocks: Record<string, any>, used: Set<string> }} ctx
+ * @param {{ blocks: Record<string, any>, used: Set<string>, source?: any }} ctx
  * @returns {[any[], string[]]}
  */
 function runNemo(rows, byid, ctx) {
@@ -428,7 +428,7 @@ function runNemo(rows, byid, ctx) {
                 `(kept in prompt order; runs of 1 stay plain): ${members}`,
         );
     }
-    headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'nemo');
+    headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'nemo', ctx.source);
     notes.push(
         `nemo: ${sections} sections, ${counts.groups} pick-one groups from @mutual-exclusive-group ` +
             `(${counts.singles} single-row runs left plain), ${counts.many} pick-many groups under sub headers`,
@@ -671,7 +671,7 @@ function runSola3(rows, byid, ctx) {
             `sola3: [PICK 1: ${t}] members are not adjacent (${at}): imported as independent toggles (linked pick-one is a later feature)`,
         );
     }
-    headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'sola3');
+    headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'sola3', ctx.source);
     for (const g of walkAll(out)) {
         if (g.kind !== 'group') continue;
         const on = g.options.filter((/** @type {any} */ o) => o.enabled === true).length;
@@ -925,6 +925,9 @@ export function importStPreset(data, name, ids = {}) {
     }
     /** @type {string[]} */
     const notes = [...cleanNotes];
+    // exists before the recognizers run: headGroupsAfterGroups stamps
+    // headingSemantics on it when it synthesizes a default heading
+    const source = { recognizer: { kind: 'flat', notes } };
     /** @type {any[]} */
     const sequences = [];
     /** @type {string[]} */
@@ -938,7 +941,7 @@ export function importStPreset(data, name, ids = {}) {
         const rows = seqRows(clean, seq.order, byid, kind);
         const recognizer = pickRecognizer(rows, byid);
         picked.push(recognizer);
-        const [structured, seqNotes] = RECOGNIZERS[recognizer](rows, byid, { blocks, used });
+        const [structured, seqNotes] = RECOGNIZERS[recognizer](rows, byid, { blocks, used, source });
         notes.push(...seqNotes);
         sequences.push({ character_id: seq?.character_id, rows: structured });
     }
@@ -951,7 +954,10 @@ export function importStPreset(data, name, ids = {}) {
         name,
         tags: [],
         notes: '',
-        source: { importedFrom: 'upload:api', importedAt: ids.now ? ids.now() : null, importDigest: null, recognizer: { kind: presetKind, notes } },
+        // every import under round-3 code has round-3 heading semantics —
+        // whether or not a default heading was synthesized (source is the
+        // object the recognizers already stamped)
+        source: { importedFrom: 'upload:api', importedAt: ids.now ? ids.now() : null, importDigest: null, ...source, headingSemantics: HEADING_SEMANTICS, recognizer: { kind: presetKind, notes } },
         settings: Object.fromEntries(Object.entries(data).filter(
             ([k]) => k !== 'prompts' && k !== 'prompt_order' && !CONNECTION_KEYS.includes(k),
         )),

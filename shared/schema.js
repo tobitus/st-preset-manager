@@ -4,7 +4,7 @@
  */
 import { TUNING_KEYS, CONNECTION_KEYS } from './st-keys.js';
 import { nemoTags } from './recognizers.js';
-import { usedIdentifiers, headingId, makeHeadingBlock } from './headings.js';
+import { usedIdentifiers, headingId, makeHeadingBlock, HEADING_SEMANTICS } from './headings.js';
 import { newKey } from './canonical.js';
 import { ensureAllLeaves } from './groups.js';
 
@@ -55,6 +55,11 @@ export function validateDoc(doc) {
     if (!Array.isArray(doc.tags)) fail('tags');
     if (typeof doc.notes !== 'string') fail('notes');
     if (doc.source !== null && (typeof doc.source !== 'object' || doc.source === undefined)) fail('source');
+    else if (doc.source !== null && doc.source !== undefined) {
+        if (doc.source.headingSemantics !== undefined && doc.source.headingSemantics !== HEADING_SEMANTICS) {
+            fail('source.headingSemantics');
+        }
+    }
     if (typeof doc.settings !== 'object' || doc.settings === null || Array.isArray(doc.settings)) {
         fail('settings');
     } else {
@@ -318,11 +323,17 @@ function walkGroups(sequences, fn) {
 }
 
 /**
- * Nemo upgrade step of `upgradeDoc` (see there).
+ * Nemo upgrade step of `upgradeDoc` (see there). Runs only on documents
+ * WITHOUT the round-3 `source.headingSemantics` marker: the marker is set by
+ * this very upgrade and by every import/creation under round-3 code, so a
+ * legitimate tagged heading created afterwards (dissolve a Nemo group, then
+ * "Make group from selection" with its tagged first block as the heading) is
+ * never rewritten back into options[0].
  * @param {any} doc
  */
 function upgradeNemoHeadings(doc) {
     if (doc?.source?.recognizer?.kind !== 'nemo') return;
+    if (doc.source.headingSemantics === HEADING_SEMANTICS) return;
     if (typeof doc.blocks !== 'object' || doc.blocks === null || !Array.isArray(doc.sequences)) return;
     /** @type {Set<string> | null} */
     let used = null;
@@ -351,6 +362,7 @@ function upgradeNemoHeadings(doc) {
             `upgrade: group '${name}' got a default heading; its former heading ` +
                 `'${doc.blocks[header.ref]?.name || header.ref}' is now an option`,
         );
+        doc.source.headingSemantics = HEADING_SEMANTICS;
     });
 }
 
