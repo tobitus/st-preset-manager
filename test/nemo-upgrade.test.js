@@ -309,27 +309,34 @@ test('validateDoc accepts the marker and rejects a foreign value', () => {
     assert.deepEqual(validateDoc(old), [], 'absent (legacy) is valid');
 });
 
-/** The legacy fixture with Q made HEADERLESS (no legacy first-member heading
- * left to convert): the shape a doc has after the owner dissolved Q on the
- * OLD code. Q sits inside section '=== Head ===' between P and R; its options
- * become plain rows at the same flat position. */
-function legacyHeaderlessQ() {
+/** The legacy fixture with every first-member-headed group (Q, R) made
+ * HEADERLESS, so NO legacy heading is left to convert: the shape a doc has
+ * after the owner dissolved them on the OLD code. Their options become plain
+ * rows at the same flat position; the dropped headers' sparse bits go too. */
+function legacyHeaderless() {
     const old = loadOld();
     const sec = old.sequences[0].rows[0];
-    const idx = sec.rows.findIndex((/** @type {any} */ r) => r.kind === 'group' && r.name === 'Q');
-    const g = sec.rows[idx];
-    sec.rows.splice(idx, 1, ...(g.options ?? []).map((/** @type {any} */ o) => o));
+    for (const name of ['Q', 'R']) {
+        const idx = sec.rows.findIndex((/** @type {any} */ r) => r.kind === 'group' && r.name === name);
+        const g = sec.rows[idx];
+        sec.rows.splice(idx, 1, ...(g.options ?? []));
+    }
+    for (const l of Object.values(old.loadouts)) {
+        for (const map of [l.enabled, ...Object.values(l.overrides ?? {}).map((/** @type {any} */ o) => o.enabled)]) {
+            if (!map) continue;
+            delete map.q1;
+            delete map.r1;
+        }
+    }
     return old;
 }
 
 test('an initially headerless legacy Nemo doc gains the marker with zero conversions', () => {
-    const raw = legacyHeaderlessQ();
-    // the playstyle keeps a sparse q1 bit; clear it so the doc stays valid
-    // with q1 promoted out of every group (it is a plain item now)
-    for (const l of Object.values(raw.loadouts)) delete l.enabled.q1;
+    const raw = legacyHeaderless();
     const doc = upgradeDoc(structuredClone(raw));
     assert.equal(doc.source.headingSemantics, HEADING_SEMANTICS, 'stamped with nothing to convert');
-    assert.deepEqual(collectGroups(doc).map((g) => g.name), ['P', 'R', 'S']);
+    assert.deepEqual(Object.keys(doc.blocks).filter((k) => k.startsWith('pmh-')), [], 'no default heading synthesized');
+    assert.deepEqual(collectGroups(doc).map((g) => g.name), ['P', 'S']);
     assert.deepEqual(validateDoc(doc), []);
 });
 
@@ -347,7 +354,6 @@ test('a tagged heading copied into an unmarked Nemo doc survives the next upgrad
      * copied in. copyIntoDoc mints FRESH p_… ids for the copied heading +
      * option, so the copy is found by its group name. */
     const withCopy = (/** @type {any} */ raw) => {
-        for (const l of Object.values(raw.loadouts)) delete l.enabled.q1;
         upgradeDoc(raw); // the boot/rescan stamp with zero conversions
         assert.equal(raw.source.headingSemantics, HEADING_SEMANTICS);
         deriveStructure(raw);
@@ -357,7 +363,7 @@ test('a tagged heading copied into an unmarked Nemo doc survives the next upgrad
     const contentOf = (/** @type {any} */ d, /** @type {any} */ g) => d.blocks[idOf(g.header)]?.content;
     const tagged = (/** @type {any} */ c) => String(c).startsWith('{{// @mutual-exclusive-group Q }}');
 
-    const doc = withCopy(legacyHeaderlessQ());
+    const doc = withCopy(legacyHeaderless());
     const copied = collectGroups(doc).find((g) => g.name === 'Q one');
     assert.ok(copied && tagged(contentOf(doc, copied)), 'headed copy landed with its tagged heading');
     // enable the copy (fresh ids start off in every loadout): heading + option
@@ -380,9 +386,8 @@ test('a tagged heading copied into an unmarked Nemo doc survives the next upgrad
 });
 
 test('promote of a tagged block in an unmarked Nemo doc survives the next upgrade', () => {
-    const doc = structuredClone(legacyHeaderlessQ());
-    for (const l of Object.values(doc.loadouts)) delete l.enabled.q1;
-    upgradeDoc(doc); // boot/rescan stamp (zero conversions — Q is headerless)
+    const doc = structuredClone(legacyHeaderless());
+    upgradeDoc(doc); // boot/rescan stamp (zero conversions — Q and R are headerless)
     deriveStructure(doc);
     const keyOf = (/** @type {string} */ id) => {
         for (const e of flattenSeq(doc.sequences[0].rows)) if (idOf(e.leaf) === id) return e.leaf.key;
