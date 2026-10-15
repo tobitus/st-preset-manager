@@ -1073,6 +1073,23 @@ pre.pm-shelf-content {
     display: inline-block;
 }
 
+.pm-mkgrp-form {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    text-align: left;
+}
+
+.pm-mkgrp-form label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.pm-mkgrp-form select {
+    max-width: 100%;
+}
+
 .pm-insert-menu {
     position: absolute;
     top: 100%;

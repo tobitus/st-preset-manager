@@ -439,10 +439,18 @@ function opSetCardinality(doc, a) {
  * Create a group from existing leaves: `keys` (leaf keys) become its options,
  * `headerKey` (optional, non-marker) becomes the heading. The group lands at
  * the position of the first member (or before the `before` leaf key when
- * given). Markers refuse membership (a group always ends at a marker). When
- * `headerKey` names a block with a non-empty name, the stored group name is
- * that block's name (given `name` is ignored); otherwise it's `name` (or
- * blank). Enabled bits are untouched.
+ * given). When `headerKey` names a block with a non-empty name, the stored
+ * group name is that block's name (given `name` is ignored); otherwise it's
+ * `name` (or blank). Enabled bits are untouched. Rows are never reordered:
+ * the heading never counts for pick-one. All refusals happen before the
+ * document is mutated:
+ *  - markers (a group always ends at a marker);
+ *  - a section heading ("unmake the section first");
+ *  - a row already in a group ("dissolve it first");
+ *  - non-adjacent members ("selected rows must be adjacent");
+ *  - a headerless result that would fold into the group above, or a result
+ *    that would absorb the headerless group below (both 400);
+ *  - pick-one while 2+ options are selected in some loadout (409).
  * @param {any} doc
  * @param {{ keys?: string[], headerKey?: string|null, name?: string, cardinality?: string, before?: string|null }} a
  */
@@ -487,6 +495,23 @@ function opCreateGroup(doc, a) {
     const headerEntry = a?.headerKey ? host.flat.find((e) => e.leaf.key === a.headerKey) : null;
     if (a?.headerKey && !headerEntry) throw new OpError(`no row with key ${JSON.stringify(a.headerKey)}`, 404);
 
+    // (a) sections and rows already in a group never become members
+    for (const e of members) {
+        if (e.rank === 'section') {
+            throw new OpError('a section heading cannot become a group member — unmake the section first');
+        }
+        if (e.rank === 'group' || e.rank === 'option') {
+            const holder = collectGroups(doc).find((g) => g.header === e.leaf || (g.options ?? []).includes(e.leaf));
+            const blockName = doc.blocks?.[e.leaf.ref]?.name || identOf(e.leaf);
+            throw new OpError(`"${blockName}" is already in group "${holder ? containerName(doc, holder) : ''}" — dissolve it first`);
+        }
+    }
+    // (b) members must be adjacent rows
+    const idxs = members.map((e) => host.flat.indexOf(e));
+    if (Math.max(...idxs) - Math.min(...idxs) + 1 !== members.length) {
+        throw new OpError('selected rows must be adjacent');
+    }
+
     const hdrName = headerEntry?.leaf.kind === 'block' ? (doc.blocks?.[headerEntry.leaf.ref]?.name || '') : '';
     const gmeta = { name: hdrName || (a?.name ?? ''), cardinality: a?.cardinality ?? 'pick-one-or-more', guessed: false };
     /** @type {any[]} */
@@ -509,7 +534,32 @@ function opCreateGroup(doc, a) {
         at = bIdx;
     }
     kept.splice(at, 0, ...groupEntries);
-    host.seq.rows = rebuildSeq(kept);
+    const rows = rebuildSeq(kept);
+    const optionLeaves = members.filter((e) => e !== headerEntry).map((e) => e.leaf);
+    /** @param {any[]} rs @returns {any} */
+    const findNew = (rs) => {
+        for (const r of rs) {
+            if (r.kind === 'section') {
+                const hit = findNew(r.rows ?? []);
+                if (hit) return hit;
+            } else if (r.kind === 'group') {
+                if (optionLeaves.length ? (r.options ?? []).includes(optionLeaves[0]) : r.header === headerEntry?.leaf) return r;
+            }
+        }
+        return null;
+    };
+    const newGroup = findNew(rows);
+    // (c) the new group must hold exactly the members: no folding with neighbours
+    const opts = newGroup?.options ?? [];
+    if (opts.length !== optionLeaves.length || opts.some((o, i) => o !== optionLeaves[i])) {
+        if (!headerEntry && opts[0] !== optionLeaves[0]) {
+            throw new OpError('a group without a heading cannot sit directly below another group — pick a heading');
+        }
+        throw new OpError('the new group would merge with the headerless group below it — give that group a heading first');
+    }
+    // (d) pick-one needs at most one currently-selected option
+    if (gmeta.cardinality === 'pick-one') refusePickOneConflict(doc, newGroup);
+    host.seq.rows = rows;
     const grp = collectGroups(doc).find((g) => g.header === (headerEntry?.leaf ?? null)
         && (g.options ?? []).some((o) => members.some((m) => m.leaf === o)));
     return { groupKey: grp?.key ?? null, options: (grp?.options ?? []).length };

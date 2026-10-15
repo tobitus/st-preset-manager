@@ -16,8 +16,14 @@
  *      stays a checked checkbox, the enabled bits are unchanged and ST converges
  *   h3 The "none" radio clears every option and leaves the heading ON; control:
  *      a comment-only heading (Freaky Frankenstein's POV group) renders no switch
+ *   g1 "Make group from selection" (3 rows multi-selected, Ctrl-click): the ST
+ *      confirm popup defaults (heading = first row, pick-one); OK sends exactly one
+ *      `createGroup` op, one undo step / one revision, a headed pick-one group; Ctrl+Z removes it
+ *   g2 A non-adjacent selection: the server refusal (400 "selected rows must be
+ *      adjacent") shows in a second ST TEXT popup and the doc is unchanged
  * Screenshots (dev/shots/): round3-h1-heading-checkbox.png,
- *   round3-h2-pick-one.png, round3-h3-none.png.
+ *   round3-h2-pick-one.png, round3-h3-none.png, round3-g1-popup.png,
+ *   round3-g1-group.png, round3-g2-refusal.png.
  *
  * Environment: the dev container st-pm-dev on 127.0.0.1:8002 with the plugin
  * (dev/up.sh); NEVER :8001. It RESETS the dev data (dev/reset.sh) first.
@@ -185,10 +191,17 @@ const badgeText = async (/** @type {string} */ sel) => (await text(badge(sel)))?
 
 /**
  * Setup values, filled in main() once Sola is fetched: the heading H and the
- * two options O1/O2 of the group built in h1 (identifiers and leaf keys).
- * @type {{ H: string, HK: string, O1: string, K1: string, O2: string, K2: string }}
+ * two options O1/O2 of the group built in h1 (identifiers and leaf keys); G0..G2
+ * (GK*) three plain rows for g1; SA/SB (SAK/SBK) two plain rows for g2.
+ * @type {{ H: string, HK: string, O1: string, K1: string, O2: string, K2: string,
+ *   G0: string, GK0: string, G1: string, GK1: string, G2: string, GK2: string,
+ *   SA: string, SAK: string, SB: string, SBK: string, gj: number, sm: number }}
  */
-const S = { H: '', HK: '', O1: '', K1: '', O2: '', K2: '' };
+const S = {
+    H: '', HK: '', O1: '', K1: '', O2: '', K2: '',
+    G0: '', GK0: '', G1: '', GK1: '', G2: '', GK2: '',
+    SA: '', SAK: '', SB: '', SBK: '', gj: -1, sm: -1,
+};
 
 const gli = () => `${view(ids.sola)} li.pm-node[data-kind="group"][data-key="${S.HK}"]`;
 const headSw = () => `${gli()} > .pm-row > input.pm-switch`;
@@ -234,6 +247,38 @@ async function ensureOrMore() {
         must(res.status === 200, `setCardinality pick-one-or-more failed: HTTP ${res.status} ${J(res.json)}`);
     }
 }
+
+/** A real key press via CDP (modifiers: 2 = Ctrl, 8 = Shift). */
+async function pressKey(/** @type {string} */ key, /** @type {string} */ code, /** @type {number} */ vk, modifiers = 0) {
+    await probe.cdp('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code, windowsVirtualKeyCode: vk, modifiers });
+    await probe.cdp('Input.dispatchKeyEvent', { type: 'keyUp', key, code, windowsVirtualKeyCode: vk, modifiers });
+}
+
+const history = async () => (await api('GET', `/presets/${ids.sola}/history`)).json;
+const selectedCount = () => probe.eval(`document.querySelectorAll(${J(`${view(ids.sola)} li.pm-node > .pm-row.pm-selected`)}).length`);
+
+/** Click the first row's name, Ctrl-click the rest, wait until exactly keys.length rows are selected. */
+async function selectThree(/** @type {string[]} */ keys) {
+    const name = (/** @type {string} */ k) => `${rowLi(ids.sola, k)} > .pm-row .pm-name`;
+    await mouseClickSel(name(keys[0]));
+    for (const k of keys.slice(1)) await mouseClickSel(name(k), 2);
+    await until(async () => (await selectedCount()) === keys.length, 8000, `${keys.length} rows selected`);
+}
+
+/** The group row of `doc` (any depth, incl. section rows) headed by `ident`. */
+const grpOf = (/** @type {any} */ doc, /** @type {string} */ ident) => {
+    const find = (/** @type {any[]} */ rows) => {
+        for (const r of rows ?? []) {
+            if (r.kind === 'group' && r.header && (r.header.ref ?? r.header.identifier) === ident) return r;
+            if (r.kind === 'section') {
+                const hit = find(r.rows);
+                if (hit) return hit;
+            }
+        }
+        return null;
+    };
+    return find(doc.sequences[0].rows);
+};
 
 // ------------------------------------------------------------------ h1
 
@@ -335,6 +380,104 @@ async function sectionH3() {
     });
 }
 
+// ------------------------------------------------------------------ g1
+
+async function sectionG1() {
+    await check('g1 Make group from selection: one createGroup op, one revision, a headed pick-one group; Ctrl+Z removes it', async () => {
+        await setOn(S.G2, false);
+        await convergedOn(ids.sola, 'converged before g1');
+        const h0 = await history();
+        const rev0 = (await getDoc(ids.sola)).rev;
+        await selectThree([S.GK0, S.GK1, S.GK2]);
+        const btn = `${view(ids.sola)} .pm-rank-make-group-sel`;
+        await until(() => probe.eval(`(() => { const b = document.querySelector(${J(btn)}); return !!b && !b.classList.contains('pm-disabled'); })()`), 8000, 'Make group button enabled');
+        await recordOps();
+        await mouseClickSel(btn);
+        await until(() => exists('dialog[open] .pm-mkgrp-form'), 8000, 'make-group popup open');
+        const head = await probe.eval(`document.querySelector('dialog[open] select.pm-mkgrp-heading').value`);
+        must(head === S.GK0, `heading default ${J(head)}, want ${S.GK0}`);
+        const card = await probe.eval(`document.querySelector('dialog[open] input[name="pm-mkgrp-card"]:checked')?.value ?? null`);
+        must(card === 'pick-one', `cardinality default ${J(card)}, want pick-one`);
+        const opts = await probe.eval(`[...document.querySelector('dialog[open] select.pm-mkgrp-heading').options].map((o) => o.value)`);
+        must(J(opts) === J(['', S.GK0, S.GK1, S.GK2]), `heading options ${J(opts)}`);
+        await shot('round3-g1-popup.png', 'page');
+        must(await click('dialog[open] .popup-button-ok'), 'no popup OK button');
+        const doc = await until(async () => {
+            const d = await getDoc(ids.sola);
+            return grpOf(d, S.G0) ? d : null;
+        }, 8000, 'group headed by G0 exists');
+        const seen = await opsSeen();
+        const want = { op: 'createGroup', keys: [S.GK1, S.GK2], headerKey: S.GK0, cardinality: 'pick-one' };
+        const got = seen.map((/** @type {any} */ o) => ({ op: o.op, keys: o.keys, headerKey: o.headerKey, cardinality: o.cardinality }));
+        must(seen.length === 1 && J(got[0]) === J(want), `expected exactly ${J(want)}, saw ${J(seen)}`);
+        const h1 = await history();
+        must(h1.undo === h0.undo + 1, `undo depth ${h0.undo} -> ${h1.undo}, want +1`);
+        must(doc.rev === rev0 + 1, `rev ${rev0} -> ${doc.rev}, want +1`);
+        const g = grpOf(doc, S.G0);
+        const optIds = g.options.map((/** @type {any} */ l) => l.ref ?? l.identifier);
+        must(J(optIds) === J([S.G1, S.G2]), `group options ${J(optIds)}`);
+        must(g.cardinality === 'pick-one', `cardinality ${g.cardinality}`);
+        const gli = `${view(ids.sola)} li.pm-node[data-kind="group"][data-key="${S.GK0}"]`;
+        await until(() => exists(gli), 10000, 'group li rendered');
+        const headType = await probe.eval(`document.querySelector(${J(`${gli} > .pm-row > input.pm-switch`)})?.type ?? null`);
+        must(headType === 'checkbox', `heading switch type ${headType}, want checkbox`);
+        const types = await typesOf(`${gli} > ul.pm-list > li.pm-node .pm-switch`);
+        must(types.length === 2 && types.every((/** @type {string} */ t) => t === 'radio'), `option switches ${J(types)}, want 2 radios`);
+        const b = await badgeText(gli);
+        must(b === '1', `badge ${J(b)}, want "1"`);
+        const popup = await popupText();
+        must(popup === null, `an ST popup is open: ${popup}`);
+        await shot('round3-g1-group.png');
+
+        await probe.eval(`document.querySelector(${J(`${view(ids.sola)} .pm-outline`)}).focus()`);
+        await pressKey('z', 'KeyZ', 90, 2);
+        await until(async () => {
+            const d = await getDoc(ids.sola);
+            if (grpOf(d, S.G0)) return false;
+            const rk = new Map(flat(d).map((/** @type {any} */ r) => [identOf(r.leaf), r.rank]));
+            return [S.G0, S.G1, S.G2].every((i) => rk.get(i) === 'item');
+        }, 8000, 'Ctrl+Z removed the group');
+        const h2 = await history();
+        must(h2.undo === h0.undo, `undo depth after Ctrl+Z ${h2.undo}, want ${h0.undo}`);
+        await until(async () => !(await exists(gli)), 8000, 'group li gone');
+        await convergedOn(ids.sola, 'converged after undo');
+        return `createGroup ${J(want)}; rev ${rev0} -> ${doc.rev}; history ${J(h0)} -> ${J(h1)} -> ${J(h2)}`;
+    });
+}
+
+// ------------------------------------------------------------------ g2
+
+async function sectionG2() {
+    await check('g2 non-adjacent selection: the server refusal shows in a TEXT popup, doc unchanged', async () => {
+        const res = await op(ids.sola, { op: 'addSection', name: '== R3 split ==', before: S.SBK });
+        must(res.status === 200, `addSection failed: HTTP ${res.status} ${J(res.json)}`);
+        await until(async () => {
+            const f = flat(await getDoc(ids.sola));
+            const i = f.findIndex((/** @type {any} */ r) => identOf(r.leaf) === S.SB);
+            return i > 0 && f[i - 1].rank === 'section';
+        }, 8000, 'section row right before SB');
+        await convergedOn(ids.sola, 'converged after addSection');
+        const rev0 = (await getDoc(ids.sola)).rev;
+        await selectThree([S.SAK, S.SBK]);
+        const btn = `${view(ids.sola)} .pm-rank-make-group-sel`;
+        await until(() => probe.eval(`(() => { const b = document.querySelector(${J(btn)}); return !!b && !b.classList.contains('pm-disabled'); })()`), 8000, 'Make group button enabled');
+        await mouseClickSel(btn);
+        await until(() => exists('dialog[open] .pm-mkgrp-form'), 8000, 'make-group popup open');
+        must(await click('dialog[open] .popup-button-ok'), 'no popup OK button');
+        const msg = await until(() => probe.eval(`(() => { for (const d of document.querySelectorAll('dialog[open]')) if (d.textContent.includes('selected rows must be adjacent')) return d.textContent.trim(); return null; })()`), 8000, 'refusal popup');
+        const d = await getDoc(ids.sola);
+        must(d.rev === rev0, `rev ${rev0} -> ${d.rev}, want unchanged`);
+        must(!grpOf(d, S.SA) && !grpOf(d, S.SB), 'a group headed by SA/SB exists');
+        const inGroup = (/** @type {any[]} */ rows) => rows.some((r) => (r.kind === 'group' && [r.header, ...(r.options ?? [])].some((l) => [S.SA, S.SB].includes(l?.ref ?? l?.identifier)))
+            || (r.kind === 'section' && inGroup(r.rows ?? [])));
+        must(!inGroup(d.sequences[0].rows), 'SA or SB ended up inside a group');
+        await shot('round3-g2-refusal.png', 'page');
+        await dismissPopups();
+        await until(async () => !(await exists('dialog[open]')), 8000, 'no dialog[open]');
+        return `rev ${rev0} unchanged, no group; popup: ${J(msg)}`;
+    });
+}
+
 // ------------------------------------------------------------------ main
 
 async function main() {
@@ -372,6 +515,23 @@ async function main() {
     S.H = identOf(rows[at].leaf); S.HK = rows[at].leaf.key;
     S.O1 = identOf(rows[at + 1].leaf); S.K1 = rows[at + 1].leaf.key;
     S.O2 = identOf(rows[at + 2].leaf); S.K2 = rows[at + 2].leaf.key;
+    // g1: three plain rows after the h triple, a lone option-free spot (the next row is not an option).
+    const isPlain = (/** @type {any} */ r) => !!r && r.rank === 'item' && r.leaf.kind === 'block' && !!sola0.blocks[identOf(r.leaf)];
+    const notOption = (/** @type {any} */ r) => !r || r.rank !== 'option';
+    for (let j = at + 4; j + 2 < rows.length; j++) {
+        if (isPlain(rows[j]) && isPlain(rows[j + 1]) && isPlain(rows[j + 2]) && notOption(rows[j + 3])) { S.gj = j; break; }
+    }
+    if (S.gj < 0) fatal('setup', 'no three consecutive plain rows after the h triple for g1');
+    S.G0 = identOf(rows[S.gj].leaf); S.GK0 = rows[S.gj].leaf.key;
+    S.G1 = identOf(rows[S.gj + 1].leaf); S.GK1 = rows[S.gj + 1].leaf.key;
+    S.G2 = identOf(rows[S.gj + 2].leaf); S.GK2 = rows[S.gj + 2].leaf.key;
+    // g2: two consecutive plain rows after g1's three.
+    for (let m = S.gj + 5; m < rows.length; m++) {
+        if (isPlain(rows[m - 1]) && isPlain(rows[m]) && notOption(rows[m + 1])) { S.sm = m; break; }
+    }
+    if (S.sm < 0) fatal('setup', 'no two consecutive plain rows after the g1 rows for g2');
+    S.SA = identOf(rows[S.sm - 1].leaf); S.SAK = rows[S.sm - 1].leaf.key;
+    S.SB = identOf(rows[S.sm].leaf); S.SBK = rows[S.sm].leaf.key;
 
     await probe.start();
     await probe.cdp('Page.bringToFront');
@@ -391,6 +551,8 @@ async function main() {
     if (wanted('h1')) await sectionH1();
     if (wanted('h2')) await sectionH2();
     if (wanted('h3')) await sectionH3();
+    if (wanted('g1')) await sectionG1();
+    if (wanted('g2')) await sectionG2();
 
     finish();
 }
