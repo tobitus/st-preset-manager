@@ -20,6 +20,10 @@ export const OPTION_NAME = /^「\s*(.+?)\s*」$/;
 export const MODULE_NAME = /^[|!]\s*(.+?)\s*[|!]$/;
 export const SOLA_SECTION = /^━+\s*(.+?)\s*━+$/;
 export const SOLA_TAGGED = /^\[(.+?)\]\s*(.*)$/;
+export const SOLA3_SECTION = /^(.*?)\s*═{3,}\s*$/;
+export const SOLA3_PICK = /\[PICK 1:\s*([^\]↑↓]+?)\s*\]/;
+export const SOLA3_DOWN = /^\s*\[PICK 1:\s*↓\s*\]\s*(.*?)\s*$/;
+export const SOLA3_UP = /^\s*\[PICK 1:\s*↑\s*\]\s*(.*?)\s*$/;
 export const FF5_PICK_HINT = /pick\s*one/i;
 export const CASUS_BOX_OPEN = /^┌.*$/i;
 export const CASUS_BOX_CLOSE = /^└.*$/i;
@@ -568,6 +572,117 @@ function runSola(rows, byid) {
     return [out, notes];
 }
 
+// ------------------------------------------------------------------ sola3
+
+function runSola3(rows, byid, ctx) {
+    /** @type {any[]} */
+    const out = [];
+    let /** @type {any} */ section = null;
+    const named = rowsToNamed(rows, byid);
+    /** @type {string[]} */
+    const notes = [];
+    /** @type {Map<string, number[]>} */
+    const tagAt = new Map();
+    named.forEach(([row, name], idx) => {
+        if (row.kind === 'marker') return;
+        const m = SOLA3_PICK.exec(name);
+        if (!m) return;
+        const t = m[1].trim();
+        if (!tagAt.has(t)) tagAt.set(t, []);
+        tagAt.get(t).push(idx);
+    });
+    /** @type {Set<string>} */
+    const splitTags = new Set();
+    let sections = 0;
+    let namedGroups = 0;
+    let pairs = 0;
+    const plainNote = (/** @type {string} */ blockName, /** @type {string} */ arrow) =>
+        `sola3: '${blockName.trim()}' has no matching [PICK 1: ${arrow}] row next to it: imported as a plain row`;
+    const pickOf = (/** @type {number} */ k) => {
+        const [r, n] = named[k];
+        if (r.kind === 'marker') return null;
+        const m = SOLA3_PICK.exec(n);
+        return m ? m[1].trim() : null;
+    };
+    let i = 0;
+    while (i < named.length) {
+        const [row, name] = named[i];
+        const secMatch = SOLA3_SECTION.exec(name);
+        if (secMatch) {
+            flushSection(section, out);
+            section = { name: secMatch[1], header: row.kind !== 'marker' ? row : null, rows: [] };
+            sections += 1;
+            i += 1;
+            continue;
+        }
+        const target = section ? section.rows : out;
+        const tag = pickOf(i);
+        if (tag !== null) {
+            let j = i + 1;
+            while (j < named.length && !SOLA3_SECTION.test(named[j][1]) && pickOf(j) === tag) j += 1;
+            const run = named.slice(i, j).map(([r]) => r);
+            if (run.length >= 2) {
+                target.push({
+                    kind: 'group',
+                    key: newKey('grp'),
+                    name: tag,
+                    cardinality: 'pick-one',
+                    guessed: false,
+                    header: null,
+                    options: run,
+                });
+                namedGroups += 1;
+            } else {
+                target.push(row);
+                if (tagAt.get(tag).length > 1) splitTags.add(tag);
+            }
+            i = j;
+            continue;
+        }
+        const down = row.kind === 'marker' ? null : SOLA3_DOWN.exec(name);
+        if (down) {
+            const nxt = i + 1 < named.length ? named[i + 1] : null;
+            const up = nxt && nxt[0].kind !== 'marker' ? SOLA3_UP.exec(nxt[1]) : null;
+            if (up) {
+                target.push({
+                    kind: 'group',
+                    key: newKey('grp'),
+                    name: `${down[1]} / ${up[1]}`,
+                    cardinality: 'pick-one',
+                    guessed: false,
+                    header: null,
+                    options: [row, nxt[0]],
+                });
+                pairs += 1;
+                i += 2;
+                continue;
+            }
+            notes.push(plainNote(name, '↑'));
+        } else if (row.kind !== 'marker' && SOLA3_UP.test(name)) {
+            notes.push(plainNote(name, '↓'));
+        }
+        target.push(row);
+        i += 1;
+    }
+    flushSection(section, out);
+    for (const t of splitTags) {
+        const at = tagAt.get(t).map((p) => `#${p}`).join(', ');
+        notes.push(
+            `sola3: [PICK 1: ${t}] members are not adjacent (${at}): imported as independent toggles (linked pick-one is a later feature)`,
+        );
+    }
+    headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'sola3');
+    for (const g of walkAll(out)) {
+        if (g.kind !== 'group') continue;
+        const on = g.options.filter((/** @type {any} */ o) => o.enabled === true).length;
+        if (on >= 2) {
+            notes.push(`sola3: group '${g.name}' has ${on} members on in the file; pick-one keeps the last one at compile — fix in the outline`);
+        }
+    }
+    notes.push(`sola3: ${sections} sections, ${namedGroups} named groups, ${pairs} pairs`);
+    return [out, notes];
+}
+
 // ------------------------------------------------------------------ ff5
 
 function runFf5(rows, byid) {
@@ -678,6 +793,7 @@ export function pickRecognizer(rows, byid) {
         .map(([, n]) => n);
     if (rows.some((r) => r.kind === 'block' && isNemoRow(byid.get(r.ref)))) return 'nemo';
     if (names.some((n) => PICK_HEADER.test(n))) return 'dem';
+    if (names.some((n) => SOLA3_SECTION.test(n) || SOLA3_PICK.test(n))) return 'sola3';
     if (names.some((n) => SOLA_SECTION.test(n))) return 'sola';
     if (names.some((n) => isFf5Header(n))) return 'ff5';
     if (names.some((n) => CASUS_BOX_OPEN.test(n))) return 'casus';
@@ -687,6 +803,7 @@ export function pickRecognizer(rows, byid) {
 const RECOGNIZERS = {
     nemo: runNemo,
     dem: runDem,
+    sola3: runSola3,
     sola: runSola,
     ff5: runFf5,
     casus: runCasus,
@@ -715,6 +832,71 @@ export function assertStPreset(data, name) {
 }
 
 /**
+ * Clean the INPUT of an ST import: drop prompts / prompt_order entries that
+ * cannot be imported and coerce a non-string role/content, noting each fix.
+ * Pure: `data` is never mutated; a coerced prompt is a shallow copy.
+ * @param {any} data a preset that passed assertStPreset
+ * @param {string} name display name
+ * @returns {{ prompts: any[], orders: any[], notes: string[] }}
+ */
+export function cleanStPreset(data, name) {
+    void name;
+    /** @type {string[]} */
+    const notes = [];
+    /** @type {any[]} */
+    const prompts = [];
+    data.prompts.forEach((/** @type {any} */ p, /** @type {number} */ i) => {
+        if (p === null || typeof p !== 'object') {
+            notes.push(`dropped prompts[${i}]: not an object`);
+            return;
+        }
+        if (typeof p.identifier !== 'string') {
+            notes.push(`dropped prompts[${i}]: identifier is not a string`);
+            return;
+        }
+        let out = p;
+        if (p.role !== undefined && typeof p.role !== 'string') {
+            out = { ...out, role: 'system' };
+            notes.push(`prompts[${i}] ("${p.identifier}"): role ${JSON.stringify(p.role)} is not a string; set to "system"`);
+        }
+        if (p.content !== undefined && typeof p.content !== 'string') {
+            out = { ...out, content: '' };
+            notes.push(`prompts[${i}] ("${p.identifier}"): content is not a string; set to ""`);
+        }
+        prompts.push(out);
+    });
+    /** @type {any[]} */
+    const orders = [];
+    /** @type {Set<number>} */
+    const seen = new Set();
+    data.prompt_order.forEach((/** @type {any} */ o, /** @type {number} */ i) => {
+        /** @type {string | null} */
+        let why = null;
+        if (o === null || typeof o !== 'object') why = 'not an object';
+        else if (!Number.isInteger(o.character_id)) {
+            why = `character_id ${JSON.stringify(o.character_id) ?? 'undefined'} is not a number`;
+        } else if (!Array.isArray(o.order)) why = 'order is not an array';
+        else if (seen.has(o.character_id)) why = `duplicate character_id ${o.character_id} (the first one is kept)`;
+        if (why !== null) {
+            notes.push(`dropped prompt_order[${i}]: ${why}`);
+            return;
+        }
+        seen.add(o.character_id);
+        let dropped = false;
+        const order = [];
+        o.order.forEach((/** @type {any} */ e, /** @type {number} */ j) => {
+            const bad = e === null || typeof e !== 'object' ? 'not an object' : typeof e.identifier !== 'string' ? 'identifier is not a string' : null;
+            if (bad !== null) {
+                dropped = true;
+                notes.push(`dropped prompt_order[${i}].order[${j}]: ${bad}`);
+            } else order.push(e);
+        });
+        orders.push(dropped ? { ...o, order } : o);
+    });
+    return { prompts, orders, notes };
+}
+
+/**
  * Import an ST Chat Completion preset object into a v2 native document body
  * (everything except id/createdAt/updatedAt/rev, which the store mints).
  * Throws when the input is not a CC preset.
@@ -724,31 +906,36 @@ export function assertStPreset(data, name) {
  */
 export function importStPreset(data, name, ids = {}) {
     assertStPreset(data, name);
+    const { prompts, orders, notes: cleanNotes } = cleanStPreset(data, name);
+    if (prompts.length === 0) throw new ImportError(`${name}: no prompts`);
+    if (orders.length === 0) {
+        const reasons = cleanNotes.filter((n) => n.startsWith('dropped prompt_order[')).join('; ');
+        throw new ImportError(`${name}: no usable prompt_order (${reasons})`);
+    }
+    const clean = { ...data, prompts, prompt_order: orders };
 
     const byid = new Map();
-    for (const p of data.prompts ?? []) byid.set(p?.identifier, p);
+    for (const p of clean.prompts) byid.set(p.identifier, p);
 
-    const { blocks, markers } = buildBlocksAndMarkers(data);
+    const { blocks, markers } = buildBlocksAndMarkers(clean);
     const used = new Set([...Object.keys(blocks), ...markers.map((m) => m.identifier)]);
-    for (const p of data.prompts ?? []) if (typeof p?.identifier === 'string') used.add(p.identifier);
-    for (const seq of data.prompt_order ?? []) {
-        if (!Array.isArray(seq?.order)) continue;
-        for (const e of seq.order) if (typeof e?.identifier === 'string') used.add(e.identifier);
+    for (const p of clean.prompts) used.add(p.identifier);
+    for (const seq of clean.prompt_order) {
+        for (const e of seq.order) used.add(e.identifier);
     }
     /** @type {string[]} */
-    const notes = [];
+    const notes = [...cleanNotes];
     /** @type {any[]} */
     const sequences = [];
     /** @type {string[]} */
     const picked = [];
 
     // F-066: ST chat completion reads only 100001 when both 100000 and 100001 exist.
-    const orders = data.prompt_order ?? [];
     const dropDefault = orders.some((s) => s?.character_id === 100000) && orders.some((s) => s?.character_id === 100001);
     if (dropDefault) notes.push('dropped prompt_order 100000: ST chat completion reads only 100001 (F-066)');
     for (const seq of dropDefault ? orders.filter((s) => s?.character_id !== 100000) : orders) {
         const kind = `seq${seq?.character_id}`;
-        const rows = seqRows(data, seq?.order ?? [], byid, kind);
+        const rows = seqRows(clean, seq.order, byid, kind);
         const recognizer = pickRecognizer(rows, byid);
         picked.push(recognizer);
         const [structured, seqNotes] = RECOGNIZERS[recognizer](rows, byid, { blocks, used });

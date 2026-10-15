@@ -13,4 +13,7 @@ cp "$CORPUS/"*.json "$REPO/dev/fixtures/presets/" 2>/dev/null || true
 # the Nemo Engine presets (presets/Nemo/; the other presets/ subfolders hold
 # variants of files already copied above and would overwrite them)
 cp "$CORPUS/Nemo/"*.json "$REPO/dev/fixtures/presets/" 2>/dev/null || true
+# Sola V3 Flame: the owner's original file, byte-identical (round 3)
+SOLA3_SRC="${PM_SOLA3_SRC:-$HOME/Downloads/☀️ 🧡 Sola V3 Flame 🧡 ☀️.json}"
+if [ -f "$SOLA3_SRC" ]; then cp "$SOLA3_SRC" "$REPO/dev/fixtures/presets/Sola V3 Flame.json"; fi
 echo "[fixtures] $(ls "$REPO/dev/fixtures/presets" | wc -l) files in dev/fixtures/presets"
