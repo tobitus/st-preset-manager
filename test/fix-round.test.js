@@ -401,11 +401,11 @@ test('promote {keys} spanning two sequences is all-or-nothing: an illegal step i
     assert.deepEqual(doc, snap);
 });
 
-// ------------------------------------- resetInherit with a member heading
+// --------------------------------------- resetInherit with a headed group
 
 /**
- * a; headed pick-one group G {heading g, options o1, o2}. With `silentHeading`
- * the heading is comment-only (no pick-one member).
+ * a; headed pick-one group G {heading g, options o1, o2}. The heading is never
+ * a pick-one member; `silentHeading` makes it comment-only.
  */
 function headedDoc(silentHeading = false) {
     const doc = mkDoc();
@@ -422,14 +422,17 @@ function headedDoc(silentHeading = false) {
     return doc;
 }
 
-test('resetInherit on a pick-one group whose heading is a member clears heading + options, from an option or the heading', () => {
-    for (const from of ['o1', 'g']) {
-        const doc = headedDoc();
-        const res = /** @type {any} */ (applyDocOp(doc, 'resetInherit', { loadoutId: 'P', identifier: from }));
-        assert.deepEqual([...res.removed].sort(), ['g', 'o1', 'o2'], `from ${from}`);
-        assert.deepEqual(doc.loadouts.P.enabled, { a: false }, `from ${from}`);
-        assert.deepEqual(effectiveEnabled(doc, 'P', null).enabled, { a: false, g: false, o1: true, o2: false });
-    }
+test('resetInherit on a headed pick-one group: from the heading clears only the heading, from an option clears the options', () => {
+    const fromG = headedDoc();
+    const resG = /** @type {any} */ (applyDocOp(fromG, 'resetInherit', { loadoutId: 'P', identifier: 'g' }));
+    assert.deepEqual(resG.removed, ['g']);
+    assert.deepEqual(fromG.loadouts.P.enabled, { a: false, o1: false, o2: false });
+    assert.deepEqual(effectiveEnabled(fromG, 'P', null).enabled, { a: false, g: false, o1: false, o2: false });
+    const fromO = headedDoc();
+    const resO = /** @type {any} */ (applyDocOp(fromO, 'resetInherit', { loadoutId: 'P', identifier: 'o1' }));
+    assert.deepEqual([...resO.removed].sort(), ['o1', 'o2']);
+    assert.deepEqual(fromO.loadouts.P.enabled, { a: false, g: true });
+    assert.deepEqual(effectiveEnabled(fromO, 'P', null).enabled, { a: false, g: true, o1: true, o2: false });
 });
 
 test('resetInherit with a comment-only heading (not a member) clears only the options', () => {

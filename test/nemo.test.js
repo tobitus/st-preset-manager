@@ -411,7 +411,8 @@ test('comment-only heading: outline shows no switch, no conflict, none follows t
     assert.equal(vg.header.identifier, 'VP');
     assert.equal(vg.header.hasContent, false);
     assert.equal(vg.header.commentOnly, true);
-    assert.equal(vg.headerSwitch, false);
+    assert.equal('headerSwitch' in vg, false);
+    assert.equal(vg.header.switchType, 'checkbox', 'a heading is never a radio (the row hides it: comment-only)');
     assert.equal(vg.conflict, false, 'heading ON + v2 ON is no conflict');
     assert.equal(vg.noneOn, false);
     assert.deepEqual(vg.options.map((/** @type {any} */ o) => o.switchType), ['radio', 'radio', 'radio', 'radio']);
@@ -422,23 +423,29 @@ test('comment-only heading: outline shows no switch, no conflict, none follows t
     // the pick-many sub-headed group: switchless heading, checkbox options
     const au = /** @type {any} */ (seq[1]).nodes[1];
     assert.equal(au.header.identifier, 'AU');
-    assert.equal(au.headerSwitch, false);
+    assert.equal(au.header.switchType, 'checkbox');
     assert.deepEqual(au.options.map((/** @type {any} */ o) => o.switchType), ['checkbox', 'checkbox']);
 });
 
-test('comment-only: a heading that sends text is still a member (control)', () => {
+test('a heading that sends text is NOT a member either: it is a checkbox beside the chosen option', () => {
     const doc = subDoc();
     doc.blocks.VP.content = 'Pick your Vex.';
     const en = doc.loadouts.L.enabled;
-    const g = groupByHeader(doc, 'VP');
-    assert.equal(groupOfLeaf(doc).get('VP'), g);
+    assert.equal(groupOfLeaf(doc).has('VP'), false);
     const vg = /** @type {any} */ (buildOutline(doc).sequences[0].nodes[0]).nodes[0];
     assert.equal(vg.header.commentOnly, false);
-    assert.equal(vg.conflict, true);
+    assert.equal(vg.header.switchType, 'checkbox');
+    assert.equal(vg.conflict, false);
+    assert.deepEqual(pickOneOps(vg, null), [{ op: 'toggle', identifier: 'v2', value: false }]);
     /** @type {string[]} */
     const changed = [];
     normalize(doc, en, changed);
-    assert.deepEqual(changed, ['VP']);
+    assert.deepEqual(changed, []);
+    assert.equal(en.VP, true);
+    assert.equal(en.v2, true);
+    const g = groupByHeader(doc, 'VP');
+    assert.deepEqual(applyDocOp(doc, 'setCardinality', { key: g.key, cardinality: 'pick-one-or-more' }), { key: g.key, cardinality: 'pick-one-or-more' });
+    assert.deepEqual(applyDocOp(doc, 'setCardinality', { key: g.key, cardinality: 'pick-one' }), { key: g.key, cardinality: 'pick-one' });
 });
 
 /**
@@ -494,9 +501,9 @@ test('nemo: adjacent groups survive the store round-trip and keep separate exclu
     await store.init();
     const doc = await store.importPreset({ st: adjacentSt(), name: 'adj' });
     assert.deepEqual(groupShape(collect(doc.sequences[0].rows).groups), ADJ_EXPECTED);
-    // one pick per group: q1+q3 collapse to one; p1, r2, s1 are untouched
-    const on = normalize(doc, { p1: true, q1: true, q3: true, r2: true, s1: true });
-    assert.equal(Number(on.q1) + Number(on.q3), 1);
+    // one pick per group: q2+q3 collapse to one; p1, r2, s1 are untouched
+    const on = normalize(doc, { p1: true, q2: true, q3: true, r2: true, s1: true });
+    assert.equal(Number(on.q2) + Number(on.q3), 1);
     assert.equal(on.p1, true);
     assert.equal(on.r2, true);
     assert.equal(on.s1, true);

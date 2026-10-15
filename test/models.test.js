@@ -195,7 +195,7 @@ const GROUP_DOC = {
 
 test('completeOverride: a pick-one option switched on pulls its siblings off in the override', () => {
     const out = completeOverride(GROUP_DOC, { b: true });
-    assert.deepEqual(out, { b: true, hdr: false, a: false });
+    assert.deepEqual(out, { b: true, a: false }, 'the heading is never a member');
 });
 
 test('completeOverride: non-pick-one members and plain blocks are left as given', () => {
@@ -206,6 +206,6 @@ test('completeOverride: non-pick-one members and plain blocks are left as given'
 test('completeOverride: two options on in one pick-one group -> the later key wins; input untouched', () => {
     const input = { a: true, b: true };
     const out = completeOverride(GROUP_DOC, input);
-    assert.deepEqual(out, { a: false, b: true, hdr: false });
+    assert.deepEqual(out, { a: false, b: true });
     assert.deepEqual(input, { a: true, b: true });
 });

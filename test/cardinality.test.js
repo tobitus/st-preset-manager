@@ -2,7 +2,7 @@
  * setCardinality refusal (temporary 1/N toggle, 2026-09-30):
  *   switching a group TO pick-one is refused (OpError 409) while any
  *   loadout — base map or a per-Model override's effective map — has 2+
- *   of the group's members on (an enabled heading counts). Nothing is ever
+ *   of the group's OPTIONS on (the heading is never a choice). Nothing is ever
  *   switched off; switching to pick-one-or-more always succeeds. After any
  *   successful switch, normalize flips nothing.
  */
@@ -95,7 +95,7 @@ test('2: one option on -> pick-one succeeds, maps untouched', () => {
     assertSwitchOk(doc, 'grp:k-g', 'pick-one');
 });
 
-test('2b: only the heading on -> pick-one succeeds (one member)', () => {
+test('2b: only the heading on -> pick-one succeeds (the heading is no member)', () => {
     const doc = mkDoc();
     doc.loadouts.L1.enabled.g = true;
     assertSwitchOk(doc, 'grp:k-g', 'pick-one');
@@ -113,10 +113,11 @@ test('3: two options on in the active loadout -> 409, plain message, nothing cha
     assertRefused(doc, 'grp:k-g', PREFIX);
 });
 
-test('4: heading on + one option on -> refused, message says the heading counts', () => {
+test('4: heading on + one option on -> succeeds (the heading is never a choice)', () => {
     const doc = mkDoc();
     Object.assign(doc.loadouts.L1.enabled, { g: true, o2: true });
-    assertRefused(doc, 'grp:k-g', `${PREFIX} (the group heading counts)`);
+    assertSwitchOk(doc, 'grp:k-g', 'pick-one');
+    assert.equal(doc.loadouts.L1.enabled.g && doc.loadouts.L1.enabled.o2, true);
 });
 
 test('5: active clean, another loadout has 2 on -> refused naming that loadout', () => {
@@ -125,10 +126,10 @@ test('5: active clean, another loadout has 2 on -> refused naming that loadout',
     assertRefused(doc, 'grp:k-g', `${PREFIX} in loadout "L2"`);
 });
 
-test('5b: other loadout with heading on + option on -> loadout named and heading suffix', () => {
+test('5b: other loadout with heading on + option on -> succeeds', () => {
     const doc = mkDoc();
     Object.assign(doc.loadouts.L2.enabled, { g: true, o1: true });
-    assertRefused(doc, 'grp:k-g', `${PREFIX} in loadout "L2" (the group heading counts)`);
+    assertSwitchOk(doc, 'grp:k-g', 'pick-one');
 });
 
 test('6: per-Model override makes a second option on -> refused naming loadout and Model', () => {
@@ -172,7 +173,7 @@ test('8a: headerless group, nothing on -> pick-one succeeds by its grp:<first op
     assertSwitchOk(mkDoc(), 'grp:k-p1', 'pick-one');
 });
 
-test('8b: headerless group, two options on -> refused, no heading suffix', () => {
+test('8b: headerless group, two options on -> refused, plain message', () => {
     const doc = mkDoc();
     Object.assign(doc.loadouts.L1.enabled, { p1: true, p2: true });
     assertRefused(doc, 'grp:k-p1', PREFIX);

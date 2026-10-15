@@ -48,31 +48,20 @@ export function isCommentOnly(content) {
 }
 
 /**
- * The leaves that count toward a pick-one group's "at most one on" rule: the
- * heading (if any) followed by all options. A comment-only heading (Nemo's
- * `{{// … }}{{trim}}` headings) sends no text, so it is no pick-one member.
- * @param {any} doc
+ * The leaves that count toward a pick-one group's "at most one on" rule: its
+ * options. The heading is never a choice, whatever its content (round 3).
+ * @param {any} _doc
  * @param {any} grp
  * @returns {any[]}
  */
-export function pickOneMembers(doc, grp) {
-    /** @type {any[]} */
-    const members = [];
-    const h = grp.header;
-    if (h) {
-        const id = h.ref ?? h.identifier;
-        const silent = h.kind === 'block' && isCommentOnly(doc.blocks?.[id]?.content);
-        if (!silent) members.push(h);
-    }
-    for (const opt of grp.options ?? []) members.push(opt);
-    return members;
+export function pickOneMembers(_doc, grp) {
+    return [...(grp.options ?? [])];
 }
 
 /**
  * Leaf identifier -> the owning group row (first group that lists the leaf
- * as a member). Headings count as members for cardinality, except
- * comment-only headings: a pick-one group whose heading is enabled pins the
- * heading choice.
+ * as a member). Only options are members: a heading never belongs to a
+ * group's member map.
  * @param {any} doc
  * @returns {Map<string, any>} identifier -> group
  */
@@ -91,7 +80,8 @@ export function groupOfLeaf(doc) {
 
 /**
  * Enforce pick-one over an enabled map: for every pick-one group, if more
- * than one member is enabled, keep ONE and turn the others off. Markers/
+ * than one option is enabled, keep ONE and turn the others off (the heading
+ * is never an option, so it is never touched). Markers/
  * ghosts are toggled like anything else (the loadout's enabled map covers
  * every leaf); group structure never changes.
  *
@@ -189,11 +179,11 @@ function walkLeaves(rows, out) {
 }
 
 /**
- * Complete a per-Model loadout override: for every pick-one group, if a
- * member's override value is `true`, its siblings are forced `false` (the
- * last-in-`enabled`-key-order winner if more than one is on). Members of
- * non-pick-one groups and plain blocks are left exactly as given. A
- * comment-only heading is no member (see pickOneMembers).
+ * Complete a per-Model loadout override: for every pick-one group, if an
+ * option's override value is `true`, its siblings are forced `false` (the
+ * last-in-`enabled`-key-order winner if more than one is on). Options of
+ * non-pick-one groups and plain blocks are left exactly as given. The
+ * heading is never a member (see pickOneMembers).
  * @param {any} doc
  * @param {Record<string, boolean>} enabled override map (not mutated)
  * @returns {Record<string, boolean>} a new map

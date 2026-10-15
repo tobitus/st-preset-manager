@@ -1,7 +1,8 @@
 node_modules/
 dev/config/
 dev/data/
-dev/fixtures/
+dev/fixtures/*
+!dev/fixtures/native/
 dev/chrome-profile*
 extensions/
 dev/*.pid

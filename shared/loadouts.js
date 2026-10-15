@@ -102,9 +102,9 @@ export function effectiveEnabled(doc, loadoutId, modelName = null, opts = {}) {
 }
 
 /**
- * The ids a "reset to inherited" must clear for `identifier`: every member of
- * the pick-one group containing it (their sparse bits are interdependent),
- * else just the identifier.
+ * The ids a "reset to inherited" must clear for `identifier`: every option of
+ * the pick-one group (the heading is never a member) containing it (their
+ * sparse bits are interdependent), else just the identifier.
  * @param {any} doc
  * @param {string} identifier
  * @returns {string[]}

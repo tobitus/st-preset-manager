@@ -1,0 +1,270 @@
+{
+  "format": "st-preset-manager/library",
+  "version": 1,
+  "name": "Nemo adjacent pre-r3",
+  "tags": [],
+  "notes": "",
+  "source": {
+    "importedFrom": "upload:api",
+    "importedAt": "2026-10-15T00:51:58.327Z",
+    "importDigest": "faf26df81b85d56ed71df89cf8871b957e3a511f0329f8ce1d9beceb6877ca0a",
+    "recognizer": {
+      "kind": "nemo",
+      "notes": [
+        "nemo: group 'Q' directly follows group 'P'; its first member 'Q one' heads it (adjacent headerless groups would merge; the heading is a pick-one member)",
+        "nemo: group 'R' directly follows group 'Q'; its first member 'R one' heads it (adjacent headerless groups would merge; the heading is a pick-one member)",
+        "nemo: 1 sections, 4 pick-one groups from @mutual-exclusive-group (0 single-row runs left plain), 0 pick-many groups under sub headers"
+      ]
+    }
+  },
+  "settings": {},
+  "markers": [],
+  "blocks": {
+    "H": {
+      "identifier": "H",
+      "name": "=== Head ===",
+      "content": "{{// @section-header true }}\nH text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "p1": {
+      "identifier": "p1",
+      "name": "P one",
+      "content": "{{// @mutual-exclusive-group P }}\np1 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "p2": {
+      "identifier": "p2",
+      "name": "P two",
+      "content": "{{// @mutual-exclusive-group P }}\np2 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "q1": {
+      "identifier": "q1",
+      "name": "Q one",
+      "content": "{{// @mutual-exclusive-group Q }}\nq1 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "q2": {
+      "identifier": "q2",
+      "name": "Q two",
+      "content": "{{// @mutual-exclusive-group Q }}\nq2 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "q3": {
+      "identifier": "q3",
+      "name": "Q three",
+      "content": "{{// @mutual-exclusive-group Q }}\nq3 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "r1": {
+      "identifier": "r1",
+      "name": "R one",
+      "content": "{{// @mutual-exclusive-group R }}\nr1 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "r2": {
+      "identifier": "r2",
+      "name": "R two",
+      "content": "{{// @mutual-exclusive-group R }}\nr2 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "z": {
+      "identifier": "z",
+      "name": "Plain z",
+      "content": "text\nz text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "s1": {
+      "identifier": "s1",
+      "name": "S one",
+      "content": "{{// @mutual-exclusive-group S }}\ns1 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    },
+    "s2": {
+      "identifier": "s2",
+      "name": "S two",
+      "content": "{{// @mutual-exclusive-group S }}\ns2 text",
+      "role": "system",
+      "fields": {},
+      "notes": ""
+    }
+  },
+  "sequences": [
+    {
+      "character_id": 100001,
+      "rows": [
+        {
+          "kind": "section",
+          "key": "sec:seq100001-0",
+          "name": "=== Head ===",
+          "header": {
+            "kind": "block",
+            "ref": "H",
+            "key": "seq100001-0"
+          },
+          "rows": [
+            {
+              "kind": "group",
+              "key": "grp:seq100001-1",
+              "name": "P",
+              "cardinality": "pick-one",
+              "guessed": false,
+              "header": null,
+              "options": [
+                {
+                  "kind": "block",
+                  "ref": "p1",
+                  "key": "seq100001-1"
+                },
+                {
+                  "kind": "block",
+                  "ref": "p2",
+                  "key": "seq100001-2"
+                }
+              ]
+            },
+            {
+              "kind": "group",
+              "key": "grp:seq100001-3",
+              "name": "Q",
+              "cardinality": "pick-one",
+              "guessed": false,
+              "header": {
+                "kind": "block",
+                "ref": "q1",
+                "key": "seq100001-3"
+              },
+              "options": [
+                {
+                  "kind": "block",
+                  "ref": "q2",
+                  "key": "seq100001-4"
+                },
+                {
+                  "kind": "block",
+                  "ref": "q3",
+                  "key": "seq100001-5"
+                }
+              ]
+            },
+            {
+              "kind": "group",
+              "key": "grp:seq100001-6",
+              "name": "R",
+              "cardinality": "pick-one",
+              "guessed": false,
+              "header": {
+                "kind": "block",
+                "ref": "r1",
+                "key": "seq100001-6"
+              },
+              "options": [
+                {
+                  "kind": "block",
+                  "ref": "r2",
+                  "key": "seq100001-7"
+                }
+              ]
+            },
+            {
+              "kind": "block",
+              "ref": "z",
+              "key": "seq100001-8"
+            },
+            {
+              "kind": "group",
+              "key": "grp:seq100001-9",
+              "name": "S",
+              "cardinality": "pick-one",
+              "guessed": false,
+              "header": null,
+              "options": [
+                {
+                  "kind": "block",
+                  "ref": "s1",
+                  "key": "seq100001-9"
+                },
+                {
+                  "kind": "block",
+                  "ref": "s2",
+                  "key": "seq100001-10"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "loadouts": {
+    "l_01M4YGPR7QD92Z6WCXHJGG1K1A": {
+      "id": "l_01M4YGPR7QD92Z6WCXHJGG1K1A",
+      "name": "Current",
+      "notes": "",
+      "kind": "root",
+      "parent": null,
+      "enabled": {
+        "H": true,
+        "p1": true,
+        "p2": false,
+        "q1": true,
+        "q2": false,
+        "q3": false,
+        "r1": false,
+        "r2": true,
+        "z": true,
+        "s1": false,
+        "s2": true
+      },
+      "overrides": {
+        "M": {
+          "enabled": {
+            "r1": true,
+            "r2": false
+          },
+          "tuning": null
+        }
+      }
+    },
+    "l_01M4YGPR7T7W01DNKJB7GCDKWE": {
+      "id": "l_01M4YGPR7T7W01DNKJB7GCDKWE",
+      "name": "Play",
+      "notes": "",
+      "kind": "playstyle",
+      "parent": "l_01M4YGPR7QD92Z6WCXHJGG1K1A",
+      "enabled": {
+        "q1": false,
+        "q3": true,
+        "r1": true,
+        "r2": false
+      },
+      "overrides": {}
+    }
+  },
+  "activeLoadoutId": "l_01M4YGPR7QD92Z6WCXHJGG1K1A",
+  "id": "p_01M4YGPR7QN590DVFHTGRNGX02",
+  "createdAt": "2026-10-15T00:51:58.327Z",
+  "updatedAt": "2026-10-15T00:51:58.333Z",
+  "rev": 4,
+  "folder": ""
+}

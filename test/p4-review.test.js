@@ -120,7 +120,7 @@ test('F1 mergeModelsTx: documents merge first-listed-wins, pick-one completed in
     assert.equal(ov.AB.tuning, 'hot', 'the merged override takes the tuning binding of the first listed Model that had one');
     assert.equal(ov.AB.enabled.a, true, 'A (first listed) keeps its option');
     assert.equal(ov.AB.enabled.b, false, 'B\'s competing pick-one option is turned off');
-    assert.equal(ov.AB.enabled.hdr, false);
+    assert.equal(ov.AB.enabled.hdr, undefined, 'the heading is never a pick-one member');
     assert.equal(ov.AB.enabled.c, false, 'non-conflicting B entries survive');
     const revs = store.listRevisions(id);
     const r = revs.find((x) => x.label === 'Model merge: A + B -> AB');

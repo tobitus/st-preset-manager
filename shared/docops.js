@@ -219,8 +219,8 @@ function opToggle(doc, a) {
 /**
  * Set a group's choice: turn `identifier` on and (pick-one) its siblings off,
  * in the target loadout (`loadoutId`, default the active one; a playstyle
- * gets a sparse write). The identifier must belong to the group (heading or
- * option).
+ * gets a sparse write). The identifier must be one of the group's options;
+ * the group heading is refused (400).
  * @param {any} doc
  * @param {{ group?: string, identifier?: string, loadoutId?: string }} a
  */
@@ -230,8 +230,10 @@ function opSetGroup(doc, a) {
         throw new OpError('setGroup needs {group, identifier}');
     }
     const grp = requireGroup(doc, group);
-    const members = [...(grp.header ? [grp.header] : []), ...(grp.options ?? [])];
-    if (!members.some((leaf) => identOf(leaf) === identifier)) {
+    if (grp.header && identOf(grp.header) === identifier) {
+        throw new OpError('the group heading is not a choice — use toggle', 400);
+    }
+    if (!(grp.options ?? []).some((leaf) => identOf(leaf) === identifier)) {
         throw new OpError(`${identifier} is not a member of group ${group}`, 404);
     }
     const { loadout } = targetLoadout(doc, a);
@@ -387,8 +389,8 @@ function opLadder(doc, a, name, fn) {
 }
 
 /**
- * Identifiers of the group's pick-one members (heading + options; a
- * comment-only heading is no member) that are on in an enabled map.
+ * Identifiers of the group's pick-one options (the heading is never a
+ * member) that are on in an enabled map.
  * @param {any} doc
  * @param {any} grp
  * @param {any} enabled
@@ -400,12 +402,35 @@ function onMembers(doc, grp, enabled) {
 }
 
 /**
+ * Refuse (409) a switch to pick-one while any loadout's effective map (root
+ * merged with a playstyle's sparse layer) or per-Model override effective map
+ * has 2+ of the group's OPTIONS on. The heading never counts.
+ * @param {any} doc
+ * @param {any} grp
+ */
+function refusePickOneConflict(doc, grp) {
+    /** @type {any} */
+    const active = doc.loadouts?.[doc.activeLoadoutId];
+    /** @type {any[]} */
+    const loadouts = [...(active ? [active] : []), ...Object.values(doc.loadouts ?? {}).filter((l) => l !== active)];
+    const refuse = (/** @type {any} */ enabled, /** @type {string} */ where) => {
+        if (onMembers(doc, grp, enabled).length < 2) return;
+        throw new OpError(`more than one option currently selected${where}`, 409);
+    };
+    for (const l of loadouts) {
+        const label = ` in loadout "${l.name ?? l.id}"`;
+        refuse(effectiveEnabled(doc, l.id, null).enabled, l === active ? '' : label);
+        for (const modelName of Object.keys(l.overrides ?? {})) {
+            refuse(effectiveEnabled(doc, l.id, modelName).enabled, `${label} for Model "${modelName}"`);
+        }
+    }
+}
+
+/**
  * Change a group's kind (pick-one | pick-one-or-more). Never changes enabled
- * bits. Switching to pick-one is refused (409) while any loadout's effective
- * map (root merged with a playstyle's sparse layer) or per-Model override
- * effective map has 2+ of the group's members on (an enabled heading counts,
- * a comment-only heading does not), so normalize never silently collapses
- * after a switch.
+ * bits. Switching to pick-one is refused (409) while any loadout (or
+ * per-Model override) has 2+ of the group's options on, so normalize never
+ * silently collapses after a switch. The heading never counts.
  * @param {any} doc
  * @param {{ key?: string, cardinality?: string }} a
  */
@@ -416,26 +441,7 @@ function opSetCardinality(doc, a) {
     }
     if (typeof key !== 'string') throw new OpError('setCardinality needs {key, cardinality}');
     const grp = requireGroup(doc, key);
-    if (cardinality === 'pick-one') {
-        const headId = grp.header ? identOf(grp.header) : undefined;
-        /** @type {any} */
-        const active = doc.loadouts?.[doc.activeLoadoutId];
-        /** @type {any[]} */
-        const loadouts = [...(active ? [active] : []), ...Object.values(doc.loadouts ?? {}).filter((l) => l !== active)];
-        const refuse = (/** @type {any} */ enabled, /** @type {string} */ where) => {
-            const on = onMembers(doc, grp, enabled);
-            if (on.length < 2) return;
-            const heading = headId && on.includes(headId) ? ' (the group heading counts)' : '';
-            throw new OpError(`more than one option currently selected${where}${heading}`, 409);
-        };
-        for (const l of loadouts) {
-            const label = ` in loadout "${l.name ?? l.id}"`;
-            refuse(effectiveEnabled(doc, l.id, null).enabled, l === active ? '' : label);
-            for (const modelName of Object.keys(l.overrides ?? {})) {
-                refuse(effectiveEnabled(doc, l.id, modelName).enabled, `${label} for Model "${modelName}"`);
-            }
-        }
-    }
+    if (cardinality === 'pick-one') refusePickOneConflict(doc, grp);
     grp.cardinality = cardinality;
     grp.guessed = false;
     return { key, cardinality };

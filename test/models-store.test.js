@@ -183,7 +183,7 @@ test('routing: a pick-one option the override lists, switched on, turns its sibl
     const ov = doc.loadouts.L.overrides['Kimi K3'].enabled;
     assert.equal(ov.b, true);
     assert.equal(ov.a, false);
-    assert.equal(ov.hdr, false);
+    assert.equal(ov.hdr, undefined, 'the heading is never a pick-one member: not written');
     assert.equal(doc.loadouts.L.enabled.a, true, 'loadout keeps its own choice');
     assert.equal(doc.loadouts.L.enabled.b, false);
     const { enabled } = compile(doc, KIMI, {});

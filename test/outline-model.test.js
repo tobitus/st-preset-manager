@@ -76,14 +76,14 @@ test('buildOutline: FF top level = 2 items, 6 groups, 8 markers, 2 groups; one s
     assert.equal(nodes[8].name, 'worldInfoBefore');
 });
 
-test('buildOutline: pick-one group -> radios on heading and options; pick-one-or-more -> checkboxes', () => {
+test('buildOutline: pick-one group -> radios on options, checkbox heading; pick-one-or-more -> checkboxes', () => {
     const doc = ffDoc();
     const nodes = buildOutline(doc).sequences[0].nodes;
     const pov = nodes.find((n) => n.type === 'group' && /POV/.test(n.name));
     assert.equal(pov.pickOne, true);
     assert.equal(pov.cardinality, 'pick-one');
     assert.equal(pov.key, doc.sequences[0].rows.find((/** @type {any} */ r) => /POV/.test(r.name ?? '')).key);
-    assert.equal(pov.header.switchType, 'radio');
+    assert.equal(pov.header.switchType, 'checkbox', 'the heading is never a choice');
     assert.deepEqual(pov.options.map((o) => o.switchType), ['radio', 'radio', 'radio', 'radio']);
     assert.deepEqual(pov.options.map((o) => o.enabled), [false, false, false, true]); // Hybrid on
     assert.equal(pov.conflict, false);
@@ -99,7 +99,7 @@ test('buildOutline: pick-one group -> radios on heading and options; pick-one-or
     assert.equal(nodes[0].enabled, true);
 });
 
-test('buildOutline: conflict = pick-one with 2+ members on (heading counts); nothing is collapsed', () => {
+test('buildOutline: conflict = pick-one with 2+ options on (the heading never counts); nothing is collapsed', () => {
     const doc = tinyDoc();
     const snapshot = structuredClone(doc);
     const out = buildOutline(doc);
@@ -114,8 +114,8 @@ test('buildOutline: conflict = pick-one with 2+ members on (heading counts); not
     assert.equal(grp.conflict, true, 'b and c both on in a pick-one group');
     assert.deepEqual(grp.options.map((o) => o.enabled), [true, true], 'the model shows both, never collapses');
     assert.deepEqual(doc, snapshot, 'buildOutline does not mutate the document');
-    // a heading that sends text counts as a member; FF's comment-only POV
-    // heading ({{//Keep toggled off}}{{trim}}) does not
+    // a heading is never a member, whatever it sends: FF's comment-only POV
+    // heading ({{//Keep toggled off}}{{trim}}) and a heading with text alike
     const ff = ffDoc();
     const povRow = ff.sequences[0].rows.find((/** @type {any} */ r) => /POV/.test(r.name ?? ''));
     ff.loadouts[ff.activeLoadoutId].enabled[povRow.header.ref] = true; // heading + Hybrid on
@@ -123,7 +123,9 @@ test('buildOutline: conflict = pick-one with 2+ members on (heading counts); not
     assert.equal(povOf().header.commentOnly, true);
     assert.equal(povOf().conflict, false);
     ff.blocks[povRow.header.ref].content = 'Pick one POV.';
-    assert.equal(povOf().conflict, true);
+    assert.equal(povOf().header.commentOnly, false);
+    assert.equal(povOf().header.switchType, 'checkbox');
+    assert.equal(povOf().conflict, false);
 });
 
 test('buildOutline: loadout argument selects whose bits are shown; default = activeLoadoutId', () => {
@@ -217,9 +219,8 @@ test('pickOneOps: choosing a member -> one setGroup; none -> toggles off every m
     ], 'a comment-only heading is left alone');
     ff.blocks[povRow.header.ref].content = 'Pick one POV.';
     assert.deepEqual(pickOneOps(povOf(), null), [
-        { op: 'toggle', identifier: povRow.header.ref, value: false },
         { op: 'toggle', identifier: hybrid, value: false },
-    ], 'heading first, then options, in outline order');
+    ], 'a heading that sends text is left alone too: options only');
     const none = buildOutline(tinyDoc(), 'L2').sequences[0].nodes[2].nodes[1];
     assert.deepEqual(pickOneOps(none, null), [], 'already none: no ops');
 });

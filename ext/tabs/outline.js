@@ -254,11 +254,11 @@ function leafLi(node, selectedKey, ctx) {
 }
 
 /**
- * A group's row IS its header leaf when one exists. A pick-one header whose
- * block sends text (`node.headerSwitch`) gets a radio like the options (it is
- * a pick-one member); empty and pick-many headings stay switchless. Headerless
- * groups show the group name and no handle. Every group row carries a
- * collapse/expand caret, same as sections.
+ * A group's row IS its header leaf when one exists. The heading is never a
+ * pick-one choice: it gets an ordinary checkbox (a `toggle` on its own bit,
+ * like a section heading), except a comment-only heading (sends no text),
+ * which gets no switch. Headerless groups show the group name and no handle.
+ * Every group row carries a collapse/expand caret, same as sections.
  * @param {GroupNode} node
  * @param {string|null} selectedKey
  * @param {RenderCtx} ctx
@@ -267,7 +267,7 @@ function leafLi(node, selectedKey, ctx) {
 function groupLi(node, selectedKey, ctx) {
     const key = node.header?.key ?? '';
     const li = document.createElement('li');
-    li.className = 'pm-node' + (node.headerSwitch && node.header?.inherited ? ' pm-inherited' : '');
+    li.className = 'pm-node' + (node.header && !node.header.commentOnly && node.header.inherited ? ' pm-inherited' : '');
     li.dataset.kind = 'group';
     li.dataset.key = node.header ? key : node.key;
     li.dataset.identifier = node.header?.identifier ?? '';
@@ -282,9 +282,9 @@ function groupLi(node, selectedKey, ctx) {
     if (node.header) {
         row.append(handleSpan());
         row.append(numSpan(li, node.header.pos));
-        if (node.headerSwitch) row.append(makeSwitch(node.header));
+        if (!node.header.commentOnly) row.append(makeSwitch(node.header));
         row.append(nameSpan(node.header.name));
-        if (node.headerSwitch && node.header.explicit) row.append(resetSpan(node.header));
+        if (!node.header.commentOnly && node.header.explicit) row.append(resetSpan(node.header));
         if (node.header.hasContent) row.append(sendsTextSpan());
     } else {
         row.append(nameSpan(node.name || '(options)'));

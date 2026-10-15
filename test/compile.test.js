@@ -114,9 +114,9 @@ test('compile: pick-one collapses to the last enabled member (groups.normalize)'
     for (const k of ['aaa', 'bbb', 'ccc']) doc.loadouts[lid].enabled[k] = true;
     const { compiled } = compile(doc, null, {});
     const order = Object.fromEntries(compiled.prompt_order[0].order.map((o) => [o.identifier, o.enabled]));
-    // the group has three members (heading aaa + options bbb/ccc); the last
-    // enabled one in outline order wins, siblings go off
-    assert.equal(order.aaa, false);
+    // the heading aaa is never a choice: it stays on; among the options
+    // bbb/ccc the last enabled one in outline order wins, siblings go off
+    assert.equal(order.aaa, true);
     assert.equal(order.bbb, false);
     assert.equal(order.ccc, true);
 });

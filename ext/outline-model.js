@@ -40,17 +40,11 @@ import { isCommentOnly } from '../shared/groups.js';
  */
 
 /**
- * A rendered group row. Its header (if any) is a pick-one member with its own
- * radio (`headerSwitch`) only in a Nemo-imported document
- * (`source.recognizer.kind === 'nemo'`), on a pick-one group, when it is a
- * block that sends text: there a group directly following another group is
- * headed by its own first member. Elsewhere (FF/DEM/Sola) content headings
- * are informational text and stay switchless, as do empty and pick-many
- * headings. Temporary, contained rule until roadmap 16 replaces this area.
- * `noneOn` tallies options plus a switched header; `conflict` counts an
- * enabled heading, except a comment-only one (it sends no text and is no
- * pick-one member), because compile's pick-one normalize
- * (shared/groups.js) treats a heading as a member and would collapse the pair.
+ * A rendered group row. Its header (if any) is an ordinary checkbox leaf and
+ * never a pick-one member, whatever its content (round 3): `conflict` =
+ * pick-one with 2+ options on, `noneOn` = pick-one with no option on. A
+ * comment-only header renders no switch (the row decides via
+ * `header.commentOnly`).
  *
  * @typedef {Object} GroupNode
  * @property {'group'} type
@@ -61,7 +55,6 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {boolean} guessed
  * @property {boolean} pickOne
  * @property {boolean} conflict
- * @property {boolean} headerSwitch true when the header renders a radio (Nemo doc, pick-one, block, sends text)
  * @property {boolean} noneOn
  * @property {LeafNode[]} options
  */
@@ -102,15 +95,14 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {boolean} [guessed]
  * @property {boolean} [pickOne]
  * @property {boolean} [conflict]
- * @property {boolean} [headerSwitch]
  * @property {boolean} [noneOn]
  * @property {LeafNode[]} [options]
  * @property {Node[]} [nodes]
  */
 
 /**
- * The switch type for a leaf: markers are fixed (readonly); members of a
- * pick-one group (header or option) are radios; everything else is a checkbox.
+ * The switch type for a leaf: markers are fixed (readonly); options of a
+ * pick-one group are radios; everything else (headings included) is a checkbox.
  *
  * @param {any} leaf
  * @param {boolean} pickOne true when the leaf sits in a pick-one group
@@ -164,13 +156,9 @@ function leafNode(doc, bits, leaf, pickOne, posMap) {
  */
 function groupNode(doc, bits, row, posMap) {
     const pickOne = row.cardinality === 'pick-one';
-    const header = row.header ? leafNode(doc, bits, row.header, pickOne, posMap) : null;
+    const header = row.header ? leafNode(doc, bits, row.header, false, posMap) : null;
     const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, bits, o, pickOne, posMap));
     const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
-    const headerOn = header?.enabled && !header.commentOnly ? 1 : 0;
-    // Nemo only (see the GroupNode typedef): FF/DEM/Sola content headings are informational
-    const headerSwitch = doc.source?.recognizer?.kind === 'nemo'
-        && pickOne && header !== null && header.leafKind === 'block' && header.hasContent;
     return {
         type: 'group',
         key: row.key,
@@ -179,9 +167,8 @@ function groupNode(doc, bits, row, posMap) {
         cardinality: row.cardinality ?? 'pick-one-or-more',
         guessed: !!row.guessed,
         pickOne,
-        conflict: pickOne && on + headerOn >= 2,
-        headerSwitch,
-        noneOn: pickOne && on + (headerSwitch ? headerOn : 0) === 0,
+        conflict: pickOne && on >= 2,
+        noneOn: pickOne && on === 0,
         options,
     };
 }
@@ -294,9 +281,9 @@ export function headingAction(doc, key, kind) {
 }
 
 /**
- * Ops for a click on a pick-one group member or its "none" radio.
- * A member -> one setGroup; "none" -> toggle off every enabled member
- * (header first, then options in outline order). When `loadoutId` is a
+ * Ops for a click on a pick-one group option or its "none" radio.
+ * An option -> one setGroup; "none" -> toggle off every enabled option in
+ * outline order (the heading is never touched). When `loadoutId` is a
  * string every op carries it as its last key; otherwise the ops have no
  * loadoutId key (they target the active loadout).
  *
@@ -311,9 +298,7 @@ export function pickOneOps(group, identifier, loadoutId) {
     if (identifier != null) {
         ops.push({ op: 'setGroup', group: group.key ?? '', identifier });
     } else {
-        const members = group.header ? [group.header, ...(group.options ?? [])] : (group.options ?? []);
-        for (const m of members) {
-            if (m === group.header && m.commentOnly) continue;
+        for (const m of group.options ?? []) {
             if (m.enabled) ops.push({ op: 'toggle', identifier: m.identifier, value: false });
         }
     }

@@ -1,10 +1,8 @@
 /**
- * In a Nemo-imported document, a pick-one group heading whose block sends
- * text is a choosable member (shared/groups.js counts headings as pick-one
- * members): the outline model flags it `headerSwitch`, its radio takes part
- * in the pick-one set and in "none". Empty headings, pick-many headings and
- * every heading of a non-Nemo document (FF/DEM/Sola: informational text)
- * stay switchless.
+ * A group heading is an ordinary checkbox and never a pick-one member, for
+ * every recognizer kind: it does not take part in conflict, "none" or
+ * setGroup. A comment-only heading is flagged `commentOnly` (the row renders
+ * no switch); an empty heading has no content and keeps its checkbox flag.
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
@@ -32,7 +30,7 @@ function doc(o = {}) {
             }],
         }],
         loadouts: {
-            L1: { id: 'L1', name: 'One', notes: '', enabled: o.enabled ?? { h: false, b: false, c: true }, overrides: {} },
+            L1: { id: 'L1', name: 'One', notes: '', kind: 'root', parent: null, enabled: o.enabled ?? { h: false, b: false, c: true }, overrides: {} },
         },
         activeLoadoutId: 'L1',
     };
@@ -40,56 +38,52 @@ function doc(o = {}) {
 
 const groupOf = (/** @type {any} */ d) => /** @type {any} */ (buildOutline(d).sequences[0].nodes[0]);
 
-test('heading switch: pick-one heading with content is a radio member; none counts it', () => {
-    let g = groupOf(doc());
-    assert.equal(g.headerSwitch, true);
-    assert.equal(g.header.switchType, 'radio');
-    assert.equal(g.noneOn, false);
-    // only the heading on: none is NOT on, no conflict
-    g = groupOf(doc({ enabled: { h: true, b: false, c: false } }));
-    assert.equal(g.noneOn, false);
-    assert.equal(g.conflict, false);
-    assert.equal(g.header.enabled, true);
-    // nothing on: none is on
-    g = groupOf(doc({ enabled: { h: false, b: false, c: false } }));
-    assert.equal(g.noneOn, true);
-    // heading + option on: conflict
-    assert.equal(groupOf(doc({ enabled: { h: true, b: true, c: false } })).conflict, true);
-});
-
-test('heading switch: an empty heading and a pick-many heading stay switchless', () => {
-    const empty = groupOf(doc({ hContent: '   ', enabled: { h: true, b: false, c: false } }));
-    assert.equal(empty.headerSwitch, false);
-    assert.equal(empty.noneOn, true, 'an unchoosable heading never un-sets none (unchanged rule)');
-    const many = groupOf(doc({ cardinality: 'pick-one-or-more' }));
-    assert.equal(many.headerSwitch, false);
-    assert.equal(many.noneOn, false);
-});
-
-test('heading switch: a content heading in a non-Nemo document stays switchless', () => {
-    for (const kind of ['ff5', 'dem', 'sola', 'flat']) {
-        const g = groupOf(doc({ kind, enabled: { h: true, b: false, c: false } }));
-        assert.equal(g.headerSwitch, false, kind);
-        assert.equal(g.noneOn, true, `${kind}: the informational heading never un-sets none`);
-        assert.equal(g.conflict, false);
+test('heading: a checkbox and never a member, for every recognizer kind and both cardinalities', () => {
+    for (const kind of ['nemo', 'sola3', 'ff5', 'dem', 'sola', 'casus', 'flat']) {
+        for (const cardinality of ['pick-one', 'pick-one-or-more']) {
+            const label = `${kind}/${cardinality}`;
+            let g = groupOf(doc({ kind, cardinality }));
+            assert.equal('headerSwitch' in g, false, label);
+            assert.equal(g.header.switchType, 'checkbox', label);
+            assert.equal(g.header.commentOnly, false, label);
+            // only the heading on: none is on (pick-one), never a conflict
+            g = groupOf(doc({ kind, cardinality, enabled: { h: true, b: false, c: false } }));
+            assert.equal(g.noneOn, cardinality === 'pick-one', label);
+            assert.equal(g.conflict, false, label);
+            assert.equal(g.header.enabled, true, label);
+            // heading + one option on: no conflict
+            g = groupOf(doc({ kind, cardinality, enabled: { h: true, b: true, c: false } }));
+            assert.equal(g.conflict, false, label);
+            assert.equal(g.noneOn, false, label);
+        }
     }
     const noSource = /** @type {any} */ (doc());
     delete noSource.source;
-    assert.equal(groupOf(noSource).headerSwitch, false);
+    assert.equal(groupOf(noSource).header.switchType, 'checkbox');
 });
 
-test('heading switch: choosing the heading selects it and turns the options off; none clears it', () => {
+test('heading: comment-only is flagged (no switch rendered); empty is no content', () => {
+    const silent = groupOf(doc({ hContent: '{{// Q }}{{trim}}' }));
+    assert.equal(silent.header.commentOnly, true);
+    assert.equal(silent.header.hasContent, false);
+    const empty = groupOf(doc({ hContent: '   ', enabled: { h: true, b: false, c: false } }));
+    assert.equal(empty.header.commentOnly, false);
+    assert.equal(empty.header.hasContent, false);
+    assert.equal(empty.noneOn, true);
+});
+
+test('heading: setGroup refuses it; toggle switches it alone; none leaves it on', () => {
     const d = doc({ enabled: { h: false, b: true, c: false } });
-    const g = groupOf(d);
-    const ops = pickOneOps(g, 'h');
-    assert.deepEqual(ops, [{ op: 'setGroup', group: 'grp:k-h', identifier: 'h' }]);
+    assert.throws(() => applyDocOp(d, 'setGroup', { group: 'grp:k-h', identifier: 'h' }), (/** @type {any} */ e) => e.status === 400);
+    applyDocOp(d, 'toggle', { identifier: 'h', value: true });
+    assert.deepEqual(d.loadouts.L1.enabled, { h: true, b: true, c: false });
+    const ops = pickOneOps(groupOf(d), 'c');
+    assert.deepEqual(ops, [{ op: 'setGroup', group: 'grp:k-h', identifier: 'c' }]);
     for (const { op, ...args } of /** @type {any[]} */ (ops)) applyDocOp(d, op, args);
-    assert.deepEqual(d.loadouts.L1.enabled, { h: true, b: false, c: false });
-    const after = groupOf(d);
-    assert.equal(after.noneOn, false);
-    const noneOps = pickOneOps(after, null);
-    assert.deepEqual(noneOps, [{ op: 'toggle', identifier: 'h', value: false }]);
+    assert.deepEqual(d.loadouts.L1.enabled, { h: true, b: false, c: true });
+    const noneOps = pickOneOps(groupOf(d), null);
+    assert.deepEqual(noneOps, [{ op: 'toggle', identifier: 'c', value: false }]);
     for (const { op, ...args } of /** @type {any[]} */ (noneOps)) applyDocOp(d, op, args);
-    assert.deepEqual(d.loadouts.L1.enabled, { h: false, b: false, c: false });
+    assert.deepEqual(d.loadouts.L1.enabled, { h: true, b: false, c: false });
     assert.equal(groupOf(d).noneOn, true);
 });
