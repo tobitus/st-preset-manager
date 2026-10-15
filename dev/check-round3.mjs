@@ -21,9 +21,19 @@
  *      `createGroup` op, one undo step / one revision, a headed pick-one group; Ctrl+Z removes it
  *   g2 A non-adjacent selection: the server refusal (400 "selected rows must be
  *      adjacent") shows in a second ST TEXT popup and the doc is unchanged
+ *   n1 A pre-round-3 Nemo native document (dev/fixtures/native/nemo-adjacent-pre-r3.json)
+ *      upgrades on import: each headed pick-one group gets a default comment-only
+ *      heading, the former heading becomes option 0, loadout bits and overrides
+ *      are unchanged (root loadouts also enable the new headings), the compiled
+ *      ST text equals the pre-upgrade compile; the outline shows no switch on the
+ *      heading and a radio on the first option
+ *   s1 Sola V3 Flame imports through the Library UI: notes, 10 sections, 8
+ *      pick-one groups (badge 1), the two Story Grounding rows plain checkboxes,
+ *      and section 0's long MIND text reaches ST
  * Screenshots (dev/shots/): round3-h1-heading-checkbox.png,
  *   round3-h2-pick-one.png, round3-h3-none.png, round3-g1-popup.png,
- *   round3-g1-group.png, round3-g2-refusal.png.
+ *   round3-g1-group.png, round3-g2-refusal.png, round3-n1-upgraded.png,
+ *   round3-s1-import.png, round3-s1-outline.png.
  *
  * Environment: the dev container st-pm-dev on 127.0.0.1:8002 with the plugin
  * (dev/up.sh); NEVER :8001. It RESETS the dev data (dev/reset.sh) first.
@@ -38,6 +48,7 @@ import {
     cleanupTabs, createApi, createReporter, sleep, until,
 } from './harness.mjs';
 import { isCommentOnly } from '../shared/groups.js';
+import { compile } from '../shared/compile.js';
 import { flattenSeq } from '../shared/outline.js';
 
 const TAB = 'chkr3';
@@ -384,6 +395,7 @@ async function sectionH3() {
 
 async function sectionG1() {
     await check('g1 Make group from selection: one createGroup op, one revision, a headed pick-one group; Ctrl+Z removes it', async () => {
+        await openFromLibrary(ids.sola); // h3 leaves the FF view in front
         await setOn(S.G2, false);
         await convergedOn(ids.sola, 'converged before g1');
         const h0 = await history();
@@ -478,6 +490,164 @@ async function sectionG2() {
     });
 }
 
+// ------------------------------------------------------------------ n1
+
+/** Every group of `doc` (any section depth, first sequence) as {name, key, header, options} (idents). */
+function groupsOf(/** @type {any} */ doc) {
+    /** @type {any[]} */ const out = [];
+    const walk = (/** @type {any[]} */ rows) => {
+        for (const r of rows ?? []) {
+            if (r.kind === 'group') out.push({ name: r.name, key: r.key, header: r.header ? identOf(r.header) : null, headerKey: r.header?.key ?? null, options: (r.options ?? []).map(identOf) });
+            else if (r.kind === 'section') walk(r.rows);
+        }
+    };
+    walk(doc.sequences[0].rows);
+    return out;
+}
+
+async function sectionN1() {
+    await check('n1 a pre-round-3 Nemo doc upgrades on import: default headings, former headings become options, bits unchanged, ST text unchanged', async () => {
+        const fx = JSON.parse(fs.readFileSync(path.join(REPO, 'dev/fixtures/native/nemo-adjacent-pre-r3.json'), 'utf8'));
+        // The synthetic fixture carries only its own blocks. ST's PromptManager
+        // appends its default system prompts (main, chatHistory, …) to any preset
+        // that lacks them, so the slot's prompts would never equal the compile and
+        // the apply would never converge. Carry ST's own defaults as markers, as a
+        // real ST import does; markers are outside every group and sequence, so the
+        // upgrade under test is unaffected.
+        const ST_DEFAULTS = ['main', 'nsfw', 'dialogueExamples', 'jailbreak', 'chatHistory', 'worldInfoAfter', 'worldInfoBefore', 'enhanceDefinitions', 'charDescription', 'charPersonality', 'scenario', 'personaDescription'];
+        const stDefaults = await probe.eval(`SillyTavern.getContext().chatCompletionSettings.prompts.filter((p) => ${J(ST_DEFAULTS)}.includes(p.identifier))`);
+        must(stDefaults.length === ST_DEFAULTS.length, `ST shows ${stDefaults.length} of the ${ST_DEFAULTS.length} default prompts`);
+        fx.markers = stDefaults.map((/** @type {any} */ p) => ({ identifier: p.identifier, prompt: p }));
+        const fxGroups = groupsOf(fx);
+        const res = await api('POST', '/presets', { native: fx, name: 'Nemo upgrade r3' });
+        must(res.status === 200 || res.status === 201, `native import HTTP ${res.status} ${J(res.json)}`);
+        const id = res.json?.id;
+        must(id, `import response has no id: ${J(res.json)?.slice(0, 200)}`);
+        const d = await getDoc(id);
+        const dGroups = groupsOf(d);
+        const pmhIds = [];
+        for (const fg of fxGroups) {
+            const dg = dGroups.find((g) => g.name === fg.name);
+            must(dg, `group ${fg.name} missing after import`);
+            if (fg.header === null) {
+                must(dg.header === null && J(dg.options) === J(fg.options), `headerless ${fg.name}: header ${J(dg.header)} options ${J(dg.options)}, want null / ${J(fg.options)}`);
+                continue;
+            }
+            must(/^pmh-[0-9a-f]{8}$/.test(dg.header ?? ''), `${fg.name}: header ${J(dg.header)} is not a pmh id`);
+            must(J(dg.options) === J([fg.header, ...fg.options]), `${fg.name}: options ${J(dg.options)}, want ${J([fg.header, ...fg.options])}`);
+            const blk = d.blocks[dg.header];
+            must(blk && blk.name === fg.name && blk.content === `{{// ${fg.name} }}{{trim}}`, `${fg.name}: heading block ${J(blk)}`);
+            must(dg.key === `grp:${dg.headerKey}`, `${fg.name}: group key ${dg.key}, want grp:${dg.headerKey}`);
+            pmhIds.push(dg.header);
+        }
+        must(pmhIds.length === 2, `${pmhIds.length} headings added, want 2 (Q and R)`);
+        for (const [lid, fl] of Object.entries(fx.loadouts)) {
+            const dl = d.loadouts[lid];
+            must(dl, `loadout ${lid} missing`);
+            for (const [k, v] of Object.entries(fl.enabled ?? {})) {
+                must(dl.enabled[k] === v, `${fl.name}: enabled[${k}] ${dl.enabled[k]}, want ${v}`);
+            }
+            must(J(dl.overrides) === J(fl.overrides), `${fl.name}: overrides changed: ${J(dl.overrides)} vs ${J(fl.overrides)}`);
+            for (const p of pmhIds) {
+                if (fl.kind === 'root') must(dl.enabled[p] === true, `root ${fl.name}: enabled[${p}] ${dl.enabled[p]}, want true`);
+                else must(!(p in dl.enabled), `${fl.name} (${fl.kind}) has a bit for ${p}`);
+            }
+        }
+        const notes = d.source?.recognizer?.notes ?? [];
+        must(notes.some((/** @type {string} */ n) => n.startsWith("upgrade: group 'Q' got a default heading")), `no upgrade note for Q in ${J(notes)}`);
+
+        const enabledIds = (/** @type {any} */ c) => c.prompt_order[0].order.filter((/** @type {any} */ o) => o.enabled).map((/** @type {any} */ o) => o.identifier);
+        const before = compile(fx, null, {}, fx.activeLoadoutId).compiled;
+        const expectedTexts = enabledIds(before).map((/** @type {string} */ i) => [i, before.prompts.find((/** @type {any} */ p) => p.identifier === i)?.content ?? null]);
+        must((await api('POST', '/slot/load', { presetId: id })).status === 200, 'slot_load upgraded Nemo failed');
+        const c = await convergedOn(id, 'upgraded Nemo converged');
+        const stPrompts = await probe.eval(`SillyTavern.getContext().chatCompletionSettings.prompts.map((p) => [p.identifier, p.content ?? null])`);
+        const contentOf = new Map(stPrompts);
+        const actualTexts = c.s.order
+            .filter((/** @type {any} */ o) => o.enabled && !/^pmh-/.test(o.identifier))
+            .map((/** @type {any} */ o) => [o.identifier, contentOf.get(o.identifier) ?? null]);
+        must(J(actualTexts) === J(expectedTexts), `ST text differs: actual ${J(actualTexts)} vs expected ${J(expectedTexts)}`);
+        for (const p of pmhIds) {
+            must(c.s.order.some((/** @type {any} */ o) => o.identifier === p && o.enabled === true), `${p} not enabled in ST's order`);
+        }
+
+        await showTab('presets');
+        await openFromLibrary(id);
+        const qGroup = dGroups.find((g) => g.name === 'Q');
+        const gli = `${view(id)} li.pm-node[data-kind="group"][data-node-key="${qGroup.key}"]`;
+        await until(() => exists(gli), 10000, 'Q group li rendered');
+        const n = await probe.eval(`document.querySelectorAll(${J(`${gli} > .pm-row > input.pm-switch`)}).length`);
+        must(n === 0, `heading row renders ${n} switch(es), want 0`);
+        const firstLi = `${gli} > ul.pm-list > li.pm-node`;
+        const firstId = await probe.eval(`document.querySelector(${J(firstLi)})?.dataset.identifier ?? null`);
+        const types = await typesOf(`${firstLi} .pm-switch`);
+        must(firstId === 'q1' && types[0] === 'radio', `first option ${J({ firstId, types })}, want q1 radio`);
+        await shot('round3-n1-upgraded.png');
+        return `headings ${J(pmhIds)}; ${expectedTexts.length} ST text entries compared equal`;
+    });
+}
+
+// ------------------------------------------------------------------ s1
+
+/** Attach `absPath` to a file input via CDP (fires input+change like a real pick). */
+async function setFileInput(/** @type {string} */ sel, /** @type {string} */ absPath) {
+    const ev = await probe.cdp('Runtime.evaluate', { expression: `document.querySelector(${J(sel)})` });
+    const objectId = ev.result?.objectId;
+    if (!objectId) throw new Error(`setFileInput: ${sel} not found`);
+    await probe.cdp('DOM.setFileInputFiles', { files: [absPath], objectId });
+}
+
+async function sectionS1() {
+    await check('s1 Sola V3 Flame imports via the Library: notes, 10 sections, 8 pick-one groups, GROUNDING plain, MIND text in the slot', async () => {
+        await showTab('library');
+        const absPath = path.join(REPO, 'dev/fixtures/presets/Sola V3 Flame.json');
+        must(fs.existsSync(absPath), `fixture missing: ${absPath}`);
+        await setFileInput('#pm-window .pm-io-section .pm-io-file', absPath);
+        const resultSel = '#pm-window .pm-io-result[data-status="ok"][data-name="Sola V3 Flame"]';
+        const sid = await until(async () => {
+            if (!(await exists(resultSel))) return null;
+            return probe.eval(`document.querySelector(${J(resultSel)}).dataset.presetId`);
+        }, 20000, 'Sola V3 import result row').catch(async (err) => {
+            const rows = await probe.eval(`[...document.querySelectorAll('#pm-window .pm-io-result')].map((r) => [r.dataset.status, r.dataset.name, r.textContent.slice(0, 120)])`);
+            throw new Error(`${err.message}; result rows: ${J(rows)}`);
+        });
+        const notes = await text(`${resultSel} .pm-io-notes`);
+        must(notes && notes.includes('"undefined"') && notes.includes('GROUNDING'), `.pm-io-notes ${J(notes?.slice(0, 300))} lacks "undefined" and GROUNDING`);
+        await shot('round3-s1-import.png');
+
+        await openFromLibrary(sid);
+        const seq0 = `${view(sid)} .pm-outline ul.pm-list[data-list="seq"][data-seq-index="0"]`;
+        const secNames = await probe.eval(`[...document.querySelectorAll(${J(`${seq0} > li.pm-node[data-kind="section"]`)})].map((li) => li.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '')`);
+        must(secNames.length === 10, `${secNames.length} top-level sections, want 10: ${J(secNames)}`);
+        secNames.forEach((/** @type {string} */ n, /** @type {number} */ i) => must(n.includes(`0${i}.`), `section ${i} name ${J(n)} lacks "0${i}."`));
+        const groups = await probe.eval(`[...document.querySelectorAll(${J(`${seq0} li.pm-node[data-kind="group"]`)})].map((li) => ({
+            name: (li.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '').trim(),
+            badge: (li.querySelector(':scope > .pm-row > .pm-card')?.textContent ?? '').trim(),
+        }))`);
+        const wantNames = ['MIND', 'POV', 'PRONOUN', 'Agency-Lite / Embellished User', 'Anti-Slop Full / Anti-Slop Lite', 'STYLE', 'NPC Dialogue Colors 🎨 / Gradient ALL The Time 🎨', 'Anti-Softening / Anti-Cruelty'];
+        must(groups.length === 8, `${groups.length} group rows, want 8: ${J(groups)}`);
+        must(groups.every((/** @type {any} */ g) => g.badge === '1'), `badges ${J(groups.map((/** @type {any} */ g) => g.badge))}, want all "1"`);
+        must(J(groups.map((/** @type {any} */ g) => g.name)) === J(wantNames), `group names ${J(groups.map((/** @type {any} */ g) => g.name))}, want ${J(wantNames)}`);
+        const grounding = await probe.eval(`[...document.querySelectorAll(${J(`${seq0} li.pm-node[data-kind="leaf"]`)})]
+            .filter((li) => (li.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '').includes('Story Grounding'))
+            .map((li) => [...li.querySelectorAll(':scope > .pm-row input.pm-switch')].map((i) => i.type))`);
+        must(grounding.length === 2 && grounding.every((/** @type {string[]} */ t) => t.length === 1 && t[0] === 'checkbox'),
+            `Story Grounding rows ${J(grounding)}, want 2 rows with one checkbox each`);
+        await shot('round3-s1-outline.png');
+
+        must((await api('POST', '/slot/load', { presetId: sid })).status === 200, 'slot_load Sola V3 failed');
+        const c = await convergedOn(sid, 'Sola V3 converged');
+        const d = await getDoc(sid);
+        const sec0 = d.sequences[0].rows.find((/** @type {any} */ r) => r.kind === 'section');
+        must(sec0?.header, 'section 0 has no header');
+        const ident = identOf(sec0.header);
+        const prompt = await probe.eval(`(() => { const p = SillyTavern.getContext().chatCompletionSettings.prompts.find((p) => p.identifier === ${J(ident)}); return p ? { len: (p.content ?? '').length } : null; })()`);
+        must(prompt && prompt.len > 4000, `ST prompt ${ident} ${J(prompt)}, want content length > 4000`);
+        must(c.s.order.some((/** @type {any} */ o) => o.identifier === ident && o.enabled), `${ident} not enabled in ST's order`);
+        return `${secNames.length} sections, ${groups.length} groups, 2 Story Grounding checkboxes; section 0 header ${ident} has ${prompt.len} chars in ST, enabled`;
+    });
+}
+
 // ------------------------------------------------------------------ main
 
 async function main() {
@@ -553,6 +723,8 @@ async function main() {
     if (wanted('h3')) await sectionH3();
     if (wanted('g1')) await sectionG1();
     if (wanted('g2')) await sectionG2();
+    if (wanted('n1')) await sectionN1();
+    if (wanted('s1')) await sectionS1();
 
     finish();
 }

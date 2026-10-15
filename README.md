@@ -50,6 +50,25 @@ above, and does nothing else.
   import and export live in the section at the bottom of the Library pane.
 - **Presets tab**: an outline of the preset with on/off switches, sections,
   pick-one groups and row numbers; Undo / Redo with Ctrl+Z / Ctrl+Shift+Z.
+- **Groups**: a group's heading is never one of its choices. A heading that
+  sends text has its own checkbox (on/off like any block); a comment-only
+  heading (sends nothing) has no switch. Pick-one only counts the options.
+  **Make group from selection** (rank bar) turns two or more adjacent selected
+  rows (Ctrl/Shift-click) into one group in one step: pick the heading (or
+  none) and *Pick one* / *Pick many*; Ctrl+Z undoes it. It is refused, with
+  the reason in a popup, for rows that are not adjacent, a section heading, a
+  row already in a group, a headerless group directly below another group,
+  and pick-one while two or more of its options are on.
+- **Import notes**: each import result row in the Library lists what the
+  importer noticed and what it dropped or fixed: a `prompt_order` whose
+  `character_id` is not a number, a duplicate `character_id`, order entries
+  or prompts without an identifier (dropped), a non-string role or content
+  (coerced). An import fails only when no usable `prompt_order` or no prompt
+  is left.
+- **SillyTavern's own prompt panel**: while PM is active, edits made in ST's
+  prompt panel are unstable: they may not reach PM, and PM may override them.
+  PM's outline is the editing surface. A tick in the panel that breaks a
+  pick-one rule wins: PM switches the sibling off.
 - **Loadouts** (the bordered Loadout box): a *root* loadout holds a complete
   on/off set; a *playstyle* inherits one root and stores only what it changes.
   Inherited rows are greyed, ↺ resets one row, and *Reset all to inherit*
@@ -485,8 +504,8 @@ Tests: `test/reorder-writeback.test.js`. Check: `node dev/check-reorder.mjs`
 The `1`/`N` badge on every group row is a click control: it flips the group
 between pick-one and pick-one-or-more (`setCardinality`). Switching to
 pick-one is refused, with an ST popup showing the server's text, while two or
-more members (the heading counts) are on in any loadout or per-Model
-override; nothing is ever switched off.
+more options are on in any loadout or per-Model override (the heading never
+counts); nothing is ever switched off.
 
 Tests: `test/cardinality.test.js`. Check: `node dev/check-cardinality.mjs`
 (resets dev data; real mouse clicks on the badges in the v2 window).
@@ -557,23 +576,49 @@ changes, so a group split into several runs is listed in the import notes
 ignored. `source.recognizer.kind` is reported when every sequence picked the
 same recognizer.
 
-A group that directly follows another group is headed by its own first member
-(two adjacent headerless groups would merge in the outline model); the import
-notes say `nemo: group 'X' directly follows group 'Y'; ...`.
+A group that directly follows another group gets a default heading (two
+adjacent headerless groups would merge in the outline model): a new
+comment-only block named after the group (`pmh-xxxxxxxx`, content
+`{{// Name }}{{trim}}`, sends nothing, on in every root loadout); its first
+member stays an option. The import notes say `nemo: group 'X' directly
+follows group 'Y'; it gets a default heading 'X' ...`. A Nemo document
+imported before round 3 (where the first member headed such a group) is
+upgraded when it is loaded: it gets the default heading, the former heading
+becomes the first option, and no on/off bit changes; the notes say
+`upgrade: group 'X' got a default heading; ...`.
 
-Comment-only headings: a section/group heading whose content is only
-`{{// … }}` comments and `{{trim}}` (every Nemo heading) sends no text. It is
-no pick-one member (normalize, the per-Model override merge, the ⚠ conflict
-and the 1/N refusal ignore it, and "none" leaves it alone) and its heading
-row shows no switch. Blank headings keep the older rules; the slot compile
-and the ST export are unchanged.
+Group headings (every preset): a heading is never a pick-one member
+(normalize, the per-Model override merge, the ⚠ conflict, the 1/N refusal and
+"none" count only the options). A heading that sends text has its own
+checkbox; a comment-only heading (only `{{// … }}` comments and `{{trim}}`,
+e.g. every Nemo heading) shows no switch. The slot compile and the ST export
+are unchanged.
 
-In the outline of a Nemo-imported preset (`source.recognizer.kind` is
-`nemo`), a pick-one group heading whose block sends text shows its own radio:
-it is a pick-one member, so choosing it turns the options off, and 'none'
-clears it. Empty headings and pick-many headings have no switch. Other
-presets (FF/DEM/Sola) keep switchless headings: their content headings are
-informational text. This is a contained, temporary rule until roadmap 16
-replaces the outline's group model.
+Tests: `test/nemo.test.js`, `test/nemo-upgrade.test.js`,
+`test/group-heading-switch.test.js`.
 
-Tests: `test/nemo.test.js`, `test/group-heading-switch.test.js`.
+### Sola V3 recognizer
+
+Presets with `… ══════════` block names or `[PICK 1: T]` tags are Sola V3
+(`sola3`; recognizer order nemo → dem → sola3 → sola → ff5 → casus → flat).
+A `══` row opens a section; its block is the section heading and keeps its
+content. Two or more adjacent `[PICK 1: T]` rows form a pick-one group named
+`T`; a `[PICK 1: ↓] A` row directly followed by a `[PICK 1: ↑] B` row forms a
+pick-one pair named `A / B`. A single `[PICK 1: T]` row whose tag also
+appears elsewhere (Sola's two `Story Grounding [PICK 1: GROUNDING]` rows,
+#24 and #93) stays a plain toggle with a note (linked pick-one across
+positions is a later feature); a lone ↓ or ↑ row stays plain with a note. A
+group directly after another group (PRONOUN after POV) gets a default
+heading as in Nemo. Rows never move and block names never change.
+
+Tests: `test/sola3.test.js`, `test/graceful-import.test.js`.
+
+### Round 3 checks
+
+`node dev/check-round3.mjs` (resets dev data; real mouse clicks in the v2
+window): h1–h3 group heading checkbox, pick-one flip with the heading on,
+"none"; g1–g2 Make group from selection and its refusal popup; n1 the
+pre-round-3 Nemo fixture (`dev/fixtures/native/nemo-adjacent-pre-r3.json`)
+upgrades with unchanged bits and unchanged slot text; s1 Sola V3 Flame
+imports through the Library (`dev/fixtures.sh` copies the owner's file into
+`dev/fixtures/presets/Sola V3 Flame.json`).
