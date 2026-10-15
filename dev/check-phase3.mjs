@@ -34,7 +34,6 @@
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 
 import {
@@ -637,7 +636,9 @@ async function main() {
             }
         }
         {
-            const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-check3-dl-'));
+            // PM_CHROME (chromium-podman.sh) runs the browser in a container
+            // that bind-mounts only $REPO, so the download must land under it
+            const dir = fs.mkdtempSync(path.join(REPO, 'dev', 'shots', 'pm-check3-dl-'));
             await enableDownloads(dir);
             await setValue('#pm-window .pm-io-export-preset', presetIds.ff, 'change');
             await runExportCheck('ui export st download == API export', 'st', `${FF}.json`, dir);
@@ -851,7 +852,10 @@ async function main() {
         const NAME_GEN = '11 ST round trip: generation equal (:8099/last)';
         try {
             const E = (await api('GET', `/presets/${presetIds.ff}/export?format=st`)).json;
-            const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pm-check3-rt-'));
+            // PM_CHROME (chromium-podman.sh) runs the browser in a container
+            // that bind-mounts only $REPO; DOM.setFileInputFiles needs a path
+            // the BROWSER can read, so these live under dev/ too
+            const tmpDir = fs.mkdtempSync(path.join(REPO, 'dev', 'shots', 'pm-check3-rt-'));
             const exportPath = path.join(tmpDir, 'P3 RT export.json');
             const sourcePath = path.join(tmpDir, 'P3 RT source.json');
             fs.writeFileSync(exportPath, JSON.stringify(E, null, 4));
