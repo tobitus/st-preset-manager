@@ -5,7 +5,7 @@
  * for cross-preset / shelf block copies).
  *
  * The edit bar (fix round 1) adds: an "Insert ▾" menu (empty section
- * heading / empty block, inserted before the selected row or at the end),
+ * heading / empty block, inserted below the selected row or at the end),
  * Duplicate (copies the selected block directly below itself) and Delete
  * (two-click-armed, like the loadout delete button but keyed to the
  * selected row so switching rows resets the arm) buttons, and a
@@ -333,7 +333,7 @@ export function createPresetsTab(pane, bridge) {
             <div class="pm-edit-bar">
                 <button class="pm-undo menu_button" title="Undo the last change to this preset (Ctrl+Z)">Undo</button><button class="pm-redo menu_button" title="Redo (Ctrl+Shift+Z)">Redo</button>
                 <span class="pm-insert">
-                    <button class="pm-insert-toggle menu_button" title="Insert at the selected row (or at the end)">Insert ▾</button>
+                    <button class="pm-insert-toggle menu_button" title="Insert below the selected row (or at the end)">Insert ▾</button>
                     <span class="pm-insert-menu" hidden>
                         <button class="pm-insert-section menu_button" title="An empty section heading: the rows below it, up to the next section heading, belong to it">Section heading</button>
                         <button class="pm-insert-block menu_button" title="An empty block">Block</button>
@@ -740,20 +740,29 @@ export function createPresetsTab(pane, bridge) {
         return { key, found };
     }
 
-    /** Add an empty section heading before the selected row (or at the end). */
+    /** The leaf key an Insert lands below: the selected row's key; a headerless group row (`grp:` key) resolves to its last option, so the insert lands after the whole group / joins it last; nothing selected -> null (end). */
+    function insertAnchor(/** @type {string} */ id) {
+        const key = selected.get(id) ?? null;
+        if (!key?.startsWith('grp:')) return key;
+        const doc = docs.get(id);
+        const row = doc ? findGroupRow(doc, key) : null;
+        return row?.options?.at(-1)?.key ?? null;
+    }
+
+    /** Add an empty section heading below the selected row (or at the end). */
     async function insertSection(/** @type {PresetView} */ v) {
         v.insertMenu.hidden = true;
         const raw = await ctx().callGenericPopup('Section heading name', ctx().POPUP_TYPE.INPUT, 'New section');
         if (typeof raw !== 'string' || !raw.trim()) return;
         const trimmed = raw.trim();
         const name = trimmed.startsWith('=') ? trimmed : `== ${trimmed} ==`;
-        await runInsertOp(v, { op: 'addSection', name, before: selected.get(v.id) ?? null });
+        await runInsertOp(v, { op: 'addSection', name, after: insertAnchor(v.id) });
     }
 
-    /** Add an empty block before the selected row (or at the end). */
+    /** Add an empty block below the selected row (or at the end). */
     async function insertBlock(/** @type {PresetView} */ v) {
         v.insertMenu.hidden = true;
-        await runInsertOp(v, { op: 'addBlock', name: 'New block', before: selected.get(v.id) ?? null });
+        await runInsertOp(v, { op: 'addBlock', name: 'New block', after: insertAnchor(v.id) });
     }
 
     /** Shared addSection/addBlock runner: select + scroll to the new row. */

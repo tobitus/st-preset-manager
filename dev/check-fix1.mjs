@@ -370,12 +370,12 @@ async function main() {
 
     // ------------------------------------------------------------------ f1
     await check('f1 Insert ▾ → Section heading: one addSection op each; empty, section rank, ON; rows below up to the next heading are its children', async () => {
-        const tailAnchorKey = S.sola0Keys[12];
-        const headAnchorKey = S.sola0Keys[4];
+        const tailAnchorKey = S.sola0Keys[11];
+        const headAnchorKey = S.sola0Keys[3];
         const before = await getDoc(ids.sola);
         must(J(flatIds(before)) === J(S.sola0), 'precondition: Sola unchanged');
         await countOps();
-        // tail heading first (above row 12), then head heading (above row 4)
+        // tail heading first (below row 11), then head heading (below row 3)
         await selectRow(ids.sola, tailAnchorKey);
         await click(`${view(ids.sola)} .pm-insert-toggle`);
         await until(() => exists(`${view(ids.sola)} .pm-insert-menu:not([hidden])`), 3000, 'Insert menu open');
@@ -403,10 +403,10 @@ async function main() {
         const f = flat(d2);
         const at = (/** @type {string} */ id) => f.findIndex((e) => identOf(e.leaf) === id);
         const L = d2.loadouts[d2.activeLoadoutId].enabled;
-        for (const [label, b, anchorId] of /** @type {const} */ ([['tail', tail, S.sola0[12]], ['head', head, S.sola0[4]]])) {
+        for (const [label, b, anchorId] of /** @type {const} */ ([['tail', tail, S.sola0[11]], ['head', head, S.sola0[3]]])) {
             must(b.content === '', `${label} content ${J(b.content)}`);
             must(f[at(b.identifier)].rank === 'section', `${label} rank ${f[at(b.identifier)].rank}`);
-            must(identOf(f[at(b.identifier) + 1].leaf) === anchorId, `${label} is not directly above its anchor row`);
+            must(identOf(f[at(b.identifier) - 1].leaf) === anchorId, `${label} is not directly below its anchor row`);
             must(L[b.identifier] === true, `${label} not ON in the active loadout`);
         }
         const secRows = (/** @type {string} */ hid) => {
@@ -581,7 +581,7 @@ async function main() {
         const src = f0[1];
         must(anchor.rank === 'item' && src.rank === 'item', 'precondition: rows 1 and 2 are plain items');
         await countOps();
-        // Insert → Block above row 2
+        // Insert → Block below row 2
         await selectRow(ids.sola, anchor.leaf.key);
         await click(`${view(ids.sola)} .pm-insert-toggle`);
         await click(`${view(ids.sola)} .pm-insert-block`);
@@ -593,7 +593,7 @@ async function main() {
         const f1 = flat(d1);
         const nbIdx = f1.findIndex((e) => identOf(e.leaf) === nb.identifier);
         must(nb.name === 'New block' && nb.content === '', `new block ${J({ name: nb.name, content: nb.content })}`);
-        must(identOf(f1[nbIdx + 1].leaf) === identOf(anchor.leaf), 'new block not directly above the selected row');
+        must(identOf(f1[nbIdx - 1].leaf) === identOf(anchor.leaf), 'new block not directly below the selected row');
         const nbKey = f1[nbIdx].leaf.key;
         await until(() => exists(`${rowLi(ids.sola, nbKey)} > .pm-row.pm-selected`), 5000, 'new block selected');
         // Duplicate row 1
@@ -653,7 +653,7 @@ async function main() {
         const rest = await op(ids.sola, { op: 'deleteBlock', identifier: identOf(marker.leaf) });
         must(rest.status === 404, `REST deleteBlock on a marker -> ${rest.status}`);
         await clearToasts();
-        return `new block ${nb.identifier} above row 2; duplicate ${dup.identifier} of ${srcBlock.identifier} directly below it; delete armed on dup, disarmed by selection, deleted the new block on its own confirmation, then the dup; ops ${J(ops)}; marker ${identOf(marker.leaf)}: aria-disabled, ${warn.length} warning toasts, REST 404`;
+        return `new block ${nb.identifier} below row 2; duplicate ${dup.identifier} of ${srcBlock.identifier} directly below it; delete armed on dup, disarmed by selection, deleted the new block on its own confirmation, then the dup; ops ${J(ops)}; marker ${identOf(marker.leaf)}: aria-disabled, ${warn.length} warning toasts, REST 404`;
     });
 
     // ------------------------------------------------------------------ f4

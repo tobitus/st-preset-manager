@@ -682,36 +682,59 @@ function opEditBlock(doc, a) {
 }
 
 /**
- * Add a new block with a leaf row at a drop position: appended to the first
- * sequence's end (`before` null/absent) or inserted right before the anchor
- * leaf key (keeping the anchor's section). Disabled in every loadout.
+ * Find the flat entry whose leaf key is `key` in any sequence of `doc`. The
+ * flat scan also finds group/section heading leaves, which live in no rows
+ * array.
  * @param {any} doc
- * @param {{ identifier?: string, name?: string, content?: string, role?: string, fields?: any, before?: string|null }} a
+ * @param {string} key
+ * @returns {{ seq: any, flat: any[], idx: number }|null}
+ */
+function findAnchor(doc, key) {
+    for (const seq of doc.sequences ?? []) {
+        const flat = flattenSeq(seq.rows ?? []);
+        const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === key);
+        if (idx !== -1) return { seq, flat, idx };
+    }
+    return null;
+}
+
+/**
+ * Add a new block with a leaf row at a drop position: appended to the first
+ * sequence's end (neither `before` nor `after`), inserted right before the
+ * anchor leaf key `before` (keeping the anchor's section), or inserted right
+ * after the anchor `after` (exclusive with `before`): after an item/marker
+ * -> an item; after an option or group heading -> an option of that group;
+ * after a section heading -> the section's first row. Disabled in every
+ * loadout.
+ * @param {any} doc
+ * @param {{ identifier?: string, name?: string, content?: string, role?: string, fields?: any, before?: string|null, after?: string|null }} a
  */
 function opAddBlock(doc, a) {
     if (typeof a?.name !== 'string' || !a.name.trim()) throw new OpError('addBlock needs {name}');
     if (a.before != null && typeof a.before !== 'string') {
         throw new OpError('addBlock before must be a leaf key');
     }
+    if (a.after != null && typeof a.after !== 'string') {
+        throw new OpError('addBlock after must be a leaf key');
+    }
+    if (a.before != null && a.after != null) throw new OpError('use before or after, not both');
     const identifier = typeof a.identifier === 'string' && a.identifier ? a.identifier : newId();
     if (doc.blocks?.[identifier]) throw new OpError(`block ${identifier} already exists`, 409);
     const row = { kind: 'block', ref: identifier, key: newKey('row') };
     const entry = { leaf: row, rank: 'item', gmeta: null, sname: null };
-    // anchor lookup BEFORE any mutation: a 404 must leave the doc untouched.
-    // The flat scan also finds group/section heading leaves, which live in no
-    // rows array (that is why the nested requireRow lookup failed on them).
-    /** @type {{ seq: any, flat: any[], idx: number }|null} */
-    let anchor = null;
-    if (a.before != null) {
-        for (const seq of doc.sequences ?? []) {
-            const flat = flattenSeq(seq.rows ?? []);
-            const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === a.before);
-            if (idx !== -1) {
-                anchor = { seq, flat, idx };
-                break;
-            }
-        }
-        if (!anchor) throw new OpError(`no row with key ${JSON.stringify(a.before)}`, 404);
+    // anchor lookup BEFORE any mutation: a 404 must leave the doc untouched
+    const key0 = a.before ?? a.after;
+    const anchor = key0 != null ? findAnchor(doc, key0) : null;
+    if (key0 != null && !anchor) throw new OpError(`no row with key ${JSON.stringify(key0)}`, 404);
+    let at = 0;
+    if (anchor && a.after != null) {
+        const land = landingAfter(anchor.flat, anchor.idx, 'item');
+        entry.rank = land.rank;
+        entry.gmeta = land.gmeta;
+        entry.sname = land.sname;
+        at = land.at;
+    } else if (anchor) {
+        at = anchor.idx;
         // keep the anchor's section (same sname) so the row lands beside it;
         // above a SECTION heading the item lands OUTSIDE the section, so it
         // takes the sname of the entry before the heading instead
@@ -729,7 +752,7 @@ function opAddBlock(doc, a) {
         notes: '',
     };
     if (anchor) {
-        anchor.flat.splice(anchor.idx, 0, entry);
+        anchor.flat.splice(at, 0, entry);
         anchor.seq.rows = rebuildSeq(anchor.flat);
     } else {
         const seq = (doc.sequences ?? [])[0];
@@ -745,33 +768,30 @@ function opAddBlock(doc, a) {
 /**
  * Insert an empty FF-style section heading block: a fresh block (empty
  * content) becomes a new section-heading leaf. Rows below it up to the next
- * section heading (or the end) become its children; an anchor on a group
- * option snaps above the whole group so it never splits it. ON only in the
- * active loadout, off everywhere else.
+ * section heading (or the end) become its children. `before` (a leaf key)
+ * lands right above the anchor (an anchor on a group option snaps above the
+ * whole group so it never splits it); `after` (exclusive with `before`)
+ * lands below the anchor: after an item, after the whole group for a group
+ * or option, after the whole section for a section. Neither = end of the
+ * first sequence. ON only in the active loadout, off everywhere else.
  * @param {any} doc
- * @param {{ name?: string, before?: string|null }} a
+ * @param {{ name?: string, before?: string|null, after?: string|null }} a
  */
 function opAddSection(doc, a) {
     if (typeof a?.name !== 'string' || !a.name.trim()) throw new OpError('addSection needs {name}');
     if (a.before != null && typeof a.before !== 'string') {
         throw new OpError('addSection before must be a leaf key');
     }
+    if (a.after != null && typeof a.after !== 'string') {
+        throw new OpError('addSection after must be a leaf key');
+    }
+    if (a.before != null && a.after != null) throw new OpError('use before or after, not both');
     activeLoadout(doc); // preset has no active loadout -> 409 before any mutation
     const name = a.name.trim();
     // anchor lookup BEFORE any mutation: a 404 must leave the doc untouched
-    /** @type {{ seq: any, flat: any[], idx: number }|null} */
-    let anchor = null;
-    if (a.before != null) {
-        for (const seq of doc.sequences ?? []) {
-            const flat = flattenSeq(seq.rows ?? []);
-            const idx = flat.findIndex((/** @type {any} */ e) => e.leaf.key === a.before);
-            if (idx !== -1) {
-                anchor = { seq, flat, idx };
-                break;
-            }
-        }
-        if (!anchor) throw new OpError(`no row with key ${JSON.stringify(a.before)}`, 404);
-    }
+    const key0 = a.before ?? a.after;
+    const anchor = key0 != null ? findAnchor(doc, key0) : null;
+    if (key0 != null && !anchor) throw new OpError(`no row with key ${JSON.stringify(key0)}`, 404);
     const identifier = mintIdentifiers(doc, 1)[0];
     const key = newKey('row');
     const entry = { leaf: { kind: 'block', ref: identifier, key }, rank: 'section', gmeta: null, sname: name };
@@ -782,7 +802,9 @@ function opAddSection(doc, a) {
     if (anchor) {
         seq = anchor.seq;
         entries = anchor.flat;
-        const at = entries[anchor.idx].rank === 'option' ? snapAboveGroup(entries, anchor.idx) : anchor.idx;
+        const at = a.after != null
+            ? landingAfter(entries, anchor.idx, 'section').at
+            : entries[anchor.idx].rank === 'option' ? snapAboveGroup(entries, anchor.idx) : anchor.idx;
         entries.splice(at, 0, entry);
     } else {
         seq = (doc.sequences ?? [])[0];
@@ -966,6 +988,47 @@ function snapAboveGroup(entries, idx) {
     let j = idx;
     while (j > 0 && entries[j].rank === 'option') j--;
     return (entries[j].rank === 'group' || entries[j].rank === 'option') ? j : j + 1;
+}
+
+/**
+ * Where a new entry lands for an `after: <anchor>` insert. `at` is the splice
+ * index in the anchor's flat sequence; `rank`/`gmeta`/`sname` describe the new
+ * entry (for a 'section' payload the caller sets sname; for a 'group'
+ * payload the caller fills gmeta). Sections and groups never split a group:
+ * they land after its whole option run; a group never lands at the start of a
+ * headerless option run (it would swallow it), so it skips past that run.
+ * @param {any[]} entries flat entries of the anchor's sequence
+ * @param {number} idx the anchor's index
+ * @param {'item'|'section'|'group'} payloadRank rank of the new entry
+ * @returns {{ at: number, rank: string, gmeta: any, sname: string|null }}
+ */
+function landingAfter(entries, idx, payloadRank) {
+    const anchor = entries[idx];
+    const runEnd = (/** @type {number} */ from) => {
+        let k = from;
+        while (k < entries.length && entries[k].rank === 'option') k++;
+        return k;
+    };
+    if (payloadRank === 'item') {
+        if (anchor.rank === 'option' || anchor.rank === 'group') {
+            return { at: idx + 1, rank: 'option', gmeta: { ...anchor.gmeta }, sname: anchor.sname ?? null };
+        }
+        return { at: idx + 1, rank: 'item', gmeta: null, sname: anchor.sname ?? null };
+    }
+    if (payloadRank === 'section') {
+        let at = idx + 1;
+        if (anchor.rank === 'option' || anchor.rank === 'group') {
+            at = runEnd(idx + 1);
+        } else if (anchor.rank === 'section') {
+            at = idx + 1;
+            while (at < entries.length && entries[at].rank !== 'section') at++;
+        }
+        return { at, rank: 'section', gmeta: null, sname: null };
+    }
+    let at = idx + 1;
+    if (anchor.rank === 'option' || anchor.rank === 'group') at = runEnd(idx + 1);
+    if (entries[at]?.rank === 'option') at = runEnd(at);
+    return { at, rank: 'group', gmeta: null, sname: entries[at - 1]?.sname ?? null };
 }
 
 /**
