@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildOutline, sourceItems, headingAction, keyAction } from '../ext/outline-model.js';
+import { buildOutline, sourceItems, headingAction, keyAction, MAKE_GROUP_ON_SECTION } from '../ext/outline-model.js';
 
 const B = (/** @type {string} */ id, /** @type {string} */ name, /** @type {string} */ content = '') => ({ identifier: id, name, content, role: 'system', fields: {}, notes: '' });
 const leaf = (/** @type {string} */ id) => ({ kind: 'block', ref: id, key: `k-${id}` });
@@ -82,13 +82,18 @@ test('headingAction refuses options and the other heading kind with "make it a p
         ['k-q1', 'section', 'Make section heading'],
         ['k-g', 'section', 'Make section heading'],
         ['k-o1', 'group', 'Make group heading'],
-        ['k-s', 'group', 'Make group heading'],
     ])) {
         const r = headingAction(doc, key, kind);
         assert.equal(r.label, label, `${key}/${kind} label`);
         assert.equal(r.op, null, `${key}/${kind} op`);
         assert.match(String(r.refuse), /make it a plain row first/, `${key}/${kind} refuse`);
     }
+});
+
+test('headingAction group on a section heading -> demote (section -> group heading) with the hint note', () => {
+    const doc = mkDoc();
+    assert.deepEqual(headingAction(doc, 'k-s', 'group'), { label: 'Make group heading', op: { op: 'demote', key: 'k-s' }, refuse: null, note: MAKE_GROUP_ON_SECTION });
+    assert.equal(MAKE_GROUP_ON_SECTION, 'Turn the section heading into a group heading; its rows stay below it as plain rows — select them and Demote to make them options');
 });
 
 test('headingAction refuses markers and ghosts; no selection gives just the label', () => {

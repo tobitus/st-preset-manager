@@ -357,8 +357,9 @@ export function registerRoutes(router) {
     // (toggle/setGroup — the only ops writing loadout bits; pick-one is
     // normalised here like every write path), group shape (createGroup/
     // renameGroup/setCardinality), options (addOption/removeOption), blocks
-    // (setContent/editBlock/setBlockNotes/renameBlock/addBlock/addSection/
-    // deleteBlock — addSection inserts a new empty section heading, ON in
+    // (setContent/editBlock/setBlockNotes/renameBlock/addBlock/addSection/addGroup/
+    // deleteBlock — addSection inserts a new empty section heading and
+    // addGroup a new empty headed group, both ON in
     // the active loadout), and settings/notes (setSettings/setNotes — notes
     // are library-only and never compiled). dissolveGroup turns a group's
     // heading and options into plain items; promote/demote take {key} or
@@ -370,7 +371,7 @@ export function registerRoutes(router) {
     const OPS = /** @type {const} */ ([
         'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'makeSection', 'unmakeSection', 'moveLeaf',
         'createGroup', 'renameGroup', 'dissolveGroup', 'addOption', 'removeOption',
-        'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'deleteBlock',
+        'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'addGroup', 'deleteBlock',
         'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock', 'resetInherit', 'resetAllInherit',
     ]);
     router.post('/presets/:id/ops', async (req, res, next) => {

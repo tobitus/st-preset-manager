@@ -252,17 +252,21 @@ export function keyAction(ev) {
     return null;
 }
 
+/** Hint shown after "Make group heading" runs on a section heading. */
+export const MAKE_GROUP_ON_SECTION = 'Turn the section heading into a group heading; its rows stay below it as plain rows — select them and Demote to make them options';
+
 /**
  * The label, op and refusal for the "Make/Unmake section/group heading"
  * button on the selected row. A plain item becomes a heading directly
  * (makeSection/promote) and a heading reverts to a plain item directly
- * (unmakeSection/demote); an option or the other container kind's heading
- * must first become a plain row.
+ * (unmakeSection/demote); a section heading also becomes a group heading
+ * directly (demote, with a `note` hint); an option or a group heading asked
+ * to become a section heading must first become a plain row.
  *
  * @param {any} doc
  * @param {string|null} key selected leaf key
  * @param {'section'|'group'} kind
- * @returns {{ label: string, op: { op: string, key: string }|null, refuse: string|null }}
+ * @returns {{ label: string, op: { op: string, key: string }|null, refuse: string|null, note?: string }}
  */
 export function headingAction(doc, key, kind) {
     const label = `Make ${kind} heading`;
@@ -275,6 +279,7 @@ export function headingAction(doc, key, kind) {
         if (found.rank === 'section') return { label: 'Unmake section heading', op: { op: 'unmakeSection', key }, refuse: null };
         return { label: 'Make section heading', op: null, refuse: 'Make section heading works on a plain row — make it a plain row first' };
     }
+    if (found.rank === 'section') return { label: 'Make group heading', op: { op: 'demote', key }, refuse: null, note: MAKE_GROUP_ON_SECTION };
     if (found.rank === 'item') return { label: 'Make group heading', op: { op: 'promote', key }, refuse: null };
     if (found.rank === 'group') return { label: 'Unmake group heading', op: { op: 'demote', key }, refuse: null };
     return { label: 'Make group heading', op: null, refuse: 'Make group heading works on a plain row — make it a plain row first' };

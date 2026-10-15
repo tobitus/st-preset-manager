@@ -5,7 +5,7 @@
  * for cross-preset / shelf block copies).
  *
  * The edit bar (fix round 1) adds: an "Insert ▾" menu (empty section
- * heading / empty block, inserted below the selected row or at the end),
+ * heading / empty block / empty group heading, inserted below the selected row or at the end),
  * Duplicate (copies the selected block directly below itself) and Delete
  * (two-click-armed, like the loadout delete button but keyed to the
  * selected row so switching rows resets the arm) buttons, and a
@@ -337,6 +337,7 @@ export function createPresetsTab(pane, bridge) {
                     <span class="pm-insert-menu" hidden>
                         <button class="pm-insert-section menu_button" title="An empty section heading: the rows below it, up to the next section heading, belong to it">Section heading</button>
                         <button class="pm-insert-block menu_button" title="An empty block">Block</button>
+                        <button class="pm-insert-group menu_button" title="An empty group heading (Pick one or Pick many): Insert → Block with it selected adds its options">Group heading</button>
                     </span>
                 </span>
                 <button class="pm-block-duplicate menu_button" title="Copy the selected block directly below it">Duplicate</button>
@@ -488,6 +489,7 @@ export function createPresetsTab(pane, bridge) {
         }, { signal: nextView.ac.signal });
         q('.pm-insert-section').addEventListener('click', () => void insertSection(nextView));
         q('.pm-insert-block').addEventListener('click', () => void insertBlock(nextView));
+        q('.pm-insert-group').addEventListener('click', () => void insertGroup(nextView));
         nextView.dupBtn.addEventListener('click', () => void duplicateBlock(nextView));
         nextView.undoBtn.addEventListener('click', () => void historyOp(id, 'undo'));
         nextView.redoBtn.addEventListener('click', () => void historyOp(id, 'redo'));
@@ -573,7 +575,7 @@ export function createPresetsTab(pane, bridge) {
             setStatus(a.refuse, true);
             return;
         }
-        if (a.op) void runOps(id, [a.op]).catch(() => {});
+        if (a.op) void runOps(id, [a.op]).then(() => { if (a.note) setStatus(a.note); }).catch(() => {});
     }
 
     /** Why "Make group from selection" is unavailable now, or '' when it is available. */
@@ -765,7 +767,46 @@ export function createPresetsTab(pane, bridge) {
         await runInsertOp(v, { op: 'addBlock', name: 'New block', after: insertAnchor(v.id) });
     }
 
-    /** Shared addSection/addBlock runner: select + scroll to the new row. */
+    /** Add an empty headed group below the selected row (or at the end), asking for name + cardinality. */
+    async function insertGroup(/** @type {PresetView} */ v) {
+        v.insertMenu.hidden = true;
+        const form = document.createElement('div');
+        form.className = 'pm-addgrp-form';
+        const title = document.createElement('div');
+        title.textContent = 'Group heading';
+        const nameLabel = document.createElement('label');
+        nameLabel.append('Name ');
+        const nameInput = document.createElement('input');
+        nameInput.type = 'text';
+        nameInput.className = 'pm-addgrp-name text_pole';
+        nameInput.value = 'New group';
+        nameLabel.append(nameInput);
+        const radioLabel = (/** @type {string} */ value, /** @type {string} */ text, /** @type {boolean} */ checked) => {
+            const label = document.createElement('label');
+            const input = document.createElement('input');
+            input.type = 'radio';
+            input.name = 'pm-addgrp-card';
+            input.value = value;
+            input.checked = checked;
+            label.append(input, ` ${text}`);
+            return label;
+        };
+        form.append(
+            title,
+            nameLabel,
+            radioLabel('pick-one', 'Pick one (1)', true),
+            radioLabel('pick-one-or-more', 'Pick many (N)', false),
+        );
+        const res = await ctx().callGenericPopup(form, ctx().POPUP_TYPE.CONFIRM, '', { okButton: 'Add group', cancelButton: 'Cancel' });
+        if (res !== ctx().POPUP_RESULT.AFFIRMATIVE) return;
+        const name = nameInput.value.trim();
+        if (!name) return;
+        const checked = /** @type {HTMLInputElement|null} */ (form.querySelector('input[name="pm-addgrp-card"]:checked'));
+        const cardinality = checked?.value === 'pick-one-or-more' ? 'pick-one-or-more' : 'pick-one';
+        await runInsertOp(v, { op: 'addGroup', name, cardinality, after: insertAnchor(v.id) });
+    }
+
+    /** Shared addSection/addBlock/addGroup runner: select + scroll to the new row. */
     async function runInsertOp(/** @type {PresetView} */ v, /** @type {any} */ op) {
         const id = v.id;
         try {
@@ -898,7 +939,7 @@ export function createPresetsTab(pane, bridge) {
             } else {
                 btn.classList.remove('pm-disabled');
                 btn.setAttribute('aria-disabled', 'false');
-                btn.title = a.label.startsWith('Unmake') ? unmakeTitle : normalTitle;
+                btn.title = a.note ?? (a.label.startsWith('Unmake') ? unmakeTitle : normalTitle);
             }
         }
     }

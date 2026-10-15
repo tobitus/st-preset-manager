@@ -766,24 +766,34 @@ function opAddBlock(doc, a) {
 }
 
 /**
- * Insert an empty FF-style section heading block: a fresh block (empty
- * content) becomes a new section-heading leaf. Rows below it up to the next
- * section heading (or the end) become its children. `before` (a leaf key)
- * lands right above the anchor (an anchor on a group option snaps above the
- * whole group so it never splits it); `after` (exclusive with `before`)
- * lands below the anchor: after an item, after the whole group for a group
- * or option, after the whole section for a section. Neither = end of the
- * first sequence. ON only in the active loadout, off everywhere else.
+ * Insert one empty heading block: a fresh block (empty content) becomes a new
+ * heading leaf of the given rank. `before` (a leaf key) lands right above the
+ * anchor (an anchor on a group option snaps above the whole group so it never
+ * splits it); `after` (exclusive with `before`) lands below the anchor. Neither
+ * = end of the first sequence. ON only in the active loadout, off elsewhere.
+ *   section  rows below it up to the next section heading become its children;
+ *            `after` lands below an item, after the whole group for a group or
+ *            option, after the whole section for a section.
+ *   group    an empty headed group (pick-one / pick-one-or-more); `after` a
+ *            section heading lands as the section's first row, after a group
+ *            or option lands after the whole group, and it never splits a
+ *            group or swallows a headerless option run (it skips past it).
+ *            `before` that would land directly above a headerless option run
+ *            is refused (400).
+ * Every refusal happens before any mutation.
  * @param {any} doc
  * @param {{ name?: string, before?: string|null, after?: string|null }} a
+ * @param {'section'|'group'} rank
+ * @param {{ name: string, cardinality: string, guessed: boolean }|null} gmeta group meta (group rank only)
+ * @param {string} opName for error messages
  */
-function opAddSection(doc, a) {
-    if (typeof a?.name !== 'string' || !a.name.trim()) throw new OpError('addSection needs {name}');
+function insertHeading(doc, a, rank, gmeta, opName) {
+    if (typeof a?.name !== 'string' || !a.name.trim()) throw new OpError(`${opName} needs {name}`);
     if (a.before != null && typeof a.before !== 'string') {
-        throw new OpError('addSection before must be a leaf key');
+        throw new OpError(`${opName} before must be a leaf key`);
     }
     if (a.after != null && typeof a.after !== 'string') {
-        throw new OpError('addSection after must be a leaf key');
+        throw new OpError(`${opName} after must be a leaf key`);
     }
     if (a.before != null && a.after != null) throw new OpError('use before or after, not both');
     activeLoadout(doc); // preset has no active loadout -> 409 before any mutation
@@ -794,7 +804,12 @@ function opAddSection(doc, a) {
     if (key0 != null && !anchor) throw new OpError(`no row with key ${JSON.stringify(key0)}`, 404);
     const identifier = mintIdentifiers(doc, 1)[0];
     const key = newKey('row');
-    const entry = { leaf: { kind: 'block', ref: identifier, key }, rank: 'section', gmeta: null, sname: name };
+    const entry = {
+        leaf: { kind: 'block', ref: identifier, key },
+        rank,
+        gmeta: gmeta ? { ...gmeta } : null,
+        sname: rank === 'section' ? name : null,
+    };
     /** @type {any} */
     let seq;
     /** @type {any[]} */
@@ -802,9 +817,20 @@ function opAddSection(doc, a) {
     if (anchor) {
         seq = anchor.seq;
         entries = anchor.flat;
-        const at = a.after != null
-            ? landingAfter(entries, anchor.idx, 'section').at
-            : entries[anchor.idx].rank === 'option' ? snapAboveGroup(entries, anchor.idx) : anchor.idx;
+        let at;
+        if (a.after != null) {
+            const land = landingAfter(entries, anchor.idx, rank);
+            at = land.at;
+            if (rank === 'group') entry.sname = land.sname;
+        } else {
+            at = entries[anchor.idx].rank === 'option' ? snapAboveGroup(entries, anchor.idx) : anchor.idx;
+            if (rank === 'group') {
+                if (entries[at]?.rank === 'option') {
+                    throw new OpError('a group heading cannot land directly above a headerless group (it would take its rows as options)');
+                }
+                entry.sname = entries[at - 1]?.sname ?? null;
+            }
+        }
         entries.splice(at, 0, entry);
     } else {
         seq = (doc.sequences ?? [])[0];
@@ -827,6 +853,33 @@ function opAddSection(doc, a) {
     }
     activeLoadout(doc).enabled[identifier] = true;
     return { identifier, key };
+}
+
+/**
+ * Insert an empty FF-style section heading block (see insertHeading).
+ * @param {any} doc
+ * @param {{ name?: string, before?: string|null, after?: string|null }} a
+ */
+function opAddSection(doc, a) {
+    return insertHeading(doc, a, 'section', null, 'addSection');
+}
+
+/**
+ * Insert an empty headed group (see insertHeading). The heading is stored as
+ * typed (no `== ==` wrapping); cardinality defaults to pick-one-or-more.
+ * @param {any} doc
+ * @param {{ name?: string, cardinality?: string, before?: string|null, after?: string|null }} a
+ */
+function opAddGroup(doc, a) {
+    if (a?.cardinality !== undefined && a.cardinality !== 'pick-one' && a.cardinality !== 'pick-one-or-more') {
+        throw new OpError(`bad cardinality ${JSON.stringify(a.cardinality)}`);
+    }
+    const name = typeof a?.name === 'string' ? a.name.trim() : '';
+    return insertHeading(doc, a, 'group', {
+        name,
+        cardinality: a.cardinality ?? 'pick-one-or-more',
+        guessed: false,
+    }, 'addGroup');
 }
 
 /**
@@ -1320,6 +1373,7 @@ function dispatchOp(doc, op, a) {
         case 'editBlock': return opEditBlock(doc, a);
         case 'addBlock': return opAddBlock(doc, a);
         case 'addSection': return opAddSection(doc, a);
+        case 'addGroup': return opAddGroup(doc, a);
         case 'deleteBlock': return opDeleteBlock(doc, a);
         case 'setNotes': return opSetNotes(doc, a);
         default: throw new OpError(`unknown op '${op}'`);
