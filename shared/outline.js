@@ -18,7 +18,6 @@
  * re-ranked at all — they have no name/content).
  */
 import { newKey } from './canonical.js';
-import { HEADING_SEMANTICS } from './headings.js';
 
 export const LEAF_KINDS = ['marker', 'block', 'ghost'];
 export const RANKS = ['option', 'item', 'group', 'section'];
@@ -294,9 +293,6 @@ export function promote(doc, key) {
         } else {
             e.gmeta = { name: label(doc, leaf), cardinality: 'pick-one-or-more', guessed: false };
         }
-        // the promoted block (possibly @mutual-exclusive-group-tagged) is now
-        // a genuine round-3 heading, never a legacy first-member heading
-        doc.source.headingSemantics = HEADING_SEMANTICS;
         if (e.sname != null && e.sname !== label(doc, leaf)) {
             leaf._sname = e.sname; // demote(group) restores the section name
         }

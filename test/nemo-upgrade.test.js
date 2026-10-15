@@ -152,15 +152,19 @@ test('upgradeDoc leaves alone: a sub-header-headed pick-one group, a header tagg
         ['sola3', '{{// @mutual-exclusive-group V }}\nh'],
     ]) {
         const doc = mk(kind, content);
-        const snap = structuredClone(doc);
         upgradeDoc(doc);
-        assert.deepEqual(doc, snap, `${kind}: ${JSON.stringify(content)}`);
+        // nothing was converted: the group shape, bits and rows are untouched
+        // (only the generation marker at source level is new — upgradeDoc
+        // stamps every doc it processes, see its tail)
+        assert.deepEqual(shape(doc), [['V', 'h', ['a', 'b']]], `${kind}: ${JSON.stringify(content)}`);
+        assert.equal(doc.source.headingSemantics, HEADING_SEMANTICS);
+        assert.deepEqual(doc.loadouts.L.enabled, { h: true, a: true, b: false }, `${kind}: bits untouched`);
     }
     // a pick-many group headed by a tagged member is not a former first-member heading either
     const many = mk('nemo', '{{// @mutual-exclusive-group V }}\nh');
     many.sequences[0].rows[0].cardinality = 'pick-one-or-more';
-    const snap = structuredClone(many);
-    assert.deepEqual(upgradeDoc(many), snap);
+    upgradeDoc(many);
+    assert.deepEqual(shape(many), [['V', 'h', ['a', 'b']]]);
     // ...but the same shape as pick-one IS upgraded
     const yes = upgradeDoc(mk('nemo', '{{// @mutual-exclusive-group V }}\nh'));
     assert.deepEqual(collectGroups(yes)[0].options.map(idOf), ['h', 'a', 'b']);
@@ -206,7 +210,7 @@ test('store: a native upload of the pre-round-3 fixture is upgraded too', async 
 
 // ----------------------------------------------------- heading-semantics marker
 
-import { applyDocOp } from '../shared/docops.js';
+import { applyDocOp, copyIntoDoc, copyPayloadFromDoc } from '../shared/docops.js';
 import { deriveStructure } from '../shared/outline.js';
 import { HEADING_SEMANTICS } from '../shared/headings.js';
 import { Store as Store2 } from '../plugin/store.js';
@@ -303,4 +307,130 @@ test('validateDoc accepts the marker and rejects a foreign value', () => {
     assert.deepEqual(validateDoc(bad), ['source.headingSemantics']);
     const old = loadOld();
     assert.deepEqual(validateDoc(old), [], 'absent (legacy) is valid');
+});
+
+/** The legacy fixture with Q made HEADERLESS (no legacy first-member heading
+ * left to convert): the shape a doc has after the owner dissolved Q on the
+ * OLD code. Q sits inside section '=== Head ===' between P and R; its options
+ * become plain rows at the same flat position. */
+function legacyHeaderlessQ() {
+    const old = loadOld();
+    const sec = old.sequences[0].rows[0];
+    const idx = sec.rows.findIndex((/** @type {any} */ r) => r.kind === 'group' && r.name === 'Q');
+    const g = sec.rows[idx];
+    sec.rows.splice(idx, 1, ...(g.options ?? []).map((/** @type {any} */ o) => o));
+    return old;
+}
+
+test('an initially headerless legacy Nemo doc gains the marker with zero conversions', () => {
+    const raw = legacyHeaderlessQ();
+    // the playstyle keeps a sparse q1 bit; clear it so the doc stays valid
+    // with q1 promoted out of every group (it is a plain item now)
+    for (const l of Object.values(raw.loadouts)) delete l.enabled.q1;
+    const doc = upgradeDoc(structuredClone(raw));
+    assert.equal(doc.source.headingSemantics, HEADING_SEMANTICS, 'stamped with nothing to convert');
+    assert.deepEqual(collectGroups(doc).map((g) => g.name), ['P', 'R', 'S']);
+    assert.deepEqual(validateDoc(doc), []);
+});
+
+test('a tagged heading copied into an unmarked Nemo doc survives the next upgrade', () => {
+    // src: the upgraded fixture, Q headed by the TAGGED q1 (Make group from
+    // selection); the payload carries q1's @mutual-exclusive-group content
+    const src = postRound3UserHeading().doc;
+    const payload = copyPayloadFromDoc(src, { group: collectGroups(src).find((g) => idOf(g.header) === 'q1').key });
+    assert.equal(payload.kind, 'group');
+    assert.ok(payload.header, 'payload has a heading');
+
+    /** copy the payload into `raw` (headerless-Q legacy shape, q1/q2/q3 plain
+     * items) the way the app reaches that state: the doc is loaded (first
+     * upgradeDoc stamps it, nothing to convert), THEN the headed group is
+     * copied in. copyIntoDoc mints FRESH p_… ids for the copied heading +
+     * option, so the copy is found by its group name. */
+    const withCopy = (/** @type {any} */ raw) => {
+        for (const l of Object.values(raw.loadouts)) delete l.enabled.q1;
+        upgradeDoc(raw); // the boot/rescan stamp with zero conversions
+        assert.equal(raw.source.headingSemantics, HEADING_SEMANTICS);
+        deriveStructure(raw);
+        copyIntoDoc(raw, payload, null);
+        return raw;
+    };
+    const contentOf = (/** @type {any} */ d, /** @type {any} */ g) => d.blocks[idOf(g.header)]?.content;
+    const tagged = (/** @type {any} */ c) => String(c).startsWith('{{// @mutual-exclusive-group Q }}');
+
+    const doc = withCopy(legacyHeaderlessQ());
+    const copied = collectGroups(doc).find((g) => g.name === 'Q one');
+    assert.ok(copied && tagged(contentOf(doc, copied)), 'headed copy landed with its tagged heading');
+    // enable the copy (fresh ids start off in every loadout): heading + option
+    const copyRes = copyIntoDoc(doc, payload, null);
+    applyDocOp(doc, 'toggle', { identifier: copyRes.identifiers[0], value: true });
+    applyDocOp(doc, 'toggle', { identifier: copyRes.identifiers[1], value: true });
+
+    // the NEXT rescan-shaped upgrade must NOT migrate the copied heading
+    const after = structuredClone(doc);
+    upgradeDoc(after);
+    assert.deepEqual(after, doc, 'upgrade after the copy is byte-identical');
+    assert.ok(tagged(contentOf(after, copied)), 'the copied heading keeps its tagged content');
+    assert.deepEqual(
+        copied.options.map((/** @type {any} */ o) => contentOf(after, { header: o })),
+        ['{{// @mutual-exclusive-group Q }}\nq2 text'],
+        'options not rewritten',
+    );
+    assert.deepEqual(validateDoc(after), []);
+    assert.ok(sent(after, after.activeLoadoutId).text.includes('q2 text'), 'the copy compiles');
+});
+
+test('promote of a tagged block in an unmarked Nemo doc survives the next upgrade', () => {
+    const doc = structuredClone(legacyHeaderlessQ());
+    for (const l of Object.values(doc.loadouts)) delete l.enabled.q1;
+    upgradeDoc(doc); // boot/rescan stamp (zero conversions — Q is headerless)
+    deriveStructure(doc);
+    const keyOf = (/** @type {string} */ id) => {
+        for (const e of flattenSeq(doc.sequences[0].rows)) if (idOf(e.leaf) === id) return e.leaf.key;
+        throw new Error(`no leaf ${id}`);
+    };
+    // q1 is gone with the legacy header; q2 is the tagged block left plain
+    applyDocOp(doc, 'promote', { key: keyOf('q2') });
+    applyDocOp(doc, 'setCardinality', { key: `grp:${keyOf('q2')}`, cardinality: 'pick-one' });
+    applyDocOp(doc, 'toggle', { identifier: 'q2', value: true });
+    const after = upgradeDoc(doc);
+    const g = collectGroups(after).find((x) => idOf(x.header) === 'q2');
+    assert.ok(g, 'the promoted heading is still the heading after upgrade');
+    assert.equal(after.source.headingSemantics, HEADING_SEMANTICS);
+    assert.deepEqual(validateDoc(after), []);
+});
+
+test('a source:null native doc: ops that mint a heading do not throw and validate', () => {
+    const mk = () => {
+        const doc = structuredClone(loadOld());
+        doc.source = null; // a stored native doc may carry no source at all
+        return doc;
+    };
+    // upgradeDoc itself is null-safe and stamps
+    const up = upgradeDoc(mk());
+    assert.equal(up.source.headingSemantics, HEADING_SEMANTICS);
+    assert.deepEqual(validateDoc(up), []);
+
+    // createGroup with a heading on a source:null doc (no upgrade first)
+    const a = structuredClone(loadOld());
+    a.source = null;
+    deriveStructure(a);
+    const keyOfA = (/** @type {string} */ id) => {
+        for (const e of flattenSeq(a.sequences[0].rows)) if (idOf(e.leaf) === id) return e.leaf.key;
+        throw new Error(`no leaf ${id}`);
+    };
+    applyDocOp(a, 'dissolveGroup', { key: collectGroups(a).find((g) => g.name === 'Q').key });
+    applyDocOp(a, 'createGroup', { headerKey: keyOfA('q1'), keys: [keyOfA('q2')], cardinality: 'pick-one' });
+    assert.deepEqual(validateDoc(a), []);
+
+    // promote item -> group on a source:null doc (no upgrade first)
+    const b = structuredClone(loadOld());
+    b.source = null;
+    deriveStructure(b);
+    applyDocOp(b, 'dissolveGroup', { key: collectGroups(b).find((g) => g.name === 'Q').key });
+    const keyOfB = (/** @type {string} */ id) => {
+        for (const e of flattenSeq(b.sequences[0].rows)) if (idOf(e.leaf) === id) return e.leaf.key;
+        throw new Error(`no leaf ${id}`);
+    };
+    applyDocOp(b, 'promote', { key: keyOfB('q1') });
+    assert.deepEqual(validateDoc(b), []);
 });

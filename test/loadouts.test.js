@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { effectiveEnabled, inheritResetKeys } from '../shared/loadouts.js';
+import { HEADING_SEMANTICS } from '../shared/headings.js';
 import { validateDoc, validateRegistry, upgradeDoc, upgradeRegistry } from '../shared/schema.js';
 import { compile, exportSt, CompileError } from '../shared/compile.js';
 import { comparePresets } from '../shared/compare.js';
@@ -238,12 +239,15 @@ test('upgradeDoc: old shape loads, validates, every loadout is a root, compile i
         JSON.stringify(compile(oldDoc(), null, {}, 'L2').compiled.prompt_order), 'non-active loadout compile unchanged');
 });
 
-test('upgradeDoc: idempotent; a new-shape doc is untouched', () => {
+test('upgradeDoc: idempotent; a new-shape doc only gains the generation marker', () => {
     const once = upgradeDoc(oldDoc());
     const twice = upgradeDoc(structuredClone(once));
     assert.deepEqual(twice, once);
     const fresh = mkDoc();
-    assert.deepEqual(upgradeDoc(structuredClone(fresh)), fresh);
+    const up = upgradeDoc(structuredClone(fresh));
+    assert.equal(up.source.headingSemantics, HEADING_SEMANTICS, 'stamped at the boundary');
+    // a null source is initialized to an object so the marker has a home
+    assert.deepEqual({ ...up, source: null }, fresh, 'everything else is untouched');
 });
 
 test('upgradeRegistry: tuning -> tunings{default}, defaultTuning; idempotent; valid', () => {

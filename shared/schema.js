@@ -362,7 +362,6 @@ function upgradeNemoHeadings(doc) {
             `upgrade: group '${name}' got a default heading; its former heading ` +
                 `'${doc.blocks[header.ref]?.name || header.ref}' is now an option`,
         );
-        doc.source.headingSemantics = HEADING_SEMANTICS;
     });
 }
 
@@ -397,6 +396,17 @@ export function upgradeDoc(doc) {
         }
     }
     upgradeNemoHeadings(doc);
+    // every document processed under this code lives by round-3 heading
+    // rules from now on — converted or not, Nemo or not: the legacy
+    // first-member-heading conversion must never run on it again, even if
+    // it had no eligible heading at upgrade time and a genuine tagged
+    // heading appears later (copyIntoDoc of a headed group, dissolve ->
+    // make group, promote). Null-safe: a native doc may carry `source: null`
+    // (validateDoc allows it), and every marker writer must tolerate that.
+    if (doc !== null && typeof doc === 'object') {
+        if (doc.source === null || typeof doc.source !== 'object') doc.source = {};
+        doc.source.headingSemantics = HEADING_SEMANTICS;
+    }
     delete doc.tuningOverrides;
     return doc;
 }
