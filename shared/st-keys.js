@@ -138,3 +138,10 @@ export const ST_MARKER_IDS = [
 export function isStMarkerIdentifier(identifier) {
     return ST_MARKER_IDS.includes(identifier);
 }
+
+/**
+ * ST's fixed system-prompt identifiers (openai.js chatCompletionDefaultPrompts,
+ * system_prompt: true). ST's PromptManager re-adds any of them a preset lacks,
+ * so a copy of a preset must keep them as they are (a fork never re-mints them).
+ */
+export const ST_SYSTEM_PROMPT_IDS = ['main', 'nsfw', 'jailbreak', 'enhanceDefinitions'];

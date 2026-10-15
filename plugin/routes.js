@@ -20,7 +20,7 @@ import { applyDocOp } from '../shared/docops.js';
 import { upgradeDoc } from '../shared/schema.js';
 import { resolveModel } from '../shared/models.js';
 import { canonicalHash, ulid, newId } from '../shared/util.js';
-import { TUNING_KEYS } from '../shared/st-keys.js';
+import { TUNING_KEYS, ST_SYSTEM_PROMPT_IDS } from '../shared/st-keys.js';
 import { lineHunks } from '../shared/diff.js';
 import { comparePresets } from '../shared/compare.js';
 import { VERSION } from './version.js';
@@ -445,7 +445,7 @@ export function registerRoutes(router) {
 
     // POST /presets/:id/fork {name, folder?, tags?, notes?} -> 201 {doc, rev}.
     // Save-as: a deep copy under a new id with every block identifier
-    // re-minted (and every leaf ref/ghost identifier re-pointed). The fork's
+    // re-minted (except ST's fixed system prompts, which keep theirs) and every leaf ref/ghost identifier re-pointed. The fork's
     // loadout bits, groups and notes copy over unchanged.
     router.post('/presets/:id/fork', async (req, res, next) => {
         try {
@@ -470,16 +470,17 @@ export function registerRoutes(router) {
                     if (typeof notes !== 'string') throw new StoreError('notes must be a string', 400);
                     doc.notes = notes;
                 }
-                // re-mint every block identifier; re-point all leaf refs
+                // re-mint every block identifier except ST's fixed system
+                // prompts (they keep theirs); re-point all leaf refs
                 const remap = new Map(/** @type {[string, string][]} */ ([]));
                 doc.blocks ??= {};
                 for (const ident of /** @type {string[]} */ (Object.keys(doc.blocks))) {
-                    remap.set(ident, newId());
+                    if (!ST_SYSTEM_PROMPT_IDS.includes(ident)) remap.set(ident, newId());
                 }
                 const reblock = /** @type {Record<string, any>} */ ({});
                 for (const [ident, block] of Object.entries(doc.blocks)) {
                     const fresh = structuredClone(block);
-                    fresh.identifier = remap.get(ident);
+                    fresh.identifier = remap.get(ident) ?? ident;
                     reblock[fresh.identifier] = fresh;
                 }
                 doc.blocks = reblock;

@@ -27,6 +27,9 @@ import { createShelfTab } from './tabs/shelf.js';
 import { createSettingsTab } from './tabs/settings.js';
 import { clampRect } from './layout.js';
 
+/** @type {WeakMap<HTMLElement, string>} last failed library action's message per .pm-root, kept across re-renders until the next successful library action */
+const libraryErrors = new WeakMap();
+
 /**
  * @param {{ title: string, content: string, onClose?: () => void, persistKey?: string }} opts
  * @returns {{ root: HTMLElement, body: HTMLElement, close: () => void }}
@@ -374,15 +377,30 @@ export function renderLibrary(root, bridge, state = {}) {
         const items = state.items ?? [];
         const tag = filter.value.trim();
         const filtered = tag ? items.filter((i) => i.tags.includes(tag)) : items;
-        list.replaceChildren(...filtered.map((item) => libraryRow(item, state.desired?.presetId, () => {
+        list.replaceChildren(...filtered.map((item) => libraryRow(root, item, state.desired?.presetId, () => {
             void refresh(root, bridge, state);
         }, state.onOpen, bridge)));
+        const err = libraryErrors.get(root);
+        if (typeof err === 'string') showLibraryError(list, err);
     };
     filter.addEventListener('input', render);
     render();
 }
 
-function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredId, /** @type {() => void} */ onChange, /** @type {((presetId: string) => void)|undefined} */ onOpen, /** @type {import('./bridge.js').Bridge} */ bridge) {
+/**
+ * Show `text` as the single `.pm-error` atop a library list, replacing any earlier one.
+ * @param {HTMLElement} list
+ * @param {string} text
+ */
+function showLibraryError(list, text) {
+    list.querySelector(':scope > .pm-error')?.remove();
+    const div = document.createElement('div');
+    div.className = 'pm-error';
+    div.textContent = text;
+    list.prepend(div);
+}
+
+function libraryRow(/** @type {HTMLElement} */ root, /** @type {any} */ item, /** @type {string|null} */ desiredId, /** @type {() => void} */ onChange, /** @type {((presetId: string) => void)|undefined} */ onOpen, /** @type {import('./bridge.js').Bridge} */ bridge) {
     const row = document.createElement('div');
     row.className = 'pm-library-row' + (item.id === desiredId ? ' pm-in-slot' : '');
     row.dataset.presetId = item.id;
@@ -403,6 +421,7 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
         <span class="pm-name">${escapeHtml(item.name)}</span>${badge}${tags}
         <span class="pm-row-actions">${loadouts}
             <button class="menu_button pm-open" title="Open in the Presets tab">Open</button>
+            <button class="menu_button pm-fork" title="Copy this preset under a new name (fresh block ids) and open the copy">Fork</button>
             <button class="menu_button pm-load" title="Load into working slot">Load</button>
             <button class="menu_button pm-delete" title="Delete from the library">Delete</button>
         </span>`;
@@ -410,7 +429,27 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
     row.querySelector('.pm-load')?.addEventListener('click', async () => {
         const lid = /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.value ?? undefined;
         await loadSlot(bridge, item.id, lid);
+        libraryErrors.delete(root);
         onChange();
+    });
+    /** @param {any} err remembers the server's `error` text (else the Error message) and shows it once, atop the library list */
+    const showError = (err) => {
+        const text = `Preset Manager: ${err?.body?.error ?? /** @type {Error} */ (err).message}`;
+        libraryErrors.set(root, text);
+        showLibraryError(/** @type {HTMLElement} */ (row.closest('.pm-library-list') ?? row), text);
+    };
+    row.querySelector('.pm-fork')?.addEventListener('click', async () => {
+        const raw = await ctx().callGenericPopup('Fork name', ctx().POPUP_TYPE.INPUT, `${item.name} fork`);
+        if (typeof raw !== 'string' || !raw.trim()) return; // cancel / blank: nothing
+        try {
+            const res = await bridge.edit(() => api('POST', `/presets/${item.id}/fork`, { name: raw.trim() }));
+            libraryErrors.delete(root);
+            onChange();
+            const newId = res?.doc?.id;
+            if (newId) onOpen?.(newId);
+        } catch (err) {
+            showError(err);
+        }
     });
     row.querySelector('.pm-delete')?.addEventListener('click', async () => {
         let text = `Delete "${item.name}" from the library? Its revision history is removed too.`;
@@ -421,14 +460,10 @@ function libraryRow(/** @type {any} */ item, /** @type {string|null} */ desiredI
         if (res !== ctx().POPUP_RESULT.AFFIRMATIVE) return;
         try {
             await bridge.edit(() => api('DELETE', `/presets/${item.id}`));
+            libraryErrors.delete(root);
             onChange();
         } catch (err) {
-            const host = /** @type {HTMLElement} */ (row.closest('.pm-library-list') ?? row);
-            host.querySelector(':scope > .pm-error')?.remove();
-            const div = document.createElement('div');
-            div.className = 'pm-error';
-            div.textContent = `Preset Manager: ${/** @type {Error} */ (err).message}`;
-            host.prepend(div);
+            showError(err);
         }
     });
     /** @type {HTMLSelectElement|null} */ (row.querySelector('.pm-loadout-select'))?.addEventListener('change', (ev) => {
