@@ -320,12 +320,12 @@ export function createPresetsTab(pane, bridge) {
                 </div>
             </div>
             <div class="pm-rank-bar">
-                <button class="pm-rank-promote menu_button" title="Promote the selected row">Promote (Tab)</button>
-                <button class="pm-rank-demote menu_button" title="Demote the selected row">Demote (Shift+Tab)</button>
-                <button class="pm-move-up menu_button" title="Move the selected row up">↑ (Alt+↑)</button>
-                <button class="pm-move-down menu_button" title="Move the selected row down">↓ (Alt+↓)</button>
-                <button class="pm-rank-make-section menu_button" title="Turn the selected plain row into a section heading (the rows below it become its children)">Make section heading (Alt+S)</button>
-                <button class="pm-rank-make-group menu_button" title="Turn the selected plain row into a group heading">Make group heading (Alt+G)</button>
+                <button class="pm-rank-promote menu_button" title="Promote the selected row (Tab)">Promote</button>
+                <button class="pm-rank-demote menu_button" title="Demote the selected row (Shift+Tab)">Demote</button>
+                <button class="pm-move-up menu_button" title="Move the selected row up (Alt+↑)">↑</button>
+                <button class="pm-move-down menu_button" title="Move the selected row down (Alt+↓)">↓</button>
+                <button class="pm-rank-make-section menu_button" title="Turn the selected plain row into a section heading (Alt+S) — the rows below it become its children">Make section heading</button>
+                <button class="pm-rank-make-group menu_button" title="Turn the selected plain row into a group heading (Alt+G)">Make group heading</button>
                 <button class="pm-rank-make-group-sel menu_button" title="Make one group from the selected adjacent rows (Ctrl/Shift-click to select)">Make group from selection</button>
                 <button class="pm-shelf-save menu_button" title="Save the selected block to the shelf">Save to shelf</button>
                 <button class="pm-shelf-toggle menu_button" title="Show the shelf list (drag blocks into this preset)">Shelf ▸</button>

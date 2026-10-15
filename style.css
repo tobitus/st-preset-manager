@@ -210,7 +210,8 @@
     display: flex;
     align-items: center;
     gap: 6px;
-    flex-wrap: wrap;
+    flex-wrap: nowrap; /* one row: wrapping steals height from the outline pane below, which changes drag-drop geometry (check-phase2 14) */
+    overflow-x: auto;
     margin-bottom: 6px;
 }
 
