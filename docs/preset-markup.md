@@ -270,20 +270,17 @@ plain blocks — with a span note, until linked groups ship.
 
 ## 9. Open questions for the owner
 
-1. **Linked groups vs Nemo compatibility.** §4.6 changes the meaning of
-   existing Nemo presets that reuse one `@mutual-exclusive-group` key across
-   split runs (today: separate groups + span note; v0.1: one fused group).
-   Fuse for all Nemo presets once linked groups ship, or keep the
-   separate-import behaviour for `nemo` and apply §4.6 only to explicit v0.1
-   tagging?
-2. **`@default-option`**: PM has no field for a default. Drop the tag from
-   v0.1, or define it as an import side effect (initial `enabled` state) or a
-   note?
+1. **Linked groups vs Nemo compatibility. DECIDED (owner, 2026-10-17): do not fuse.**
+   The same `@mutual-exclusive-group` key in separate runs means separate
+   groups, as Nemo intends (Nemo's own extension reads these tags). §4.2/§4.6
+   must change: linking needs its own explicit marking (open: 7).
+2. **`@default-option`. DECIDED (owner, 2026-10-17): initial enabled state.** On
+   import it sets which option starts on; it is not stored as a separate default.
 3. **Dual group-tag conflict** (§4.7 rule 3): is "pick-one wins" the intended
    reading, or should the block be treated as ambiguous and stay plain?
-4. **Nemo's foreign tags** (`@header`, `@category`, …): the draft leaves them
-   undefined and ignored. Should the convention explicitly reserve a namespace
-   (e.g. `@pm-*`) for future structural keys instead?
+4. **Namespace. DECIDED (owner, 2026-10-17): reserve one** for future
+   structural keys; Nemo's foreign display tags stay ignored. Prefix still to
+   be named.
 5. **Write-back**: when a tool renames or dissolves a group, should it rewrite
    tags in block content? Out of scope here, but it decides how much of §2 a
    writer-side implementation needs.
