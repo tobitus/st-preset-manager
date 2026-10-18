@@ -2,12 +2,15 @@
 /**
  * Compile dry run: proves, on a COPY of a real library, that the current
  * shared/ code compiles every preset byte-identically to an older checkout
- * and that loading (upgradeDoc) changes no document.
+ * and loads (upgradeDoc) every document to the same bytes as the older code.
  *
  *   node dev/compile-dryrun.mjs <lib-copy-dir> <old-tree-dir>
  *
  * Read-only against <lib-copy-dir>. Exit 1 when any order/text difference,
- * upgradeDoc change, non-idempotent upgrade or rebuild difference is found.
+ * an upgradeDoc result that differs from the old tree's, a non-idempotent
+ * upgrade or a rebuild difference is found. Documents the OLD code upgrades
+ * too (e.g. stored before a stamp was added) are counted and listed as
+ * information: loading changes them either way.
  */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -27,6 +30,7 @@ if (!libDir || !oldTree) {
 const importOld = (file) => import(pathToFileURL(path.resolve(oldTree, file)).href);
 const oldCompile = (await importOld('shared/compile.js')).compile;
 const oldOutline = await importOld('shared/outline.js');
+const oldUpgradeDoc = (await importOld('shared/schema.js')).upgradeDoc;
 
 /**
  * @param {string} dir
@@ -144,6 +148,7 @@ let bothThrow = 0;
 let orderDiffs = 0;
 let textDiffs = 0;
 let changed = 0;
+let changedByThisCode = 0;
 let notIdempotent = 0;
 let rebuildDiffs = 0;
 let linkSites = 0;
@@ -167,13 +172,19 @@ for (const file of files) {
     }
     presets++;
 
-    // (1) upgrade check
+    // (1) upgrade check: the new upgradeDoc must give the old one's bytes;
+    // a doc the old code upgrades too is pending an earlier upgrade (info)
     const a = JSON.stringify(doc);
     const u1 = upgradeDoc(structuredClone(doc));
     const u2 = upgradeDoc(structuredClone(u1));
+    const uOld = JSON.stringify(oldUpgradeDoc(structuredClone(doc)));
+    if (JSON.stringify(u1) !== uOld) {
+        changedByThisCode++;
+        console.log(`UPGRADE DIFFERS FROM OLD TREE ${rel}`);
+    }
     if (JSON.stringify(u1) !== a) {
         changed++;
-        console.log(`UPGRADE CHANGED ${rel}`);
+        console.log(`UPGRADE CHANGED ${rel}${uOld === JSON.stringify(u1) ? ' (the old tree upgrades it identically: pending earlier upgrade)' : ''}`);
     }
     if (JSON.stringify(u2) !== JSON.stringify(u1)) {
         notIdempotent++;
@@ -276,10 +287,10 @@ console.log(`presets: ${presets} (skipped ${skipped})`);
 console.log(`combinations compiled: ${combos} (both threw: ${bothThrow})`);
 console.log(`order differences: ${orderDiffs}`);
 console.log(`text differences: ${textDiffs}`);
-console.log(`docs changed by upgradeDoc: ${changed}`);
+console.log(`docs changed by upgradeDoc: ${changed} (differently from the old tree: ${changedByThisCode})`);
 console.log(`upgradeDoc not idempotent: ${notIdempotent}`);
 console.log(`rebuild round-trip differs from old tree: ${rebuildDiffs}`);
 console.log(`candidate link sites: ${linkSites}`);
 console.log(`docs with cross-sequence option overlap: ${overlapDocs}`);
 
-process.exit(orderDiffs || textDiffs || changed || notIdempotent || rebuildDiffs ? 1 : 0);
+process.exit(orderDiffs || textDiffs || changedByThisCode || notIdempotent || rebuildDiffs ? 1 : 0);
