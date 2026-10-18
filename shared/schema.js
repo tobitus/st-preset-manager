@@ -93,7 +93,10 @@ export function validateDoc(doc) {
         doc.sequences.forEach((s, i) => {
             if (typeof s?.character_id !== 'number') fail(`sequences[${i}].character_id`);
             if (!Array.isArray(s?.rows)) fail(`sequences[${i}].rows`);
-            else validateRows(s.rows, `sequences[${i}].rows`, errs);
+            else {
+                validateRows(s.rows, `sequences[${i}].rows`, errs);
+                validateRemote(s.rows, `sequences[${i}].rows`, errs);
+            }
         });
     }
     if (typeof doc.loadouts !== 'object' || doc.loadouts === null || Array.isArray(doc.loadouts)) {
@@ -188,10 +191,74 @@ function validateRows(rows, path, errs) {
                 });
                 validateRows(row.options, `${p}.options`, errs);
             }
+            if ('remote' in row) {
+                if (!Array.isArray(row.remote)) errs.push(`${p}.remote`);
+                else {
+                    row.remote.forEach((/** @type {any} */ k, /** @type {number} */ j) => {
+                        if (typeof k !== 'string') errs.push(`${p}.remote[${j}] (not a string)`);
+                    });
+                }
+            }
         } else {
             errs.push(`${p}.kind`);
         }
     });
+}
+
+/**
+ * Cross-row checks of group `remote` links, one sequence at a time: each
+ * string key must name a block-capable member leaf of THIS sequence (not a
+ * marker, ghost or heading), not the group's own header/option, and not be
+ * linked by an earlier group or earlier in the same list.
+ * @param {any[]} rows
+ * @param {string} path
+ * @param {string[]} errs
+ */
+function validateRemote(rows, path, errs) {
+    /** @type {Map<string, {leaf: any, role: 'item'|'option'|'heading'}>} */
+    const index = new Map();
+    /** @type {{grp: any, gpath: string}[]} */
+    const groups = [];
+    const add = (/** @type {any} */ leaf, /** @type {'item'|'option'|'heading'} */ role) => {
+        if (leaf && typeof leaf === 'object' && typeof leaf.key === 'string') index.set(leaf.key, { leaf, role });
+    };
+    const scan = (/** @type {any[]} */ list, /** @type {string} */ base, /** @type {boolean} */ top) => {
+        list.forEach((row, i) => {
+            if (!row || typeof row !== 'object') return;
+            const p = `${base}[${i}]`;
+            if (['marker', 'block', 'ghost'].includes(row.kind)) add(row, 'item');
+            else if (row.kind === 'section') {
+                add(row.header, 'heading');
+                if (top && Array.isArray(row.rows)) scan(row.rows, `${p}.rows`, false);
+            } else if (row.kind === 'group') {
+                add(row.header, 'heading');
+                if (Array.isArray(row.options)) for (const o of row.options) add(o, 'option');
+                groups.push({ grp: row, gpath: p });
+            }
+        });
+    };
+    scan(rows, path, true);
+    const claimed = new Set();
+    for (const { grp, gpath } of groups) {
+        if (!Array.isArray(grp.remote)) continue;
+        const own = new Set();
+        if (grp.header && typeof grp.header.key === 'string') own.add(grp.header.key);
+        if (Array.isArray(grp.options)) for (const o of grp.options) if (o && typeof o.key === 'string') own.add(o.key);
+        grp.remote.forEach((/** @type {any} */ key, /** @type {number} */ j) => {
+            if (typeof key !== 'string') return;
+            const hit = index.get(key);
+            /** @type {string|null} */
+            let reason = null;
+            if (!hit) reason = 'unknown';
+            else if (own.has(key)) reason = 'own member';
+            else if (hit.leaf.kind === 'marker') reason = 'marker';
+            else if (hit.leaf.kind === 'ghost') reason = 'ghost';
+            else if (hit.role === 'heading') reason = 'heading';
+            else if (claimed.has(key)) reason = 'duplicate';
+            if (reason) errs.push(`${gpath}.remote[${j}] (${reason})`);
+            else claimed.add(key);
+        });
+    }
 }
 
 function iterLeaves(doc) {
@@ -373,6 +440,8 @@ function upgradeNemoHeadings(doc) {
  * override is skipped and left for validateDoc to report. A Nemo document
  * whose pick-one group is headed by a former first-member option gets a
  * synthesized comment-only default heading; the old heading becomes an option.
+ * The additive group `remote` field needs no conversion and is never
+ * stripped; the version stays 1.
  * @param {any} doc
  * @returns {any} the same doc
  */

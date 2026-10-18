@@ -16,6 +16,10 @@
  * never touch enabled bits. Markers are only ever items: every op that would
  * make a marker a heading or an option raises OutlineError (ghosts cannot be
  * re-ranked at all — they have no name/content).
+ *
+ * A group row may carry `remote: string[]` — linked members: row keys of
+ * block leaves elsewhere in the SAME sequence. It rides in gmeta and is
+ * pruned by rebuildSeq, so every op keeps or drops links consistently.
  */
 import { newKey } from './canonical.js';
 
@@ -25,11 +29,14 @@ export const RANKS = ['option', 'item', 'group', 'section'];
 export class OutlineError extends Error {}
 
 function gmetaOf(row) {
-    return {
+    /** @type {{name: string, cardinality: string, guessed: boolean, remote?: string[]}} */
+    const gm = {
         name: row.name ?? '',
         cardinality: row.cardinality ?? 'pick-one-or-more',
         guessed: !!row.guessed,
     };
+    if (Array.isArray(row.remote) && row.remote.length > 0) gm.remote = [...row.remote];
+    return gm;
 }
 
 /**
@@ -98,6 +105,47 @@ function firstLeafKey(rows) {
 const DEFAULT_GMETA = () => ({ name: '', cardinality: 'pick-one-or-more', guessed: false });
 
 /**
+ * Post-pass of rebuildSeq: drop every `remote` key that cannot be a linked
+ * member (unknown, not a block leaf, a heading/marker/ghost, the group's own
+ * header or option, or already claimed by an earlier group / earlier in the
+ * same list). An emptied list removes the field.
+ * @param {any[]} entries flat entries the rows were built from
+ * @param {any[]} out the rebuilt top-level rows (mutated)
+ */
+function pruneRemote(entries, out) {
+    /** @type {Map<string, {leaf: any, rank: string}>} */
+    const byKey = new Map();
+    for (const e of entries) byKey.set(e.leaf.key, { leaf: e.leaf, rank: e.rank });
+    /** @type {any[]} */
+    const groups = [];
+    for (const row of out) {
+        if (row.kind === 'group') groups.push(row);
+        else if (row.kind === 'section') {
+            for (const r of row.rows) if (r.kind === 'group') groups.push(r);
+        }
+    }
+    const claimed = new Set();
+    for (const grp of groups) {
+        if (!('remote' in grp)) continue;
+        const own = new Set(grp.options.map((/** @type {any} */ o) => o.key));
+        if (grp.header) own.add(grp.header.key);
+        /** @type {string[]} */
+        const kept = [];
+        for (const key of grp.remote) {
+            if (typeof key !== 'string') continue;
+            const entry = byKey.get(key);
+            if (!entry || entry.leaf.kind !== 'block') continue;
+            if (entry.rank !== 'item' && entry.rank !== 'option') continue;
+            if (own.has(key) || claimed.has(key) || kept.includes(key)) continue;
+            kept.push(key);
+        }
+        for (const key of kept) claimed.add(key);
+        if (kept.length === 0) delete grp.remote;
+        else grp.remote = kept;
+    }
+}
+
+/**
  * Flat rank entries -> nested rows (the persisted form). Pure function of
  * the entries. Markers can never be headings or options.
  * @param {any[]} entries
@@ -149,6 +197,7 @@ export function rebuildSeq(entries) {
                 header: leaf,
                 options: [],
             };
+            if (Array.isArray(gm.remote) && gm.remote.length > 0) group.remote = [...gm.remote];
         } else if (rank === 'option') {
             if (leaf.kind === 'marker') throw new OutlineError('markers can never be group members');
             if (group === null) {
@@ -162,6 +211,7 @@ export function rebuildSeq(entries) {
                     header: null,
                     options: [],
                 };
+                if (Array.isArray(gm.remote) && gm.remote.length > 0) group.remote = [...gm.remote];
             }
             group.options.push(leaf);
         } else {
@@ -170,6 +220,7 @@ export function rebuildSeq(entries) {
         }
     }
     sclose();
+    pruneRemote(entries, out);
     return out;
 }
 

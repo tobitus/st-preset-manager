@@ -46,7 +46,8 @@ export function rootOf(doc, loadoutId) {
  * above the root turned on. `opts.raw` skips the normalization: the outline
  * shows the layered bits as stored so a pick-one conflict stays visible.
  * After the collapse, an id it switched off is labelled with the source of
- * the member its group kept.
+ * the member its group kept. Group members include linked (remote) members
+ * (via pickOneMembers).
  * @param {any} doc
  * @param {string} loadoutId
  * @param {string|null} [modelName]
@@ -102,8 +103,9 @@ export function effectiveEnabled(doc, loadoutId, modelName = null, opts = {}) {
 }
 
 /**
- * The ids a "reset to inherited" must clear for `identifier`: every option of
- * the pick-one group (the heading is never a member) containing it (their
+ * The ids a "reset to inherited" must clear for `identifier`: every member
+ * (options plus linked remote members, via pickOneMembers; the heading is
+ * never a member) of the pick-one group containing it (their
  * sparse bits are interdependent), else just the identifier.
  * @param {any} doc
  * @param {string} identifier
