@@ -627,7 +627,7 @@ async function sectionS1() {
             throw new Error(`${err.message}; result rows: ${J(rows)}`);
         });
         const notes = await text(`${resultSel} .pm-io-notes`);
-        must(notes && notes.includes('"undefined"') && notes.includes('[PICK 1: GROUNDING] members are linked across positions (#25, #94)'),
+        must(notes && notes.includes('"undefined"') && notes.includes('[PICK 1: GROUNDING] members are linked across file positions #25, #94'),
             `.pm-io-notes ${J(notes?.slice(0, 300))} lacks "undefined" and the GROUNDING link note`);
         await shot('round3-s1-import.png');
 

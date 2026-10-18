@@ -12,6 +12,7 @@ import { collectGroups } from '../shared/groups.js';
 import { validateDoc } from '../shared/schema.js';
 import { HEADING_SEMANTICS } from '../shared/headings.js';
 import { deleteBlockFromDoc } from '../plugin/slot.js';
+import { flattenSeq } from '../shared/outline.js';
 
 const B = (/** @type {string} */ id) => ({ identifier: id, name: id.toUpperCase(), content: id, role: 'system', fields: {}, notes: '' });
 const leaf = (/** @type {string} */ id) => ({ kind: 'block', ref: id, key: `k-${id}` });
@@ -193,6 +194,25 @@ test('deleteBlockFromDoc (panel-side delete) prunes the link too', () => {
         delete doc.loadouts.R1.enabled[id];
     }
     assert.deepEqual(validateDoc(doc), []);
+});
+
+test('deleteBlockFromDoc of a section heading drops the section and every link into it', () => {
+    const doc = mkDoc();
+    // group A (in S1) links r1, which sits in S2; deleting S2's heading drops S2
+    deleteBlockFromDoc(doc, 's2');
+    assert.equal(doc.sequences[0].rows.some((/** @type {any} */ r) => r.key === 'sec:k-s2'), false);
+    assert.equal('remote' in grpA(doc), false);
+    assert.equal(validateDoc(doc).filter((e) => /remote/.test(e)).length, 0, validateDoc(doc).join(' | '));
+});
+
+test('deleteBlockFromDoc of a group heading prunes links to rows that did not survive', () => {
+    const doc = mkDoc();
+    applyDocOp(doc, 'linkToGroup', { key: 'grp:k-h', keys: ['k-r2'] });
+    assert.deepEqual(grpA(doc).remote, ['k-r1', 'k-r2']);
+    deleteBlockFromDoc(doc, 'bh');
+    const present = new Set(flattenSeq(doc.sequences[0].rows).map((/** @type {any} */ e) => e.leaf.key));
+    for (const k of grpA(doc).remote ?? []) assert.ok(present.has(k), `dangling ${k}`);
+    assert.equal(validateDoc(doc).filter((e) => /remote/.test(e)).length, 0, validateDoc(doc).join(' | '));
 });
 
 // ----------------------------------------------------------- setCardinality

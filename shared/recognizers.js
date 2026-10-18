@@ -694,7 +694,7 @@ function runSola3(rows, byid, ctx) {
     flushSection(section, out);
     for (const [t, members] of linkedTags) {
         const at = members.map((p) => `#${p + 1}`).join(', ');
-        notes.push(`sola3: [PICK 1: ${t}] members are linked across positions (${at})`);
+        notes.push(`sola3: [PICK 1: ${t}] members are linked across file positions ${at}`);
     }
     /** @type {Map<string, any>} */
     const leafByKey = new Map();

@@ -32,6 +32,11 @@ above, and does nothing else.
   its folder.
 - Plugin: `git pull` in `plugins/st-preset-manager`, then restart
   SillyTavern.
+- Before updating to 2.3.0, back up the library folder
+  (`data/<user>/preset-manager/`). 2.3.0 stores linked groups as a `remote`
+  list on the group; if you roll back to 2.2.x, it still loads those presets
+  but silently drops the links on their next structural save. Restore the
+  backup to undo that.
 
 ## If a library file is damaged
 
@@ -676,7 +681,9 @@ pick-one pair named `A / B`. A tag whose rows sit in several runs (Sola's two
 order) is one linked pick-one group: its first run (even a single row) is the
 group, every later run's rows are its linked members at their own positions,
 and the import notes say `sola3: [PICK 1: GROUNDING] members are linked
-across positions (#25, #94)`; a lone ↓ or ↑ row stays plain with a note. A
+across file positions #25, #94` (positions in the imported file's prompt
+order; the outline's `#` counts its own rows, so it shows the second row as
+#95); a lone ↓ or ↑ row stays plain with a note. A
 group directly after another group (PRONOUN after POV) gets a default
 heading as in Nemo. Rows never move and block names never change.
 

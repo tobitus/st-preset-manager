@@ -105,21 +105,24 @@ export function effectiveEnabled(doc, loadoutId, modelName = null, opts = {}) {
 /**
  * The ids a "reset to inherited" must clear for `identifier`: every member
  * (options plus linked remote members, via pickOneMembers; the heading is
- * never a member) of the pick-one group containing it (their
- * sparse bits are interdependent), else just the identifier.
+ * never a member) of every pick-one group containing it (their sparse bits
+ * are interdependent; a linked member may sit in two groups), deduplicated
+ * in first-seen order, else just the identifier.
  * @param {any} doc
  * @param {string} identifier
  * @returns {string[]}
  */
 export function inheritResetKeys(doc, identifier) {
+    /** @type {Set<string>} */
+    const out = new Set();
     for (const grp of collectGroups(doc)) {
         if (grp.cardinality !== 'pick-one') continue;
         const ids = pickOneMembers(doc, grp)
             .map((leaf) => leaf.ref ?? leaf.identifier)
             .filter((id) => id != null);
-        if (ids.includes(identifier)) return ids;
+        if (ids.includes(identifier)) for (const id of ids) out.add(id);
     }
-    return [identifier];
+    return out.size ? [...out] : [identifier];
 }
 
 /**

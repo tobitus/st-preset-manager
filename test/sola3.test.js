@@ -136,8 +136,8 @@ test('sola3: synthetic V3 layout -> sections, named groups, pairs, linked split 
 test('sola3: notes name the linked GROUNDING and SPLIT positions (1-based prompt order), the lone ↓ row, and summarize', () => {
     const notes = /** @type {string[]} */ (importStPreset(synth(), 'V3').source.recognizer.notes);
     const all = notes.join(' | ');
-    assert.ok(notes.includes('sola3: [PICK 1: GROUNDING] members are linked across positions (#20, #27)'), all);
-    assert.ok(notes.includes('sola3: [PICK 1: SPLIT] members are linked across positions (#28, #30)'), all);
+    assert.ok(notes.includes('sola3: [PICK 1: GROUNDING] members are linked across file positions #20, #27'), all);
+    assert.ok(notes.includes('sola3: [PICK 1: SPLIT] members are linked across file positions #28, #30'), all);
     assert.ok(!notes.some((n) => n.includes('later feature') || n.includes('not adjacent')), all);
     assert.ok(notes.some((n) => n.startsWith('sola3: ') && n.includes('Lone Down') && n.includes('plain')), all);
     assert.ok(notes.some((n) => n.startsWith("sola3: group 'PRONOUN' directly follows group 'POV'")), all);
@@ -219,7 +219,7 @@ test('sola3: the real Sola V3 Flame file (skips when absent)', async () => {
     assert.deepEqual(doc.sequences.map((s) => s.character_id), [100001]);
     const notes = /** @type {string[]} */ (doc.source.recognizer.notes);
     assert.ok(notes.some((n) => n.includes('"undefined"')), notes.join(' | '));
-    assert.ok(notes.includes('sola3: [PICK 1: GROUNDING] members are linked across positions (#25, #94)'), notes.join(' | '));
+    assert.ok(notes.includes('sola3: [PICK 1: GROUNDING] members are linked across file positions #25, #94'), notes.join(' | '));
     const rows = doc.sequences[0].rows;
     const sections = rows.filter((/** @type {any} */ r) => r.kind === 'section');
     assert.equal(sections.length, 10);

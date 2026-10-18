@@ -350,6 +350,36 @@ test('(vi) inheritResetKeys covers options and linked members', () => {
     assert.deepEqual(inheritResetKeys(doc, 'x1'), ['x1']);
 });
 
+test('(vi) inheritResetKeys on a member of two pick-one groups takes the members of both, either traversal order', () => {
+    // A {o1, remote r2} and B {p1, r2}: r2 belongs to both groups (Q4)
+    const ab = withRemote(['k-r2']);
+    const ba = withRemote(['k-r2']);
+    rowsOf(ba).reverse(); // S2 (group B) is now walked before S1 (group A)
+    assert.equal(collectGroups(ba)[0].key, 'grp:k-bh');
+    for (const doc of [ab, ba]) {
+        const keys = inheritResetKeys(doc, 'r2');
+        assert.deepEqual([...keys].sort(), ['o1', 'p1', 'r2']);
+        assert.equal(new Set(keys).size, keys.length, `duplicates in ${keys}`);
+        assert.deepEqual([...inheritResetKeys(doc, 'o1')].sort(), ['o1', 'r2']);
+        assert.deepEqual([...inheritResetKeys(doc, 'p1')].sort(), ['p1', 'r2']);
+    }
+});
+
+test('(vi) a playstyle choice of a two-group member, then resetInherit, leaves no stored bit behind (either order)', () => {
+    const ab = withRemote(['k-r2']);
+    const ba = withRemote(['k-r2']);
+    rowsOf(ba).reverse();
+    for (const doc of [ab, ba]) {
+        doc.loadouts.R1.enabled.o1 = true;
+        doc.loadouts.R1.enabled.p1 = true;
+        applyDocOp(doc, 'setGroup', { group: 'grp:k-h', identifier: 'r2', loadoutId: 'P' });
+        assert.equal(doc.loadouts.P.enabled.r2, true);
+        assert.equal(doc.loadouts.P.enabled.o1, false);
+        applyDocOp(doc, 'resetInherit', { loadoutId: 'P', identifier: 'r2' });
+        assert.deepEqual(doc.loadouts.P.enabled, {});
+    }
+});
+
 // ------------------------------------------------------------ (vii) validateDoc
 
 const A_PATH = 'sequences[0].rows[0].rows[0]';
