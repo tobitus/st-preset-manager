@@ -207,7 +207,7 @@ function opToggle(doc, a) {
 /**
  * Set a group's choice: turn `identifier` on and (pick-one) its siblings off,
  * in the target loadout (`loadoutId`, default the active one; a playstyle
- * gets a sparse write). The identifier must be one of the group's options;
+ * gets a sparse write). The identifier must be one of the group's options or linked members;
  * the group heading is refused (400).
  * @param {any} doc
  * @param {{ group?: string, identifier?: string, loadoutId?: string }} a
@@ -221,7 +221,7 @@ function opSetGroup(doc, a) {
     if (grp.header && identOf(grp.header) === identifier) {
         throw new OpError('the group heading is not a choice — use toggle', 400);
     }
-    if (!(grp.options ?? []).some((leaf) => identOf(leaf) === identifier)) {
+    if (!pickOneMembers(doc, grp).some((leaf) => identOf(leaf) === identifier)) {
         throw new OpError(`${identifier} is not a member of group ${group}`, 404);
     }
     const { loadout } = targetLoadout(doc, a);
@@ -447,12 +447,18 @@ function opSetCardinality(doc, a) {
  *  - markers (a group always ends at a marker);
  *  - a section heading ("unmake the section first");
  *  - a row already in a group ("dissolve it first");
- *  - non-adjacent members ("selected rows must be adjacent");
+ *  - non-adjacent members ("selected rows must be adjacent"; not with
+ *    `linked: true`);
  *  - a headerless result that would fold into the group above, or a result
  *    that would absorb the headerless group below (both 400);
  *  - pick-one while 2+ options are selected in some loadout (409).
+ * With `linked: true` the members' first run of adjacent rows becomes the
+ * group (the heading must be in it; the checks above apply to it) and every
+ * later member stays in place as a linked member (`remote`); each of those is
+ * refused (400) by linkRefusal (marker, ghost, section/group heading, already
+ * linked elsewhere). Returns `remote` (the linked count) only then.
  * @param {any} doc
- * @param {{ keys?: string[], headerKey?: string|null, name?: string, cardinality?: string, before?: string|null }} a
+ * @param {{ keys?: string[], headerKey?: string|null, name?: string, cardinality?: string, before?: string|null, linked?: boolean }} a
  */
 function opCreateGroup(doc, a) {
     if (!Array.isArray(a?.keys) || !a.keys.every((/** @type {any} */ k) => typeof k === 'string')) {
@@ -460,6 +466,9 @@ function opCreateGroup(doc, a) {
     }
     if (a.headerKey !== undefined && a.headerKey !== null && typeof a.headerKey !== 'string') {
         throw new OpError('createGroup headerKey must be a string');
+    }
+    if (a.linked !== undefined && typeof a.linked !== 'boolean') {
+        throw new OpError('createGroup linked must be a boolean');
     }
     const keys = new Set(/** @type {string[]} */ (a.keys));
     if (a?.headerKey) keys.add(a.headerKey);
@@ -487,16 +496,30 @@ function opCreateGroup(doc, a) {
     if (missing.length) throw new OpError(`no row with key ${JSON.stringify(missing[0])}`, 404);
 
     const members = host.flat.filter((e) => keys.has(e.leaf.key));
-    for (const e of members) {
+    const linked = a.linked === true;
+    // linked: the leading run of adjacent rows is the group, later rows link
+    let runLen = members.length;
+    if (linked) {
+        const base = host.flat.indexOf(members[0]);
+        runLen = 1;
+        while (runLen < members.length && host.flat.indexOf(members[runLen]) === base + runLen) runLen++;
+    }
+    const lead = members.slice(0, runLen);
+    const later = members.slice(runLen);
+    const leadKeys = new Set(lead.map((e) => e.leaf.key));
+    const headerEntry = a?.headerKey ? host.flat.find((e) => e.leaf.key === a.headerKey) : null;
+    if (a?.headerKey && !headerEntry) throw new OpError(`no row with key ${JSON.stringify(a.headerKey)}`, 404);
+    if (linked && headerEntry && !leadKeys.has(headerEntry.leaf.key)) {
+        throw new OpError('the heading must be in the first run of adjacent rows');
+    }
+    for (const e of lead) {
         if (e.leaf.kind === 'marker') {
             throw new OutlineError('markers are fixed ST slots — they can never be headings or options');
         }
     }
-    const headerEntry = a?.headerKey ? host.flat.find((e) => e.leaf.key === a.headerKey) : null;
-    if (a?.headerKey && !headerEntry) throw new OpError(`no row with key ${JSON.stringify(a.headerKey)}`, 404);
 
     // (a) sections and rows already in a group never become members
-    for (const e of members) {
+    for (const e of lead) {
         if (e.rank === 'section') {
             throw new OpError('a section heading cannot become a group member — unmake the section first');
         }
@@ -506,27 +529,38 @@ function opCreateGroup(doc, a) {
             throw new OpError(`"${blockName}" is already in group "${holder ? containerName(doc, holder) : ''}" — dissolve it first`);
         }
     }
-    // (b) members must be adjacent rows
-    const idxs = members.map((e) => host.flat.indexOf(e));
-    if (Math.max(...idxs) - Math.min(...idxs) + 1 !== members.length) {
-        throw new OpError('selected rows must be adjacent');
+    for (const e of later) {
+        const refusal = linkRefusal(doc, e, null);
+        if (refusal) throw new OpError(refusal);
+    }
+    // (b) the rows must be adjacent (a linked group's leading run is, by construction)
+    if (!linked) {
+        const idxs = members.map((e) => host.flat.indexOf(e));
+        if (Math.max(...idxs) - Math.min(...idxs) + 1 !== members.length) {
+            throw new OpError('selected rows must be adjacent');
+        }
     }
 
     const hdrName = headerEntry?.leaf.kind === 'block' ? (doc.blocks?.[headerEntry.leaf.ref]?.name || '') : '';
-    const gmeta = { name: hdrName || (a?.name ?? ''), cardinality: a?.cardinality ?? 'pick-one-or-more', guessed: false };
+    const gmeta = {
+        name: hdrName || (a?.name ?? ''),
+        cardinality: a?.cardinality ?? 'pick-one-or-more',
+        guessed: false,
+        ...(later.length ? { remote: later.map((e) => e.leaf.key) } : {}),
+    };
     /** @type {any[]} */
     const groupEntries = [];
     if (headerEntry) {
         groupEntries.push({ leaf: headerEntry.leaf, rank: 'group', gmeta: { ...gmeta }, sname: headerEntry.sname });
     }
-    for (const e of members) {
+    for (const e of lead) {
         if (e === headerEntry) continue;
         groupEntries.push({ leaf: e.leaf, rank: 'option', gmeta: { ...gmeta }, sname: e.sname });
     }
     // rebuild the sequence without the members, then splice the group in at
     // the first member's position (or before the `before` anchor)
     const firstIdx = host.flat.indexOf(members[0]);
-    const kept = host.flat.filter((e) => !keys.has(e.leaf.key));
+    const kept = host.flat.filter((e) => !leadKeys.has(e.leaf.key));
     let at = firstIdx;
     if (a?.before) {
         const bIdx = kept.findIndex((e) => e.leaf.key === a.before);
@@ -535,7 +569,7 @@ function opCreateGroup(doc, a) {
     }
     kept.splice(at, 0, ...groupEntries);
     const rows = rebuildSeq(kept);
-    const optionLeaves = members.filter((e) => e !== headerEntry).map((e) => e.leaf);
+    const optionLeaves = lead.filter((e) => e !== headerEntry).map((e) => e.leaf);
     /** @param {any[]} rs @returns {any} */
     const findNew = (rs) => {
         for (const r of rs) {
@@ -560,9 +594,108 @@ function opCreateGroup(doc, a) {
     // (d) pick-one needs at most one currently-selected option
     if (gmeta.cardinality === 'pick-one') refusePickOneConflict(doc, newGroup);
     host.seq.rows = rows;
-    const grp = collectGroups(doc).find((g) => g.header === (headerEntry?.leaf ?? null)
-        && (g.options ?? []).some((o) => members.some((m) => m.leaf === o)));
+    const grp = linked ? newGroup : collectGroups(doc).find((g) => g.header === (headerEntry?.leaf ?? null)
+        && (g.options ?? []).some((o) => lead.some((m) => m.leaf === o)));
+    if (linked) {
+        return { groupKey: grp?.key ?? null, options: (grp?.options ?? []).length, remote: later.length };
+    }
     return { groupKey: grp?.key ?? null, options: (grp?.options ?? []).length };
+}
+
+// -------------------------------------------------------------------- links
+
+/** A leaf's display name for link messages: block name, else its identifier. */
+const linkName = (/** @type {any} */ doc, /** @type {any} */ leaf) => doc.blocks?.[leaf.ref]?.name || identOf(leaf);
+
+/**
+ * Why a flat entry can't become a linked member of `grp` (null = it can).
+ * `grp` is null while the group is still being created. An option of an
+ * ordinary group is allowed (dual membership).
+ * @param {any} doc
+ * @param {any} entry a flattenSeq entry
+ * @param {any|null} grp
+ * @returns {string|null}
+ */
+function linkRefusal(doc, entry, grp) {
+    const leaf = entry.leaf;
+    const refuse = (/** @type {string} */ why) => `${JSON.stringify(linkName(doc, leaf))} cannot be linked: ${why}`;
+    if (leaf.kind === 'marker') return refuse('markers are fixed ST slots');
+    if (leaf.kind === 'ghost') return refuse('order-only entries have no name or content');
+    if (entry.rank === 'section') return refuse('it is a section heading');
+    if (grp && (grp.header === leaf || (grp.options ?? []).includes(leaf))) {
+        return refuse('it is already a member of this group');
+    }
+    if (entry.rank === 'group') return refuse('it is a group heading');
+    const holder = collectGroups(doc).find((g) => (g.remote ?? []).includes(leaf.key));
+    if (holder) return refuse(`it is already linked to group ${JSON.stringify(containerName(doc, holder))}`);
+    return null;
+}
+
+/**
+ * Link rows of the group's own sequence to a group as members (`remote`).
+ * Never changes enabled bits or row positions. Refusals (400/404/409) leave
+ * the document untouched; a pick-one group is refused (409) when its options
+ * plus the new members would have 2+ on in some loadout.
+ * @param {any} doc
+ * @param {{ key?: string, keys?: string[] }} a
+ */
+function opLinkToGroup(doc, a) {
+    const { key, keys } = a ?? {};
+    if (typeof key !== 'string' || !Array.isArray(keys) || keys.length === 0 || !keys.every((k) => typeof k === 'string')) {
+        throw new OpError('linkToGroup needs {key, keys}');
+    }
+    if (new Set(keys).size !== keys.length) throw new OpError('linkToGroup {keys} must not repeat a key');
+    const grp = requireGroup(doc, key);
+    const seq = (doc.sequences ?? []).find((/** @type {any} */ s) => flattenSeq(s.rows ?? []).some((e) => e.leaf === grp.header
+        || (grp.options ?? []).includes(e.leaf)));
+    if (!seq) throw new OpError(`no group ${JSON.stringify(key)}`, 404);
+    const flat = flattenSeq(seq.rows ?? []);
+    for (const k of keys) {
+        const entry = flat.find((e) => e.leaf.key === k);
+        if (!entry) {
+            findRowKey(doc, k);
+            let name = k;
+            for (const s of doc.sequences ?? []) {
+                const hit = flattenSeq(s.rows ?? []).find((e) => e.leaf.key === k);
+                if (hit) name = linkName(doc, hit.leaf);
+            }
+            throw new OpError(`${JSON.stringify(name)} cannot be linked: it is not in the group's sequence`);
+        }
+        const refusal = linkRefusal(doc, entry, grp);
+        if (refusal) throw new OpError(refusal);
+    }
+    const order = (/** @type {string} */ k) => flat.findIndex((e) => e.leaf.key === k);
+    const newRemote = [...(grp.remote ?? []), ...keys].sort((x, y) => order(x) - order(y));
+    if (grp.cardinality === 'pick-one') refusePickOneConflict(doc, { ...grp, remote: newRemote });
+    grp.remote = newRemote;
+    seq.rows = rebuildSeq(flattenSeq(seq.rows));
+    const after = requireGroup(doc, key);
+    return { key, remote: [...(after.remote ?? [])] };
+}
+
+/**
+ * Unlink linked members from a group. Never changes enabled bits.
+ * @param {any} doc
+ * @param {{ key?: string, keys?: string[] }} a
+ */
+function opUnlink(doc, a) {
+    const { key, keys } = a ?? {};
+    if (typeof key !== 'string' || !Array.isArray(keys) || keys.length === 0 || !keys.every((k) => typeof k === 'string')) {
+        throw new OpError('unlink needs {key, keys}');
+    }
+    const grp = requireGroup(doc, key);
+    for (const k of keys) {
+        if ((grp.remote ?? []).includes(k)) continue;
+        let name = k;
+        for (const s of doc.sequences ?? []) {
+            const hit = flattenSeq(s.rows ?? []).find((e) => e.leaf.key === k);
+            if (hit) name = linkName(doc, hit.leaf);
+        }
+        throw new OpError(`${JSON.stringify(name)} is not linked to this group`);
+    }
+    grp.remote = grp.remote.filter((/** @type {string} */ k) => !keys.includes(k));
+    if (grp.remote.length === 0) delete grp.remote;
+    return { key, remote: [...(grp.remote ?? [])] };
 }
 
 // ------------------------------------------------------------------- options
@@ -615,8 +748,18 @@ function opRemoveOption(doc, a) {
     if (row.kind !== 'block') throw new OpError('removeOption removes a block option');
     // must sit in a group's options
     const owner = collectGroups(doc).find((g) => (g.options ?? []).some((o) => o.key === key));
-    if (!owner) throw new OpError(`row ${JSON.stringify(key)} is not a group option`);
+    if (!owner) {
+        if (collectGroups(doc).some((g) => (g.remote ?? []).includes(key))) {
+            throw new OpError(`${JSON.stringify(doc.blocks?.[row.ref]?.name || identOf(row))} is a linked member — use unlink`);
+        }
+        throw new OpError(`row ${JSON.stringify(key)} is not a group option`);
+    }
     rows.splice(idx, 1);
+    for (const g of collectGroups(doc)) {
+        if (!g.remote) continue;
+        g.remote = g.remote.filter((/** @type {string} */ k) => k !== key);
+        if (g.remote.length === 0) delete g.remote;
+    }
     return { key, identifier: row.ref };
 }
 
@@ -947,7 +1090,7 @@ function opSetNotes(doc, a) {
 
 /**
  * @typedef {{kind: 'block', block: any}
- *   | {kind: 'group', name: string, cardinality: string, header: any|null, options: any[]}} CopyPayload
+ *   | {kind: 'group', name: string, cardinality: string, header: any|null, options: any[], remoteSkipped?: string[]}} CopyPayload
  */
 
 /**
@@ -997,12 +1140,27 @@ export function copyPayloadFromDoc(src, a) {
         .filter((/** @type {any} */ o) => o.kind === 'block' && src.blocks?.[o.ref])
         .map((/** @type {any} */ o) => pickBlock(src.blocks[o.ref]));
     if (!header && options.length === 0) throw new OpError('group has nothing to copy', 400);
+    /** @type {string[]} */
+    const remoteSkipped = [];
+    if (Array.isArray(grp.remote) && grp.remote.length) {
+        const wanted = new Set(grp.remote);
+        /** @type {Map<string, any>} */
+        const byKey = new Map();
+        for (const seq of src.sequences ?? []) {
+            for (const e of flattenSeq(seq.rows ?? [])) if (wanted.has(e.leaf.key)) byKey.set(e.leaf.key, e.leaf);
+        }
+        for (const k of grp.remote) {
+            const leaf = byKey.get(k);
+            if (leaf) remoteSkipped.push(src.blocks?.[leaf.ref]?.name || identOf(leaf));
+        }
+    }
     return {
         kind: 'group',
         name: containerName(src, grp),
         cardinality: grp.cardinality ?? 'pick-one-or-more',
         header,
         options,
+        ...(remoteSkipped.length ? { remoteSkipped } : {}),
     };
 }
 
@@ -1259,7 +1417,7 @@ export function copyIntoDoc(doc, payload, before, opts = {}) {
     }
     const group = payload.kind === 'group' ? 'grp:' + keys[0] : null;
     const warnings = macroWarnings(doc, ids);
-    return { identifiers: ids, keys, group, warnings };
+    return { identifiers: ids, keys, group, warnings, remoteSkipped: payload.kind === 'group' ? (payload.remoteSkipped ?? []) : [] };
 }
 
 const MACRO_RE = /\{\{[^}]*\}\}|\{[a-zA-Z][^}]*\}/g;
@@ -1364,6 +1522,8 @@ function dispatchOp(doc, op, a) {
         case 'createGroup': return opCreateGroup(doc, a);
         case 'renameGroup': return opRenameGroup(doc, a);
         case 'dissolveGroup': return opDissolveGroup(doc, a);
+        case 'linkToGroup': return opLinkToGroup(doc, a);
+        case 'unlink': return opUnlink(doc, a);
         case 'setCardinality': return opSetCardinality(doc, a);
         case 'addOption': return opAddOption(doc, a);
         case 'removeOption': return opRemoveOption(doc, a);

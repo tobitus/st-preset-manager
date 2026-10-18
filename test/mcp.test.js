@@ -364,6 +364,8 @@ test('loadout tools: create requires kind (a 400 surfaces as isError); update/ov
     const ops = byName.preset_op.inputSchema.properties.op.enum;
     assert.ok(ops.includes('resetInherit') && ops.includes('resetAllInherit'), JSON.stringify(ops));
     assert.ok(ops.includes('addGroup'), JSON.stringify(ops));
+    assert.ok(ops.includes('linkToGroup') && ops.includes('unlink'), JSON.stringify(ops));
+    assert.equal(byName.preset_op.inputSchema.properties.linked?.type, 'boolean');
     const r = await callTool('loadout_create', { presetId: 'p_1', name: 'X' }, () => ({ status: 400, json: { error: 'loadouts create needs {kind}' } }));
     assert.equal(r.result.isError, true);
     assert.deepEqual(JSON.parse(r.result.content[0].text), { status: 400, error: 'loadouts create needs {kind}' });

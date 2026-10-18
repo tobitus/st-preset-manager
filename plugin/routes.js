@@ -367,10 +367,12 @@ export function registerRoutes(router) {
     // take an optional {loadoutId} (default the active one) and write a
     // playstyle's sparse layer, never its root; resetInherit {loadoutId,
     // identifier} / resetAllInherit {loadoutId} drop a playstyle's own
-    // entries so they inherit from the root again.
+    // entries so they inherit from the root again. createGroup {linked: true}
+    // links non-adjacent rows (the first adjacent run = the group, later rows
+    // linked); linkToGroup/unlink {key, keys} add/remove linked members.
     const OPS = /** @type {const} */ ([
         'toggle', 'setGroup', 'setCardinality', 'promote', 'demote', 'makeSection', 'unmakeSection', 'moveLeaf',
-        'createGroup', 'renameGroup', 'dissolveGroup', 'addOption', 'removeOption',
+        'createGroup', 'renameGroup', 'dissolveGroup', 'linkToGroup', 'unlink', 'addOption', 'removeOption',
         'setContent', 'editBlock', 'renameBlock', 'addBlock', 'addSection', 'addGroup', 'deleteBlock',
         'setSettings', 'setBlockNotes', 'setNotes', 'copyBlock', 'resetInherit', 'resetAllInherit',
     ]);
@@ -383,7 +385,7 @@ export function registerRoutes(router) {
             if (op === 'copyBlock') {
                 const out = await store.copyBlock(req.params.id, req.body ?? {});
                 broadcast(req, 'preset', req.params.id);
-                res.json({ doc: out.doc, rev: store.rev, warnings: out.warnings, identifiers: out.identifiers, keys: out.keys, group: out.group });
+                res.json({ doc: out.doc, rev: store.rev, warnings: out.warnings, remoteSkipped: out.remoteSkipped, identifiers: out.identifiers, keys: out.keys, group: out.group });
                 return;
             }
             let /** @type {any} */ result = null;

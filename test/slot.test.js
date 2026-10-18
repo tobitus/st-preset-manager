@@ -362,3 +362,70 @@ test('routePanelDiff: a full-array-shaped delta is never treated as a replacemen
     routePanelDiff(doc, current, delta, null);
     assert.equal(doc.loadouts[doc.activeLoadoutId].enabled.c, false, 'stale bit routed: whole-array replacement crept back in');
 });
+
+// ------------------------------------------- linked groups (displaced modal selection)
+
+/**
+ * group A (heading h; option o1; remote [r1]) pick-one, x1, chatHistory, r1.
+ * Loadouts: R1 (active root, o1 on), P (playstyle of R1).
+ * @returns {any}
+ */
+function linkedDoc() {
+    const now = new Date(0).toISOString();
+    const B = (/** @type {string} */ id) => ({ identifier: id, name: id.toUpperCase(), content: `${id} text`, role: 'system', fields: {}, notes: '' });
+    const leaf = (/** @type {string} */ id) => ({ kind: 'block', ref: id, key: `k-${id}` });
+    return {
+        format: 'st-preset-manager/library', version: 1, id: 'ld', name: 'linked', tags: [], notes: '', source: null,
+        settings: {}, createdAt: now, updatedAt: now, rev: 1,
+        activeLoadoutId: 'R1',
+        loadouts: {
+            R1: { id: 'R1', name: 'R1', notes: '', kind: 'root', parent: null, enabled: { h: true, o1: true, x1: true, chatHistory: true, r1: false }, overrides: {} },
+            P: { id: 'P', name: 'P', notes: '', kind: 'playstyle', parent: 'R1', enabled: {}, overrides: {} },
+        },
+        markers: [{ identifier: 'chatHistory', prompt: { identifier: 'chatHistory', marker: true } }],
+        blocks: { h: B('h'), o1: B('o1'), x1: B('x1'), r1: B('r1') },
+        sequences: [{ character_id: 100001, rows: [
+            { kind: 'group', key: 'grp:k-h', name: 'A', cardinality: 'pick-one', guessed: false, header: leaf('h'), options: [leaf('o1')], remote: ['k-r1'] },
+            leaf('x1'),
+            { kind: 'marker', ref: 'chatHistory', key: 'k-chatHistory' },
+            leaf('r1'),
+        ] }],
+    };
+}
+
+const tick = (/** @type {string} */ id, /** @type {boolean} */ on) => ({ prompt_order: { order: [{ identifier: id, enabled: on }] }, prompts: [] });
+
+test('linked: a panel tick on the linked member in a root switches the adjacent option off (group:pick-one route)', () => {
+    const doc = linkedDoc();
+    const { routed } = routePanelDiff(doc, null, tick('r1', true), null);
+    assert.equal(doc.loadouts.R1.enabled.r1, true);
+    assert.equal(doc.loadouts.R1.enabled.o1, false);
+    assert.deepEqual(routed, [{ key: 'r1', layer: 'loadout' }, { key: 'o1', layer: 'group:pick-one' }]);
+    // and back: ticking the adjacent option turns the linked member off
+    const back = routePanelDiff(doc, null, tick('o1', true), null);
+    assert.equal(doc.loadouts.R1.enabled.o1, true);
+    assert.equal(doc.loadouts.R1.enabled.r1, false);
+    assert.deepEqual(back.routed, [{ key: 'o1', layer: 'loadout' }, { key: 'r1', layer: 'group:pick-one' }]);
+});
+
+test('linked: a panel tick on the linked member in a playstyle collapses the pair in its sparse layer', () => {
+    const doc = linkedDoc();
+    routePanelDiff(doc, null, tick('r1', true), null, 'P');
+    assert.deepEqual(doc.loadouts.P.enabled, { r1: true, o1: false });
+    assert.equal(doc.loadouts.R1.enabled.o1, true, 'the root is never written');
+});
+
+test('linked: a panel tick on the linked member under a per-Model override collapses the pair in the override', () => {
+    const doc = linkedDoc();
+    doc.loadouts.R1.overrides = { M: { enabled: { o1: true, r1: false }, tuning: null } };
+    routePanelDiff(doc, null, tick('r1', true), { name: 'M' });
+    assert.deepEqual(doc.loadouts.R1.overrides.M.enabled, { o1: false, r1: true });
+});
+
+test('linked: a panel reorder moving the linked leaf keeps the link', () => {
+    const doc = linkedDoc();
+    assert.equal(applyOrderToSequences(doc, ['h', 'o1', 'x1', 'r1', 'chatHistory']), true);
+    const rows = doc.sequences[0].rows;
+    assert.deepEqual(rows.map((/** @type {any} */ r) => r.key), ['grp:k-h', 'k-x1', 'k-r1', 'k-chatHistory']);
+    assert.deepEqual(rows[0].remote, ['k-r1']);
+});

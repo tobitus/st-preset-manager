@@ -329,6 +329,17 @@ export function applyOrderToSequences(doc, newIdents) {
  * @param {string} id
  */
 export function deleteBlockFromDoc(doc, id) {
+    /** @type {Set<string>} */
+    const gone = new Set();
+    const collect = (/** @type {any[]} */ rows) => {
+        const take = (/** @type {any} */ leaf) => { if (leaf && (leaf.ref ?? leaf.identifier) === id) gone.add(leaf.key); };
+        for (const row of rows) {
+            if (row.kind === 'section') { take(row.header); collect(row.rows ?? []); }
+            else if (row.kind === 'group') { take(row.header); for (const o of row.options ?? []) take(o); }
+            else take(row);
+        }
+    };
+    for (const seq of doc.sequences ?? []) collect(seq.rows ?? []);
     delete doc.blocks?.[id];
     const filter = (/** @type {any[]} */ rows) => rows.filter((row) => {
         if (['marker', 'block', 'ghost'].includes(row.kind)) return (row.ref ?? row.identifier) !== id;
@@ -349,6 +360,16 @@ export function deleteBlockFromDoc(doc, id) {
         return true;
     });
     for (const seq of doc.sequences ?? []) seq.rows = filter(seq.rows ?? []);
+    const prune = (/** @type {any[]} */ rows) => {
+        for (const row of rows) {
+            if (row.kind === 'section') prune(row.rows ?? []);
+            else if (row.kind === 'group' && row.remote) {
+                row.remote = row.remote.filter((/** @type {string} */ k) => !gone.has(k));
+                if (row.remote.length === 0) delete row.remote;
+            }
+        }
+    };
+    for (const seq of doc.sequences ?? []) prune(seq.rows ?? []);
 }
 
 export { compile, stripConnectionKeys };

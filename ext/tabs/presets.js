@@ -1207,6 +1207,10 @@ export function createPresetsTab(pane, bridge) {
                 toast('warning', res.warnings.join('\n'), 'Macro warning');
                 text += ` — ${res.warnings.length} macro warning(s)`;
             }
+            if (res.remoteSkipped?.length) {
+                toast('warning', `Linked members not copied: ${res.remoteSkipped.join(', ')}`, 'Linked group');
+                text += ` — ${res.remoteSkipped.length} linked member(s) not copied`;
+            }
             if (view?.id === targetId) setStatus(text);
         } catch (err) {
             const message = /** @type {any} */ (err).body?.error ?? /** @type {any} */ (err).message;

@@ -52,7 +52,7 @@ interface PmHandle {
         shelfGet(id: string): unknown;
         shelfUpdate(id: string, patch: Record<string, unknown>): Promise<unknown>;
         shelfRemove(id: string): Promise<void>;
-        copyBlock(presetId: string, body: Record<string, unknown>): Promise<{ doc: unknown; identifiers: string[]; keys: string[]; group: string | null; warnings: string[] }>;
+        copyBlock(presetId: string, body: Record<string, unknown>): Promise<{ doc: unknown; identifiers: string[]; keys: string[]; group: string | null; warnings: string[]; remoteSkipped: string[] }>;
         rescan(): Promise<void>;
         enqueue<T>(fn: () => T): Promise<T>;
         /** mark the desired slot changed at rev+1 (call inside mutateState) */

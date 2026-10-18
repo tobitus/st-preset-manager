@@ -1834,7 +1834,7 @@ export class Store {
             }
             const res = copyIntoDoc(doc, payload, body.before ?? null, { outsideGroup: body.outsideGroup, after: body.after });
             await this._commit({ docs: [doc], undoable: true });
-            return { doc: structuredClone(doc), identifiers: res.identifiers, keys: res.keys, group: res.group, warnings: res.warnings };
+            return { doc: structuredClone(doc), identifiers: res.identifiers, keys: res.keys, group: res.group, warnings: res.warnings, remoteSkipped: res.remoteSkipped };
         });
     }
 }
