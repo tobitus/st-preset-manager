@@ -29,9 +29,10 @@
  *      are unchanged (root loadouts also enable the new headings), the compiled
  *      ST text equals the pre-upgrade compile; the outline shows no switch on the
  *      heading and a radio on the first option
- *   s1 Sola V3 Flame imports through the Library UI: notes, 10 sections, 8
- *      pick-one groups (badge 1), the two Story Grounding rows plain checkboxes,
- *      and section 0's long MIND text reaches ST
+ *   s1 Sola V3 Flame imports through the Library UI: notes, 10 sections, 9
+ *      pick-one groups (badge 1), GROUNDING one linked group (its #25 row the
+ *      option, a reference row for #94; both Story Grounding rows radios, the
+ *      #94 row with a link badge), and section 0's long MIND text reaches ST
  * Screenshots (dev/shots/): round3-h1-heading-checkbox.png,
  *   round3-h2-pick-one.png, round3-h3-none.png, round3-g1-popup.png,
  *   round3-g1-group.png, round3-g2-refusal.png, round3-n1-upgraded.png,
@@ -612,7 +613,7 @@ async function setFileInput(/** @type {string} */ sel, /** @type {string} */ abs
 }
 
 async function sectionS1() {
-    await check('s1 Sola V3 Flame imports via the Library: notes, 10 sections, 8 pick-one groups, GROUNDING plain, MIND text in the slot', async () => {
+    await check('s1 Sola V3 Flame imports via the Library: notes, 10 sections, 9 pick-one groups, GROUNDING linked, MIND text in the slot', async () => {
         await showTab('library');
         const absPath = path.join(REPO, 'dev/fixtures/presets/Sola V3 Flame.json');
         must(fs.existsSync(absPath), `fixture missing: ${absPath}`);
@@ -626,7 +627,8 @@ async function sectionS1() {
             throw new Error(`${err.message}; result rows: ${J(rows)}`);
         });
         const notes = await text(`${resultSel} .pm-io-notes`);
-        must(notes && notes.includes('"undefined"') && notes.includes('GROUNDING'), `.pm-io-notes ${J(notes?.slice(0, 300))} lacks "undefined" and GROUNDING`);
+        must(notes && notes.includes('"undefined"') && notes.includes('[PICK 1: GROUNDING] members are linked across positions (#25, #94)'),
+            `.pm-io-notes ${J(notes?.slice(0, 300))} lacks "undefined" and the GROUNDING link note`);
         await shot('round3-s1-import.png');
 
         await openFromLibrary(sid);
@@ -639,14 +641,26 @@ async function sectionS1() {
             badge: (li.querySelector(':scope > .pm-row > .pm-card')?.textContent ?? '').trim(),
         }))`);
         const wantNames = ['MIND', 'POV', 'PRONOUN', 'Agency-Lite / Embellished User', 'Anti-Slop Full / Anti-Slop Lite', 'STYLE', 'NPC Dialogue Colors 🎨 / Gradient ALL The Time 🎨', 'Anti-Softening / Anti-Cruelty'];
-        must(groups.length === 8, `${groups.length} group rows, want 8: ${J(groups)}`);
+        must(groups.length === 9, `${groups.length} group rows, want 9: ${J(groups)}`);
         must(groups.every((/** @type {any} */ g) => g.badge === '1'), `badges ${J(groups.map((/** @type {any} */ g) => g.badge))}, want all "1"`);
-        must(J(groups.map((/** @type {any} */ g) => g.name)) === J(wantNames), `group names ${J(groups.map((/** @type {any} */ g) => g.name))}, want ${J(wantNames)}`);
+        const gNames = groups.map((/** @type {any} */ g) => g.name);
+        must(gNames.filter((/** @type {string} */ n) => n === 'GROUNDING').length === 1, `one GROUNDING group row, got ${J(gNames)}`);
+        must(J(gNames.filter((/** @type {string} */ n) => n !== 'GROUNDING')) === J(wantNames), `group names ${J(gNames)}, want ${J(wantNames)} + GROUNDING`);
+        const gr = await probe.eval(`(() => {
+            const li = [...document.querySelectorAll(${J(`${seq0} li.pm-node[data-kind="group"]`)})].find((l) => (l.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '').trim() === 'GROUNDING');
+            if (!li) return null;
+            return {
+                options: li.querySelectorAll(':scope > ul.pm-list > li.pm-node').length,
+                refs: [...li.querySelectorAll(':scope > ul.pm-remote-list > li.pm-remote-ref')].map((r) => (r.querySelector('.pm-remote-pos')?.textContent ?? '').trim()),
+            };
+        })()`);
+        must(gr && gr.options === 1 && gr.refs.length === 1, `GROUNDING group ${J(gr)}, want 1 option + 1 reference row`);
         const grounding = await probe.eval(`[...document.querySelectorAll(${J(`${seq0} li.pm-node[data-kind="leaf"]`)})]
             .filter((li) => (li.querySelector(':scope > .pm-row .pm-name')?.textContent ?? '').includes('Story Grounding'))
-            .map((li) => [...li.querySelectorAll(':scope > .pm-row input.pm-switch')].map((i) => i.type))`);
-        must(grounding.length === 2 && grounding.every((/** @type {string[]} */ t) => t.length === 1 && t[0] === 'checkbox'),
-            `Story Grounding rows ${J(grounding)}, want 2 rows with one checkbox each`);
+            .map((li) => ({ types: [...li.querySelectorAll(':scope > .pm-row input.pm-switch')].map((i) => i.type), badge: !!li.querySelector(':scope > .pm-row .pm-link-badge') }))`);
+        must(grounding.length === 2 && grounding.every((/** @type {any} */ g) => g.types.length === 1 && g.types[0] === 'radio')
+            && grounding.filter((/** @type {any} */ g) => g.badge).length === 1,
+            `Story Grounding rows ${J(grounding)}, want 2 radio rows, one with a link badge`);
         await shot('round3-s1-outline.png');
 
         must((await api('POST', '/slot/load', { presetId: sid })).status === 200, 'slot_load Sola V3 failed');
@@ -658,7 +672,7 @@ async function sectionS1() {
         const prompt = await probe.eval(`(() => { const p = SillyTavern.getContext().chatCompletionSettings.prompts.find((p) => p.identifier === ${J(ident)}); return p ? { len: (p.content ?? '').length } : null; })()`);
         must(prompt && prompt.len > 4000, `ST prompt ${ident} ${J(prompt)}, want content length > 4000`);
         must(c.s.order.some((/** @type {any} */ o) => o.identifier === ident && o.enabled), `${ident} not enabled in ST's order`);
-        return `${secNames.length} sections, ${groups.length} groups, 2 Story Grounding checkboxes; section 0 header ${ident} has ${prompt.len} chars in ST, enabled`;
+        return `${secNames.length} sections, ${groups.length} groups, GROUNDING 1 option + reference ${gr.refs[0]}, both Story Grounding rows radios; section 0 header ${ident} has ${prompt.len} chars in ST, enabled`;
     });
 }
 

@@ -11,6 +11,7 @@ import { isStMarkerIdentifier, CONNECTION_KEYS } from './st-keys.js';
 import { newKey } from './canonical.js';
 import { headGroupsAfterGroups, HEADING_SEMANTICS } from './headings.js';
 import { isCommentOnly } from './groups.js';
+import { normName } from './compare.js';
 
 export const PICK_HEADER = /^🔻PICK:\s*(.+?)\s*🔻$/;
 export const SECTION_HEADER = /^🔹🔹\s*(.+?)\s*🔹🔹$/;
@@ -581,18 +582,26 @@ function runSola3(rows, byid, ctx) {
     const named = rowsToNamed(rows, byid);
     /** @type {string[]} */
     const notes = [];
-    /** @type {Map<string, number[]>} */
-    const tagAt = new Map();
-    named.forEach(([row, name], idx) => {
-        if (row.kind === 'marker') return;
-        const m = SOLA3_PICK.exec(name);
-        if (!m) return;
-        const t = m[1].trim();
-        if (!tagAt.has(t)) tagAt.set(t, []);
-        tagAt.get(t).push(idx);
-    });
-    /** @type {Set<string>} */
-    const splitTags = new Set();
+    /** @type {Map<string, number[][]>} tag -> runs of named indices, prompt order */
+    const runsOfTag = new Map();
+    {
+        let prev = null;
+        named.forEach(([row, name], idx) => {
+            const m = row.kind === 'marker' || SOLA3_SECTION.test(name) ? null : SOLA3_PICK.exec(name);
+            const t = m ? m[1].trim() : null;
+            if (t === null) {
+                prev = null;
+                return;
+            }
+            if (!runsOfTag.has(t)) runsOfTag.set(t, []);
+            const runs = runsOfTag.get(t);
+            if (prev === t) runs[runs.length - 1].push(idx);
+            else runs.push([idx]);
+            prev = t;
+        });
+    }
+    /** @type {Map<string, number[]>} linked tag -> member named indices */
+    const linkedTags = new Map();
     let sections = 0;
     let namedGroups = 0;
     let pairs = 0;
@@ -621,7 +630,26 @@ function runSola3(rows, byid, ctx) {
             let j = i + 1;
             while (j < named.length && !SOLA3_SECTION.test(named[j][1]) && pickOf(j) === tag) j += 1;
             const run = named.slice(i, j).map(([r]) => r);
-            if (run.length >= 2) {
+            const tagRuns = runsOfTag.get(tag);
+            if (tagRuns.length > 1) {
+                if (tagRuns[0][0] === i) {
+                    const later = tagRuns.slice(1).flat();
+                    target.push({
+                        kind: 'group',
+                        key: newKey('grp'),
+                        name: tag,
+                        cardinality: 'pick-one',
+                        guessed: false,
+                        header: null,
+                        options: run,
+                        remote: later.map((k) => named[k][0].key),
+                    });
+                    namedGroups += 1;
+                    linkedTags.set(tag, tagRuns.flat());
+                } else {
+                    target.push(...run);
+                }
+            } else if (run.length >= 2) {
                 target.push({
                     kind: 'group',
                     key: newKey('grp'),
@@ -634,7 +662,6 @@ function runSola3(rows, byid, ctx) {
                 namedGroups += 1;
             } else {
                 target.push(row);
-                if (tagAt.get(tag).length > 1) splitTags.add(tag);
             }
             i = j;
             continue;
@@ -665,16 +692,18 @@ function runSola3(rows, byid, ctx) {
         i += 1;
     }
     flushSection(section, out);
-    for (const t of splitTags) {
-        const at = tagAt.get(t).map((p) => `#${p}`).join(', ');
-        notes.push(
-            `sola3: [PICK 1: ${t}] members are not adjacent (${at}): imported as independent toggles (linked pick-one is a later feature)`,
-        );
+    for (const [t, members] of linkedTags) {
+        const at = members.map((p) => `#${p + 1}`).join(', ');
+        notes.push(`sola3: [PICK 1: ${t}] members are linked across positions (${at})`);
     }
+    /** @type {Map<string, any>} */
+    const leafByKey = new Map();
+    for (const r of walkAll(out)) if (r.kind !== 'group') leafByKey.set(r.key, r);
     headGroupsAfterGroups(out, ctx.blocks, ctx.used, notes, 'sola3', ctx.source);
     for (const g of walkAll(out)) {
         if (g.kind !== 'group') continue;
-        const on = g.options.filter((/** @type {any} */ o) => o.enabled === true).length;
+        const members = [...g.options, ...(g.remote ?? []).map((/** @type {string} */ k) => leafByKey.get(k)).filter(Boolean)];
+        const on = members.filter((/** @type {any} */ o) => o.enabled === true).length;
         if (on >= 2) {
             notes.push(`sola3: group '${g.name}' has ${on} members on in the file; pick-one keeps the last one at compile — fix in the outline`);
         }
@@ -716,6 +745,23 @@ function runFf5(rows, byid) {
         group.cardinality = ff5GuessCardinality(group.options);
     }
     closeGroup(group, out, notes);
+    /** @type {Map<string, {name: string, at: number[]}>} */
+    const dupes = new Map();
+    rowsToNamed(rows, byid).forEach(([row, name], idx) => {
+        if (row.kind !== 'block' || isFf5Header(name)) return;
+        const n = normName(name);
+        if (n === '') return;
+        if (!dupes.has(n)) dupes.set(n, { name: name.trim(), at: [] });
+        dupes.get(n).at.push(idx + 1);
+    });
+    for (const { name, at } of dupes.values()) {
+        if (at.length < 2) continue;
+        const tags = at.map((p) => `#${p}`);
+        const where = `${tags.slice(0, -1).join(', ')} and ${tags[tags.length - 1]}`;
+        notes.push(
+            `ff5: '${name}' appears at ${where} — select ${at.length === 2 ? 'both' : 'them'} and use Make group from selection to link them`,
+        );
+    }
     const nGroups = out.filter((r) => r.kind === 'group').length;
     const nPick1 = out.filter((r) => r.kind === 'group' && r.cardinality === 'pick-one').length;
     notes.push(
