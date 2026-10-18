@@ -220,6 +220,15 @@ carries the meaning of `{{// @link-group T }}`. Writers SHOULD emit §2 tags
 instead of, or in addition to, name hints. Conformance never requires
 recognising the annex forms.
 
+How PM stores a link (informative): a linked member stays an ordinary row at
+its own position, and the group row lists it in `remote` (row keys in the same
+prompt order) — the in-document form of `@link-group K`. PM 2.3.0 builds
+links from the name hints above, where the first run may be a single block
+(Sola V3's `Story Grounding [PICK 1: GROUNDING]` rows at #25 and #94 become one
+group of one option plus one linked member), and from its UI (*Make group from
+selection* on non-adjacent rows, *Link to group*). PM does not read or write
+`@link-group` tags yet; Nemo-tagged runs stay separate groups as §4.2 says.
+
 ## 6. Behaviour in plain SillyTavern
 
 ST's macro engine removes `{{// ... }}` comments before a prompt is sent —

@@ -53,13 +53,31 @@ above, and does nothing else.
   pick-one groups and row numbers; Undo / Redo with Ctrl+Z / Ctrl+Shift+Z.
 - **Groups**: a group's heading is never one of its choices. A heading that
   sends text has its own checkbox (on/off like any block); a comment-only
-  heading (sends nothing) has no switch. Pick-one only counts the options.
-  **Make group from selection** (rank bar) turns two or more adjacent selected
-  rows (Ctrl/Shift-click) into one group in one step: pick the heading (or
-  none) and *Pick one* / *Pick many*; Ctrl+Z undoes it. It is refused, with
-  the reason in a popup, for rows that are not adjacent, a section heading, a
-  row already in a group, a headerless group directly below another group,
-  and pick-one while two or more of its options are on.
+  heading (sends nothing) has no switch. Pick-one counts the options and the
+  linked members (below), never the heading.
+  **Make group from selection** (rank bar) turns two or more selected rows
+  (Ctrl/Shift-click) into one group in one step: pick the heading (or none)
+  and *Pick one* / *Pick many*; Ctrl+Z undoes it. It is refused, with the
+  reason in a popup, for a section heading, a row already in a group, a
+  headerless group directly below another group, and pick-one while two or
+  more of its members are on.
+- **Linked groups** (members at several positions): when the selected rows are
+  not adjacent, *Make group from selection* says so in its popup title; the
+  first run of adjacent rows becomes the group and every later row becomes a
+  **linked member** that stays at its own position (prompt order never
+  changes). **Link to group** (rank bar) links more rows: Ctrl-click one group
+  row and the rows to link. Inside the group, each linked member has a
+  reference row (🔗 `#position`, its switch, ↗ to jump to the row, **✕
+  Unlink**); at its own position the row shows a 🔗 badge naming the group
+  (click it to show the group). In a pick-one group the switch is a radio in
+  both places and either one picks the member, turning the others off; a tick
+  in SillyTavern's own panel still wins. Unlink, Ctrl+Z, deleting the block
+  or dissolving the group leave a valid preset. Links stay inside one prompt
+  order; markers, order-only rows, headings and rows already linked
+  elsewhere cannot be linked (refused with the row's name). A row may be an
+  option of an ordinary group and a linked member of another. Copying a
+  linked group to another preset copies the heading and adjacent options
+  only; a toast names the linked members left behind.
 - **Import notes**: each import result row in the Library lists what the
   importer noticed and what it dropped or fixed: a `prompt_order` whose
   `character_id` is not a number, a duplicate `character_id`, order entries
@@ -332,7 +350,8 @@ npm run typecheck           # tsc --checkJs over ext/, plugin/, shared/, test/
   code; v2 implements its stated intent.
 - REST added: `POST /presets/:id/ops {op: 'copyBlock', shelfId |
   fromPresetId + (identifier | group), before, outsideGroup?}` → `{doc, rev, warnings,
-  identifiers, keys, group}`; `GET /shelf/:id`; `PATCH /shelf/:id {name?,
+  remoteSkipped, identifiers, keys, group}` (`remoteSkipped`: names of a copied
+  group's linked members, which are not copied); `GET /shelf/:id`; `PATCH /shelf/:id {name?,
   notes?, tags?}`; `POST /shelf {fromPresetId, identifier} | {block}` accepts
   `name?`, `notes?` and `tags?`.
 - Known gaps: sections copy only block by block (no whole-section copy). A
@@ -508,11 +527,38 @@ Tests: `test/reorder-writeback.test.js`. Check: `node dev/check-reorder.mjs`
 The `1`/`N` badge on every group row is a click control: it flips the group
 between pick-one and pick-one-or-more (`setCardinality`). Switching to
 pick-one is refused, with an ST popup showing the server's text, while two or
-more options are on in any loadout or per-Model override (the heading never
-counts); nothing is ever switched off.
+more members (options and linked members) are on in any loadout or per-Model
+override (the heading never counts); nothing is ever switched off.
 
 Tests: `test/cardinality.test.js`. Check: `node dev/check-cardinality.mjs`
 (resets dev data; real mouse clicks on the badges in the v2 window).
+
+### Linked groups (2.3.0)
+
+A group row may carry `remote`: the row keys of block rows elsewhere in the
+same prompt order that are members of the group (linked members). Rows never
+move; compile, loadout layering, the per-Model override merge, the ST-panel
+tick ("your tick wins"), undo and every count treat linked members as
+members. The field is additive (document `version` stays 1, `upgradeDoc`
+changes nothing); any rebuild drops a key whose row is gone, a duplicate, or
+no longer a plain row, and `validateDoc` reports such keys.
+
+Ops (`POST /presets/:id/ops`, MCP `preset_op`): `createGroup {keys,
+headerKey?, cardinality?, linked: true}` (without `linked`, non-adjacent rows
+are still refused with "selected rows must be adjacent"); `linkToGroup {key,
+keys}` and `unlink {key, keys}` (`key` = group key, `keys` = row keys;
+`linkToGroup` refuses markers, order-only rows, headings, the group's own
+rows, rows linked elsewhere and rows of another order by name, and a pick-one
+group with two or more members on with 409); `setGroup` accepts a linked
+member; `removeOption` on a linked member is refused ("use unlink");
+`deleteBlock` and a block deleted in ST's panel drop the link.
+
+Tests: `test/linked-groups.test.js`, `test/link-ops.test.js` and the linked
+cases in `test/create-group.test.js`, `test/outline-model.test.js`,
+`test/slot.test.js`. Check: `node dev/check-linked.mjs` (resets dev data;
+l1 Make group from selection on non-adjacent rows and Ctrl+Z, l2 the
+reference radio, l3 a tick in ST's panel and the member's own radio, l4 Move
+down keeps the link, l5 Unlink, l6 deleting the linked block).
 
 ### Library Delete
 
@@ -590,7 +636,10 @@ contiguous run (2 or more) of one mutual-exclusive-group value becomes a
 headerless pick-one group named by the tag value (`guessed:false`); a run of
 1 stays a plain block. Apart from moved sub headers prompt order never
 changes, so a group split into several runs is listed in the import notes
-(`nemo: group 'X' spans N non-contiguous run(s) ...`). Other tags are
+(`nemo: group 'X' spans N non-contiguous run(s) ...`). The runs stay separate
+groups, never linked: Nemo's own extension reads these tags and means
+separated runs with one tag as separate groups (owner decision 2026-10-17);
+link them by hand with *Link to group* if you want one choice. Other tags are
 ignored. `source.recognizer.kind` is reported when every sequence picked the
 same recognizer.
 
@@ -607,7 +656,7 @@ becomes the first option, and no on/off bit changes; the notes say
 
 Group headings (every preset): a heading is never a pick-one member
 (normalize, the per-Model override merge, the ⚠ conflict, the 1/N refusal and
-"none" count only the options). A heading that sends text has its own
+"none" count only the options and linked members). A heading that sends text has its own
 checkbox; a comment-only heading (only `{{// … }}` comments and `{{trim}}`,
 e.g. every Nemo heading) shows no switch. The slot compile and the ST export
 are unchanged.
@@ -622,24 +671,44 @@ Presets with `… ══════════` block names or `[PICK 1: T]` t
 A `══` row opens a section; its block is the section heading and keeps its
 content. Two or more adjacent `[PICK 1: T]` rows form a pick-one group named
 `T`; a `[PICK 1: ↓] A` row directly followed by a `[PICK 1: ↑] B` row forms a
-pick-one pair named `A / B`. A single `[PICK 1: T]` row whose tag also
-appears elsewhere (Sola's two `Story Grounding [PICK 1: GROUNDING]` rows,
-#24 and #93) stays a plain toggle with a note (linked pick-one across
-positions is a later feature); a lone ↓ or ↑ row stays plain with a note. A
+pick-one pair named `A / B`. A tag whose rows sit in several runs (Sola's two
+`Story Grounding [PICK 1: GROUNDING]` rows, #25 and #94 in the file's prompt
+order) is one linked pick-one group: its first run (even a single row) is the
+group, every later run's rows are its linked members at their own positions,
+and the import notes say `sola3: [PICK 1: GROUNDING] members are linked
+across positions (#25, #94)`; a lone ↓ or ↑ row stays plain with a note. A
 group directly after another group (PRONOUN after POV) gets a default
 heading as in Nemo. Rows never move and block names never change.
 
-Tests: `test/sola3.test.js`, `test/graceful-import.test.js`.
+FF (`ff5`) never links by itself: when two or more blocks share a name
+(whitespace, emoji and case ignored) at different positions, the import notes
+say `ff5: '<name>' appears at #a and #b — select both and use Make group from
+selection to link them`.
+
+Tests: `test/sola3.test.js`, `test/recognizers.test.js`,
+`test/graceful-import.test.js`.
 
 ### Round 3 checks
 
 `node dev/check-round3.mjs` (resets dev data; real mouse clicks in the v2
 window): h1–h3 group heading checkbox, pick-one flip with the heading on,
-"none"; g1–g2 Make group from selection and its refusal popup; n1 the
+"none"; g1 Make group from selection; g2 a non-adjacent (linked) selection
+refused while both rows are on, in a popup; n1 the
 pre-round-3 Nemo fixture (`dev/fixtures/native/nemo-adjacent-pre-r3.json`)
 upgrades with unchanged bits and unchanged slot text; s1 Sola V3 Flame
-imports through the Library (`dev/fixtures.sh` copies the owner's file into
-`dev/fixtures/presets/Sola V3 Flame.json`).
+imports through the Library with GROUNDING linked (`dev/fixtures.sh` copies
+the owner's file into `dev/fixtures/presets/Sola V3 Flame.json`).
+
+### Compile dry run
+
+`node dev/compile-dryrun.mjs <library-copy> <old-tree>` compiles every preset
+× loadout × Model of a COPY of a library with the old tree's `shared/` and
+the current one and compares the order and the enabled text; it also checks
+that `upgradeDoc` changes no document and is idempotent, and that a rebuild
+round trip matches the old tree. It prints candidate link sites (same-named
+blocks at several positions) and cross-order option overlaps as information.
+Exit 1 on any difference. Run it on a copy (`cp -r`), never the live library;
+the old tree is a `git worktree add /tmp/pm-old <commit>`.
 
 ### Fix round 4 (owner review, 2026-10-15)
 

@@ -1,6 +1,6 @@
 {
   "name": "st-preset-manager",
-  "version": "2.2.1",
+  "version": "2.3.0",
   "description": "Preset Manager v2: SillyTavern UI extension + server plugin managing the live Chat Completion preset through one working slot.",
   "license": "AGPL-3.0-only",
   "repository": {
