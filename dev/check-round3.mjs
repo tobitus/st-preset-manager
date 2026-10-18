@@ -19,8 +19,10 @@
  *   g1 "Make group from selection" (3 rows multi-selected, Ctrl-click): the ST
  *      confirm popup defaults (heading = first row, pick-one); OK sends exactly one
  *      `createGroup` op, one undo step / one revision, a headed pick-one group; Ctrl+Z removes it
- *   g2 A non-adjacent selection: the server refusal (400 "selected rows must be
- *      adjacent") shows in a second ST TEXT popup and the doc is unchanged
+ *   g2 A non-adjacent selection (now a linked group: the popup title says "not
+ *      adjacent") made pick-one with no heading while both rows are ON: the
+ *      server refusal (409 "more than one option currently selected") shows in
+ *      a second ST TEXT popup and the doc is unchanged
  *   n1 A pre-round-3 Nemo native document (dev/fixtures/native/nemo-adjacent-pre-r3.json)
  *      upgrades on import: each headed pick-one group gets a default comment-only
  *      heading, the former heading becomes option 0, loadout bits and overrides
@@ -35,7 +37,7 @@
  *   round3-g1-group.png, round3-g2-refusal.png, round3-n1-upgraded.png,
  *   round3-s1-import.png, round3-s1-outline.png.
  *
- * Environment: the dev container st-pm-dev on 127.0.0.1:8002 with the plugin
+ * Environment: the dev container st-pm-dev on 127.0.0.1:8003 (PM_DEV_PORT=8003) with the plugin
  * (dev/up.sh); NEVER :8001. It RESETS the dev data (dev/reset.sh) first.
  * Never touches the sillytavern container or the live ST checkout.
  */
@@ -460,7 +462,7 @@ async function sectionG1() {
 // ------------------------------------------------------------------ g2
 
 async function sectionG2() {
-    await check('g2 non-adjacent selection: the server refusal shows in a TEXT popup, doc unchanged', async () => {
+    await check('g2 non-adjacent selection (linked, pick-one, both on): the server refusal shows in a TEXT popup, doc unchanged', async () => {
         const res = await op(ids.sola, { op: 'addSection', name: '== R3 split ==', before: S.SBK });
         must(res.status === 200, `addSection failed: HTTP ${res.status} ${J(res.json)}`);
         await until(async () => {
@@ -469,20 +471,32 @@ async function sectionG2() {
             return i > 0 && f[i - 1].rank === 'section';
         }, 8000, 'section row right before SB');
         await convergedOn(ids.sola, 'converged after addSection');
+        await setOn(S.SA, true);
+        await setOn(S.SB, true);
+        await convergedOn(ids.sola, 'converged with SA and SB on');
         const rev0 = (await getDoc(ids.sola)).rev;
         await selectThree([S.SAK, S.SBK]);
         const btn = `${view(ids.sola)} .pm-rank-make-group-sel`;
         await until(() => probe.eval(`(() => { const b = document.querySelector(${J(btn)}); return !!b && !b.classList.contains('pm-disabled'); })()`), 8000, 'Make group button enabled');
         await mouseClickSel(btn);
         await until(() => exists('dialog[open] .pm-mkgrp-form'), 8000, 'make-group popup open');
+        const title = await probe.eval(`document.querySelector('dialog[open] .pm-mkgrp-form div')?.textContent ?? ''`);
+        must(title.includes('not adjacent'), `popup title ${J(title)} lacks "not adjacent"`);
+        await probe.eval(`(() => {
+            const s = document.querySelector('dialog[open] select.pm-mkgrp-heading');
+            s.value = ''; s.dispatchEvent(new Event('change', { bubbles: true }));
+            const r = document.querySelector('dialog[open] input[name="pm-mkgrp-card"][value="pick-one"]');
+            r.checked = true; r.dispatchEvent(new Event('change', { bubbles: true }));
+            return true; })()`);
         must(await click('dialog[open] .popup-button-ok'), 'no popup OK button');
-        const msg = await until(() => probe.eval(`(() => { for (const d of document.querySelectorAll('dialog[open]')) if (d.textContent.includes('selected rows must be adjacent')) return d.textContent.trim(); return null; })()`), 8000, 'refusal popup');
+        const msg = await until(() => probe.eval(`(() => { for (const d of document.querySelectorAll('dialog[open]')) if (d.textContent.includes('more than one option currently selected')) return d.textContent.trim(); return null; })()`), 8000, 'refusal popup');
         const d = await getDoc(ids.sola);
         must(d.rev === rev0, `rev ${rev0} -> ${d.rev}, want unchanged`);
         must(!grpOf(d, S.SA) && !grpOf(d, S.SB), 'a group headed by SA/SB exists');
         const inGroup = (/** @type {any[]} */ rows) => rows.some((r) => (r.kind === 'group' && [r.header, ...(r.options ?? [])].some((l) => [S.SA, S.SB].includes(l?.ref ?? l?.identifier)))
+            || (r.kind === 'group' && (r.remote ?? []).some((/** @type {string} */ k) => [S.SAK, S.SBK].includes(k)))
             || (r.kind === 'section' && inGroup(r.rows ?? [])));
-        must(!inGroup(d.sequences[0].rows), 'SA or SB ended up inside a group');
+        must(!inGroup(d.sequences[0].rows), 'SA or SB ended up inside (or linked to) a group');
         await shot('round3-g2-refusal.png', 'page');
         await dismissPopups();
         await until(async () => !(await exists('dialog[open]')), 8000, 'no dialog[open]');

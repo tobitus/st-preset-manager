@@ -11,7 +11,7 @@ import path from 'node:path';
 import { importStPreset } from '../shared/recognizers.js';
 import { deriveStructure, promote } from '../shared/outline.js';
 import { ensureDefaultLoadout } from '../plugin/store.js';
-import { buildOutline, keyAction, pickOneOps, dragOps, findLeaf } from '../ext/outline-model.js';
+import { buildOutline, keyAction, pickOneOps, dragOps, findLeaf, leadingRun, linkSelectionOp } from '../ext/outline-model.js';
 
 const REPO = path.resolve(import.meta.dirname, '..');
 
@@ -141,8 +141,8 @@ test('buildOutline: loadout argument selects whose bits are shown; default = act
 
 test('buildOutline: leaf fields — key, identifier, kind, name fallbacks, ghost is a checkbox', () => {
     const nodes = buildOutline(tinyDoc()).sequences[0].nodes;
-    assert.deepEqual(nodes[0], { type: 'leaf', key: 'k-m', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', enabled: true, switchType: 'readonly', hasContent: false, commentOnly: false, pos: 1, inherited: false, explicit: false });
-    assert.deepEqual(nodes[1], { type: 'leaf', key: 'k-g', identifier: 'gone', leafKind: 'ghost', name: 'gone', enabled: false, switchType: 'checkbox', hasContent: false, commentOnly: false, pos: 2, inherited: false, explicit: false });
+    assert.deepEqual(nodes[0], { type: 'leaf', key: 'k-m', identifier: 'chatHistory', leafKind: 'marker', name: 'chatHistory', enabled: true, switchType: 'readonly', hasContent: false, commentOnly: false, pos: 1, inherited: false, explicit: false, linkedTo: null });
+    assert.deepEqual(nodes[1], { type: 'leaf', key: 'k-g', identifier: 'gone', leafKind: 'ghost', name: 'gone', enabled: false, switchType: 'checkbox', hasContent: false, commentOnly: false, pos: 2, inherited: false, explicit: false, linkedTo: null });
     const b = nodes[2].nodes[1].options[0];
     assert.equal(b.name, 'b', 'empty block name falls back to the identifier');
     assert.equal(b.switchType, 'radio');
@@ -260,4 +260,126 @@ test('findLeaf: finds items, options and headings by key with their block; null 
     const ff = ffDoc();
     const povRow = ff.sequences[0].rows.find((/** @type {any} */ r) => /POV/.test(r.name ?? ''));
     assert.equal(findLeaf(ff, povRow.header.key).rank, 'group');
+});
+
+// ------------------------------------------- linked groups (displaced modal selection)
+
+/**
+ * A{h; o1} pick-one, remote [r1, r2]; x1; chatHistory; r1; B{bh; p1, r2} pick-many.
+ * Flat positions: h1 o1 2 x1 3 chatHistory 4 r1 5 bh 6 p1 7 r2 8.
+ * Loadout L1: o1 and r1 on (a stored conflict across positions).
+ * @returns {any}
+ */
+function linkedDoc() {
+    const B = (/** @type {string} */ id) => ({ identifier: id, name: id.toUpperCase(), content: id, role: 'system', fields: {}, notes: '' });
+    const leaf = (/** @type {string} */ id) => ({ kind: 'block', ref: id, key: `k-${id}` });
+    return {
+        blocks: Object.fromEntries(['h', 'o1', 'x1', 'r1', 'bh', 'p1', 'r2'].map((id) => [id, B(id)])),
+        markers: [{ identifier: 'chatHistory', prompt: { identifier: 'chatHistory', marker: true } }],
+        sequences: [{ character_id: 100001, rows: [
+            { kind: 'group', key: 'grp:k-h', name: 'A', cardinality: 'pick-one', guessed: false, header: leaf('h'), options: [leaf('o1')], remote: ['k-r1', 'k-r2'] },
+            leaf('x1'),
+            { kind: 'marker', ref: 'chatHistory', key: 'k-chatHistory' },
+            leaf('r1'),
+            { kind: 'group', key: 'grp:k-bh', name: 'B', cardinality: 'pick-one-or-more', guessed: false, header: leaf('bh'), options: [leaf('p1'), leaf('r2')] },
+        ] }],
+        loadouts: {
+            L1: { id: 'L1', name: 'One', notes: '', kind: 'root', parent: null, enabled: { h: false, o1: true, x1: false, chatHistory: true, r1: true, bh: false, p1: false, r2: false }, overrides: {} },
+        },
+        activeLoadoutId: 'L1',
+    };
+}
+
+test('linked: GroupNode.remote holds the linked leaves with their own positions and radios; conflict counts them', () => {
+    const doc = linkedDoc();
+    const nodes = buildOutline(doc).sequences[0].nodes;
+    const a = /** @type {any} */ (nodes[0]);
+    assert.deepEqual(a.remote.map((/** @type {any} */ n) => n.identifier), ['r1', 'r2']);
+    assert.deepEqual(a.remote.map((/** @type {any} */ n) => n.pos), [5, 8]);
+    assert.deepEqual(a.remote.map((/** @type {any} */ n) => n.switchType), ['radio', 'radio']);
+    assert.deepEqual(a.remote.map((/** @type {any} */ n) => n.enabled), [true, false]);
+    assert.equal(a.remote[0].type, 'leaf');
+    assert.equal(a.conflict, true, 'o1 and r1 both on');
+    assert.equal(a.noneOn, false);
+    doc.loadouts.L1.enabled.r1 = false;
+    const a2 = /** @type {any} */ (buildOutline(doc).sequences[0].nodes[0]);
+    assert.equal(a2.conflict, false);
+    doc.loadouts.L1.enabled.o1 = false;
+    doc.loadouts.L1.enabled.r2 = true;
+    const a3 = /** @type {any} */ (buildOutline(doc).sequences[0].nodes[0]);
+    assert.equal(a3.noneOn, false, 'a linked member on counts');
+    doc.loadouts.L1.enabled.r2 = false;
+    assert.equal(/** @type {any} */ (buildOutline(doc).sequences[0].nodes[0]).noneOn, true);
+});
+
+test('linked: the leaf at its own position carries linkedTo and a radio (its own group may be pick-many)', () => {
+    const nodes = /** @type {any[]} */ (buildOutline(linkedDoc()).sequences[0].nodes);
+    const r1 = nodes[3];
+    assert.equal(r1.identifier, 'r1');
+    assert.deepEqual(r1.linkedTo, { key: 'grp:k-h', name: 'H', pickOne: true });
+    assert.equal(r1.switchType, 'radio');
+    const b = nodes[4];
+    assert.deepEqual(b.options.map((/** @type {any} */ o) => o.switchType), ['checkbox', 'radio']);
+    assert.deepEqual(b.options.map((/** @type {any} */ o) => o.linkedTo?.key ?? null), [null, 'grp:k-h']);
+    assert.equal(nodes[0].options[0].linkedTo, null, 'an ordinary option is not linked');
+    assert.equal(nodes[1].linkedTo, null);
+    assert.equal(nodes[1].switchType, 'checkbox');
+    assert.equal(nodes[2].switchType, 'readonly');
+});
+
+test('linked: a pick-many linked group renders checkboxes at both places', () => {
+    const doc = linkedDoc();
+    doc.sequences[0].rows[0].cardinality = 'pick-one-or-more';
+    const nodes = /** @type {any[]} */ (buildOutline(doc).sequences[0].nodes);
+    assert.deepEqual(nodes[0].remote.map((/** @type {any} */ n) => n.switchType), ['checkbox', 'checkbox']);
+    assert.equal(nodes[3].switchType, 'checkbox');
+    assert.deepEqual(nodes[3].linkedTo, { key: 'grp:k-h', name: 'H', pickOne: false });
+    assert.equal(nodes[0].conflict, false);
+});
+
+test('linked: pickOneOps — a linked member is a setGroup choice; "none" turns off options and linked members', () => {
+    const a = /** @type {any} */ (buildOutline(linkedDoc()).sequences[0].nodes[0]);
+    assert.deepEqual(pickOneOps(a, 'r1'), [{ op: 'setGroup', group: 'grp:k-h', identifier: 'r1' }]);
+    assert.deepEqual(pickOneOps(a, null, 'L1'), [
+        { op: 'toggle', identifier: 'o1', value: false, loadoutId: 'L1' },
+        { op: 'toggle', identifier: 'r1', value: false, loadoutId: 'L1' },
+    ]);
+});
+
+test('linked: a document without remote renders remote: [] on every group and linkedTo: null on every leaf', () => {
+    const doc = tinyDoc();
+    /** @param {any} n */
+    const visit = (n) => {
+        if (n.type === 'group') {
+            assert.deepEqual(n.remote, []);
+            if (n.header) visit(n.header);
+            n.options.forEach(visit);
+        } else if (n.type === 'section') {
+            if (n.header) visit(n.header);
+            n.nodes.forEach(visit);
+        } else {
+            assert.equal(n.linkedTo, null);
+        }
+    };
+    for (const seq of buildOutline(doc).sequences) seq.nodes.forEach(visit);
+    for (const seq of buildOutline(ffDoc()).sequences) seq.nodes.forEach(visit);
+});
+
+test('leadingRun: splits a selection into the first adjacent run and the later rows, in document order', () => {
+    const doc = linkedDoc();
+    assert.deepEqual(leadingRun(doc, ['k-x1', 'k-r1', 'k-o1']), { leading: ['k-o1', 'k-x1'], later: ['k-r1'] });
+    assert.deepEqual(leadingRun(doc, new Set(['k-x1', 'k-p1', 'k-r2'])), { leading: ['k-x1'], later: ['k-p1', 'k-r2'] });
+    assert.deepEqual(leadingRun(doc, ['k-x1', 'k-chatHistory']), { leading: ['k-x1', 'k-chatHistory'], later: [] });
+    assert.deepEqual(leadingRun(doc, []), { leading: [], later: [] });
+});
+
+test('linkSelectionOp: one group row plus leaf rows -> one linkToGroup op; anything else is refused with a reason', () => {
+    const doc = linkedDoc();
+    assert.deepEqual(linkSelectionOp(doc, ['k-h', 'k-x1']), { op: { op: 'linkToGroup', key: 'grp:k-h', keys: ['k-x1'] }, refuse: null });
+    assert.deepEqual(linkSelectionOp(doc, new Set(['k-p1', 'grp:k-h', 'k-x1'])), { op: { op: 'linkToGroup', key: 'grp:k-h', keys: ['k-x1', 'k-p1'] }, refuse: null });
+    const REFUSE = 'Select one group row and the rows to link to it (Ctrl-click)';
+    assert.deepEqual(linkSelectionOp(doc, ['k-x1', 'k-r1']), { op: null, refuse: REFUSE });
+    assert.deepEqual(linkSelectionOp(doc, ['k-h']), { op: null, refuse: REFUSE });
+    assert.deepEqual(linkSelectionOp(doc, ['k-h', 'k-bh', 'k-x1']), { op: null, refuse: REFUSE });
+    assert.deepEqual(linkSelectionOp(doc, []), { op: null, refuse: REFUSE });
 });

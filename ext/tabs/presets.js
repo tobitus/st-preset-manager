@@ -39,9 +39,12 @@ import { createEditor, findGroupRow } from './editor.js';
 import { createModelPanel } from './model-panel.js';
 import { createShelfPanel } from './shelf-panel.js';
 import { flattenSeq } from '../../shared/outline.js';
-import { findLeaf, headingAction, searchMatches } from '../outline-model.js';
+import { findLeaf, headingAction, searchMatches, leadingRun, linkSelectionOp } from '../outline-model.js';
 import { rootOf } from '../../shared/loadouts.js';
 import { createEditGuard } from '../dirty.js';
+
+const MAKE_GROUP_SEL_TITLE = 'Make one group from the selected rows (Ctrl/Shift-click to select); rows that are not adjacent become linked members';
+const LINK_SEL_TITLE = 'Link the selected rows to the selected group (Ctrl-click one group row and the rows to link)';
 
 /**
  * @typedef {object} PresetView
@@ -61,6 +64,7 @@ import { createEditGuard } from '../dirty.js';
  * @property {HTMLButtonElement} makeSectionBtn 'Make/Unmake section heading' button
  * @property {HTMLButtonElement} makeGroupBtn 'Make/Unmake group heading' button
  * @property {HTMLButtonElement} makeGroupSelBtn 'Make group from selection' button
+ * @property {HTMLButtonElement} linkSelBtn 'Link to group' button
  * @property {HTMLTextAreaElement} notes preset notes textarea
  * @property {HTMLElement} insertMenu the `.pm-insert-menu` popup
  * @property {HTMLButtonElement} dupBtn 'Duplicate' button
@@ -326,7 +330,8 @@ export function createPresetsTab(pane, bridge) {
                 <button class="pm-move-down menu_button" title="Move the selected row down (Alt+↓)">↓</button>
                 <button class="pm-rank-make-section menu_button" title="Turn the selected plain row into a section heading (Alt+S) — the rows below it become its children">Make section heading</button>
                 <button class="pm-rank-make-group menu_button" title="Turn the selected plain row into a group heading (Alt+G)">Make group heading</button>
-                <button class="pm-rank-make-group-sel menu_button" title="Make one group from the selected adjacent rows (Ctrl/Shift-click to select)">Make group from selection</button>
+                <button class="pm-rank-make-group-sel menu_button" title="Make one group from the selected rows (Ctrl/Shift-click to select); rows that are not adjacent become linked members">Make group from selection</button>
+                <button class="pm-rank-link-sel menu_button" title="Link the selected rows to the selected group (Ctrl-click one group row and the rows to link)">Link to group</button>
                 <button class="pm-shelf-save menu_button" title="Save the selected block to the shelf">Save to shelf</button>
                 <button class="pm-shelf-toggle menu_button" title="Show the shelf list (drag blocks into this preset)">Shelf ▸</button>
             </div>
@@ -391,6 +396,7 @@ export function createPresetsTab(pane, bridge) {
             makeSectionBtn: q('.pm-rank-make-section'),
             makeGroupBtn: q('.pm-rank-make-group'),
             makeGroupSelBtn: q('.pm-rank-make-group-sel'),
+            linkSelBtn: q('.pm-rank-link-sel'),
             notes: q('.pm-preset-notes'),
             insertMenu: q('.pm-insert-menu'),
             dupBtn: q('.pm-block-duplicate'),
@@ -473,6 +479,21 @@ export function createPresetsTab(pane, bridge) {
                 return;
             }
             void makeGroupFromSelection(nextView);
+        });
+        q('.pm-rank-link-sel').addEventListener('click', () => {
+            const a = linkSelectionOp(docs.get(id), multi.get(id) ?? new Set());
+            if (a.refuse) {
+                toast('warning', a.refuse);
+                return;
+            }
+            void runOps(id, [a.op]).then(() => {
+                setSelection(id, null);
+                refreshView();
+            }).catch((/** @type {any} */ err) => {
+                const msg = document.createElement('p');
+                msg.textContent = err?.body?.error ?? errText(err);
+                void ctx().callGenericPopup(msg, ctx().POPUP_TYPE.TEXT);
+            });
         });
         q('.pm-shelf-save').addEventListener('click', () => void saveToShelf(nextView));
         q('.pm-shelf-toggle').addEventListener('click', () => {
@@ -601,12 +622,15 @@ export function createPresetsTab(pane, bridge) {
                 if (keys.has(e.leaf.key)) selectedEntries.push(e);
             });
         }
-        const candidates = selectedEntries.filter((e) => e.rank === 'item' && e.leaf.kind === 'block');
+        const { leading, later } = leadingRun(doc, keys);
+        const candidates = selectedEntries.filter((e) => e.rank === 'item' && e.leaf.kind === 'block' && leading.includes(e.leaf.key));
 
         const form = document.createElement('div');
         form.className = 'pm-mkgrp-form';
         const title = document.createElement('div');
-        title.textContent = `Make group from ${selectedEntries.length} rows`;
+        title.textContent = later.length
+            ? `${selectedEntries.length} rows are not adjacent: the first run becomes the group, the rest are linked members`
+            : `Make group from ${selectedEntries.length} rows`;
         const headLabel = document.createElement('label');
         headLabel.append('Heading ');
         const select = document.createElement('select');
@@ -648,7 +672,7 @@ export function createPresetsTab(pane, bridge) {
         const cardinality = checked?.value === 'pick-one-or-more' ? 'pick-one-or-more' : 'pick-one';
         const optKeys = selectedEntries.map((e) => e.leaf.key).filter((k) => k !== headerKey);
         try {
-            await runOps(v.id, [{ op: 'createGroup', keys: optKeys, headerKey, cardinality }]);
+            await runOps(v.id, [{ op: 'createGroup', keys: optKeys, headerKey, cardinality, ...(later.length ? { linked: true } : {}) }]);
         } catch (/** @type {any} */ err) {
             const msg = document.createElement('p');
             msg.textContent = err?.body?.error ?? errText(err);
@@ -1004,7 +1028,12 @@ export function createPresetsTab(pane, bridge) {
             const reason = makeGroupSelRefusal(view.id);
             view.makeGroupSelBtn.classList.toggle('pm-disabled', !!reason);
             view.makeGroupSelBtn.setAttribute('aria-disabled', reason ? 'true' : 'false');
-            view.makeGroupSelBtn.title = reason || 'Make one group from the selected adjacent rows (Ctrl/Shift-click to select)';
+            view.makeGroupSelBtn.title = reason || MAKE_GROUP_SEL_TITLE;
+            const linkDoc = docs.get(view.id);
+            const linkReason = linkDoc ? (linkSelectionOp(linkDoc, multi.get(view.id) ?? new Set()).refuse ?? '') : '';
+            view.linkSelBtn.classList.toggle('pm-disabled', !!linkReason);
+            view.linkSelBtn.setAttribute('aria-disabled', linkReason ? 'true' : 'false');
+            view.linkSelBtn.title = linkReason || LINK_SEL_TITLE;
         }
         view.makeSectionBtn.disabled = onGroup;
         view.makeGroupBtn.disabled = onGroup;

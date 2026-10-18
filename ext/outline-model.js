@@ -28,6 +28,16 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {number} pos 1-based position of this leaf in flattenSeq order of its own sequence
  * @property {boolean} inherited playstyle row whose bit comes from the root loadout
  * @property {boolean} explicit playstyle row whose bit the playstyle sets itself (resettable)
+ * @property {{key: string, name: string, pickOne: boolean}|null} linkedTo the linked group this leaf is a remote member of
+ */
+
+/**
+ * Per-sequence lookups threaded through the node builders.
+ *
+ * @typedef {Object} SeqContext
+ * @property {Map<string, number>} posMap leaf key -> 1-based flat position
+ * @property {Map<string, any>} leaves leaf key -> leaf row
+ * @property {Map<string, any>} linkedBy leaf key -> the group row it is a linked member of
  */
 
 /**
@@ -42,9 +52,9 @@ import { isCommentOnly } from '../shared/groups.js';
 /**
  * A rendered group row. Its header (if any) is an ordinary checkbox leaf and
  * never a pick-one member, whatever its content (round 3): `conflict` =
- * pick-one with 2+ options on, `noneOn` = pick-one with no option on. A
- * comment-only header renders no switch (the row decides via
- * `header.commentOnly`).
+ * pick-one with 2+ members on (options AND linked members), `noneOn` =
+ * pick-one with no member on. A comment-only header renders no switch (the
+ * row decides via `header.commentOnly`).
  *
  * @typedef {Object} GroupNode
  * @property {'group'} type
@@ -57,6 +67,7 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {boolean} conflict
  * @property {boolean} noneOn
  * @property {LeafNode[]} options
+ * @property {LeafNode[]} remote linked members: leaves elsewhere in the sequence that belong to this group
  */
 
 /**
@@ -97,6 +108,8 @@ import { isCommentOnly } from '../shared/groups.js';
  * @property {boolean} [conflict]
  * @property {boolean} [noneOn]
  * @property {LeafNode[]} [options]
+ * @property {LeafNode[]} [remote]
+ * @property {{key: string, name: string, pickOne: boolean}|null} [linkedTo]
  * @property {Node[]} [nodes]
  */
 
@@ -121,13 +134,17 @@ function switchType(leaf, pickOne) {
  * @param {BitsContext} bits
  * @param {any} leaf
  * @param {boolean} pickOne
- * @param {Map<string, number>} posMap leaf key -> 1-based flat position in its sequence
+ * @param {SeqContext} seq
  * @returns {LeafNode}
  */
-function leafNode(doc, bits, leaf, pickOne, posMap) {
+function leafNode(doc, bits, leaf, pickOne, seq) {
     const identifier = leaf.ref ?? leaf.identifier;
     const content = String(doc.blocks?.[identifier]?.content ?? '');
     const commentOnly = leaf.kind === 'block' && isCommentOnly(content);
+    const grp = seq.linkedBy.get(leaf.key);
+    const linkedTo = grp
+        ? { key: grp.key, name: containerName(doc, grp), pickOne: grp.cardinality === 'pick-one' }
+        : null;
     return {
         type: 'leaf',
         key: leaf.key,
@@ -135,12 +152,13 @@ function leafNode(doc, bits, leaf, pickOne, posMap) {
         leafKind: leaf.kind,
         name: leaf.kind === 'block' ? (doc.blocks?.[identifier]?.name || identifier) : identifier,
         enabled: !!bits.enabled?.[identifier],
-        switchType: switchType(leaf, pickOne),
+        switchType: switchType(leaf, pickOne || !!linkedTo?.pickOne),
         hasContent: leaf.kind === 'block' && content.trim() !== '' && !commentOnly,
         commentOnly,
-        pos: posMap.get(leaf.key) ?? 0,
+        pos: seq.posMap.get(leaf.key) ?? 0,
         inherited: bits.playstyle && bits.source?.[identifier] === 'root',
         explicit: bits.playstyle && bits.source?.[identifier] === 'loadout',
+        linkedTo,
     };
 }
 
@@ -151,14 +169,21 @@ function leafNode(doc, bits, leaf, pickOne, posMap) {
  * @param {any} doc
  * @param {BitsContext} bits
  * @param {any} row
- * @param {Map<string, number>} posMap
+ * @param {SeqContext} seq
  * @returns {GroupNode}
  */
-function groupNode(doc, bits, row, posMap) {
+function groupNode(doc, bits, row, seq) {
     const pickOne = row.cardinality === 'pick-one';
-    const header = row.header ? leafNode(doc, bits, row.header, false, posMap) : null;
-    const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, bits, o, pickOne, posMap));
-    const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length;
+    const header = row.header ? leafNode(doc, bits, row.header, false, seq) : null;
+    const options = (row.options ?? []).map((/** @type {any} */ o) => leafNode(doc, bits, o, pickOne, seq));
+    /** @type {LeafNode[]} */
+    const remote = [];
+    for (const k of row.remote ?? []) {
+        const leaf = seq.leaves.get(k);
+        if (leaf) remote.push(leafNode(doc, bits, leaf, pickOne, seq));
+    }
+    const on = options.filter((/** @type {LeafNode} */ m) => m.enabled).length
+        + remote.filter((m) => m.enabled).length;
     return {
         type: 'group',
         key: row.key,
@@ -170,6 +195,7 @@ function groupNode(doc, bits, row, posMap) {
         conflict: pickOne && on >= 2,
         noneOn: pickOne && on === 0,
         options,
+        remote,
     };
 }
 
@@ -179,21 +205,36 @@ function groupNode(doc, bits, row, posMap) {
  * @param {any} doc
  * @param {BitsContext} bits
  * @param {any} row
- * @param {Map<string, number>} posMap
+ * @param {SeqContext} seq
  * @returns {Node}
  */
-function rowNode(doc, bits, row, posMap) {
-    if (row.kind === 'group') return groupNode(doc, bits, row, posMap);
+function rowNode(doc, bits, row, seq) {
+    if (row.kind === 'group') return groupNode(doc, bits, row, seq);
     if (row.kind === 'section') {
         return {
             type: 'section',
             key: row.key,
-            header: row.header ? leafNode(doc, bits, row.header, false, posMap) : null,
+            header: row.header ? leafNode(doc, bits, row.header, false, seq) : null,
             name: containerName(doc, row),
-            nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, bits, r, posMap)),
+            nodes: (row.rows ?? []).map((/** @type {any} */ r) => rowNode(doc, bits, r, seq)),
         };
     }
-    return leafNode(doc, bits, row, false, posMap);
+    return leafNode(doc, bits, row, false, seq);
+}
+
+/**
+ * Collect every group row of a sequence (top level and inside sections).
+ *
+ * @param {any[]} rows
+ * @param {any[]} [out]
+ * @returns {any[]}
+ */
+function groupRows(rows, out = []) {
+    for (const r of rows) {
+        if (r.kind === 'group') out.push(r);
+        else if (r.kind === 'section') groupRows(r.rows ?? [], out);
+    }
+    return out;
 }
 
 /**
@@ -216,12 +257,20 @@ export function buildOutline(doc, loadoutId = doc.activeLoadoutId, modelName = n
     const playstyle = known && doc.loadouts[loadoutId].kind === 'playstyle';
     const bits = { enabled, source, playstyle };
     return {
-        sequences: (doc.sequences ?? []).map((/** @type {any} */ seq) => {
-            /** @type {Map<string, number>} */
-            const posMap = new Map(flattenSeq(seq.rows ?? []).map((e, i) => [e.leaf.key, i + 1]));
+        sequences: (doc.sequences ?? []).map((/** @type {any} */ s) => {
+            const flat = flattenSeq(s.rows ?? []);
+            /** @type {SeqContext} */
+            const seq = {
+                posMap: new Map(flat.map((e, i) => [e.leaf.key, i + 1])),
+                leaves: new Map(flat.map((e) => [e.leaf.key, e.leaf])),
+                linkedBy: new Map(),
+            };
+            for (const g of groupRows(s.rows ?? [])) {
+                for (const k of g.remote ?? []) seq.linkedBy.set(k, g);
+            }
             return {
-                characterId: seq.character_id,
-                nodes: (seq.rows ?? []).map((/** @type {any} */ row) => rowNode(doc, bits, row, posMap)),
+                characterId: s.character_id,
+                nodes: (s.rows ?? []).map((/** @type {any} */ row) => rowNode(doc, bits, row, seq)),
             };
         }),
     };
@@ -303,7 +352,7 @@ export function pickOneOps(group, identifier, loadoutId) {
     if (identifier != null) {
         ops.push({ op: 'setGroup', group: group.key ?? '', identifier });
     } else {
-        for (const m of group.options ?? []) {
+        for (const m of [...(group.options ?? []), ...(group.remote ?? [])]) {
             if (m.enabled) ops.push({ op: 'toggle', identifier: m.identifier, value: false });
         }
     }
@@ -378,6 +427,76 @@ export function findLeaf(doc, key) {
         }
     }
     return null;
+}
+
+/**
+ * Split a selection into its first adjacent run and the rest. The sequence
+ * holding the first selected key decides: its selected keys, ordered by flat
+ * position, form `leading` up to the first gap in flat indices; `later` is the
+ * remainder of that sequence followed by selected keys from other sequences
+ * (in given order).
+ *
+ * @param {any} doc
+ * @param {string[]|Set<string>} keys leaf keys
+ * @returns {{ leading: string[], later: string[] }}
+ */
+export function leadingRun(doc, keys) {
+    const list = [...keys];
+    if (!list.length) return { leading: [], later: [] };
+    for (const seq of doc.sequences ?? []) {
+        const flat = flattenSeq(seq.rows ?? []);
+        const index = new Map(flat.map((e, i) => [e.leaf.key, i]));
+        if (!index.has(list[0])) continue;
+        const inSeq = list.filter((k) => index.has(k)).sort((a, b) => /** @type {number} */ (index.get(a)) - /** @type {number} */ (index.get(b)));
+        let n = 1;
+        while (n < inSeq.length && /** @type {number} */ (index.get(inSeq[n])) === /** @type {number} */ (index.get(inSeq[n - 1])) + 1) n++;
+        return {
+            leading: inSeq.slice(0, n),
+            later: [...inSeq.slice(n), ...list.filter((k) => !index.has(k))],
+        };
+    }
+    return { leading: [], later: list };
+}
+
+const LINK_REFUSE = 'Select one group row and the rows to link to it (Ctrl-click)';
+
+/**
+ * The linkToGroup op for a selection of one group row plus the rows to link to
+ * it, or the reason the selection is refused. The server validates the rest.
+ *
+ * @param {any} doc
+ * @param {string[]|Set<string>} keys selected row keys
+ * @returns {{ op: { op: 'linkToGroup', key: string, keys: string[] }, refuse: null } | { op: null, refuse: string }}
+ */
+export function linkSelectionOp(doc, keys) {
+    const refused = { op: null, refuse: LINK_REFUSE };
+    /** @type {any[]} */
+    const groups = [];
+    for (const seq of doc.sequences ?? []) groupRows(seq.rows ?? [], groups);
+    /** @type {Set<string>} */
+    const groupKeys = new Set();
+    /** @type {string[]} */
+    const others = [];
+    for (const k of keys) {
+        if (k.startsWith('grp:')) {
+            groupKeys.add(k);
+        } else if (findLeaf(doc, k)?.rank === 'group') {
+            const g = groups.find((r) => r.header?.key === k);
+            if (!g) return refused;
+            groupKeys.add(g.key);
+        } else {
+            others.push(k);
+        }
+    }
+    if (groupKeys.size !== 1 || !others.length) return refused;
+    /** @type {Map<string, number>} */
+    const order = new Map();
+    for (const seq of doc.sequences ?? []) {
+        for (const e of flattenSeq(seq.rows ?? [])) order.set(e.leaf.key, order.size);
+    }
+    const rank = (/** @type {string} */ k) => order.get(k) ?? Infinity;
+    others.sort((a, b) => rank(a) - rank(b));
+    return { op: { op: 'linkToGroup', key: [...groupKeys][0], keys: others }, refuse: null };
 }
 
 /**

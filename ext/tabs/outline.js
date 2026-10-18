@@ -224,6 +224,56 @@ function computeMatch(node, keys, memo) {
     return own;
 }
 
+/** The chain icon of linked members (ST's Font Awesome; renders without an emoji font). */
+function linkIcon() {
+    const i = document.createElement('i');
+    i.className = 'fa-solid fa-link';
+    i.setAttribute('aria-hidden', 'true');
+    return i;
+}
+
+/**
+ * @param {{ key: string, name: string }} linked
+ * @returns {HTMLButtonElement} the chain + group-name badge on a linked member at its own position
+ */
+function linkBadge(linked) {
+    const name = linked.name || '(options)';
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'pm-link-badge';
+    btn.dataset.group = linked.key;
+    btn.append(linkIcon(), ` ${name}`);
+    btn.title = `Linked member of group "${name}" — click to show the group`;
+    return btn;
+}
+
+/**
+ * The reference row for a linked member, shown inside its group (not a pm-node).
+ * @param {LeafNode} node
+ * @returns {HTMLLIElement}
+ */
+function remoteRefLi(node) {
+    const li = document.createElement('li');
+    li.className = 'pm-remote-ref' + (node.inherited ? ' pm-inherited' : '');
+    li.dataset.key = node.key;
+    li.dataset.identifier = node.identifier ?? '';
+    const pos = document.createElement('span');
+    pos.className = 'pm-remote-pos';
+    pos.append(linkIcon(), ` #${node.pos}`);
+    const jump = document.createElement('button');
+    jump.type = 'button';
+    jump.className = 'pm-remote-jump';
+    jump.textContent = '↗';
+    jump.title = 'Show this row at its own position';
+    const unlink = document.createElement('button');
+    unlink.type = 'button';
+    unlink.className = 'pm-remote-unlink';
+    unlink.textContent = '✕ Unlink';
+    unlink.title = 'Unlink from this group (the row stays where it is)';
+    li.append(pos, makeSwitch(node), nameSpan(node.name), jump, unlink);
+    return li;
+}
+
 /**
  * @param {LeafNode} node
  * @param {string|null} selectedKey
@@ -245,7 +295,10 @@ function leafLi(node, selectedKey, ctx) {
     const spacer = document.createElement('span');
     spacer.className = 'pm-caret-spacer';
     spacer.setAttribute('aria-hidden', 'true');
-    row.append(spacer, handleSpan(), numSpan(li, node.pos), makeSwitch(node), nameSpan(node.name));
+    const sw = makeSwitch(node);
+    if (node.linkedTo) sw.dataset.group = node.linkedTo.key;
+    row.append(spacer, handleSpan(), numSpan(li, node.pos), sw, nameSpan(node.name));
+    if (node.linkedTo) row.append(linkBadge(node.linkedTo));
     if (node.explicit) row.append(resetSpan(node));
     applySearchMatch(row, node.key, ctx);
     li.append(row);
@@ -300,6 +353,12 @@ function groupLi(node, selectedKey, ctx) {
     list.dataset.list = 'options';
     for (const opt of node.options ?? []) list.append(leafLi(opt, selectedKey, ctx));
     li.append(list);
+    if (node.remote?.length) {
+        const remote = document.createElement('ul');
+        remote.className = 'pm-remote-list';
+        for (const r of node.remote) remote.append(remoteRefLi(r));
+        li.append(remote);
+    }
     if (ctx.search?.filter && !ctx.matches.get(node)) li.classList.add('pm-filtered-out');
     return li;
 }
@@ -488,12 +547,36 @@ export function createOutline(container, handlers) {
      */
     function groupForInput(input) {
         const li = /** @type {HTMLElement|null} */ (input.closest('li.pm-node'));
-        if (!li) return null;
-        const groupLi = li.dataset.kind === 'group'
+        const groupLi = !li ? null : li.dataset.kind === 'group'
             ? li
             : /** @type {HTMLElement|null} */ (li.parentElement?.closest('li.pm-node[data-kind="group"]'));
-        if (!groupLi) return null;
-        return groupByKey.get(groupLi.dataset.nodeKey ?? '') ?? null;
+        const own = groupLi ? (groupByKey.get(groupLi.dataset.nodeKey ?? '') ?? null) : null;
+        // a linked member at its own position acts on its linked group unless
+        // the enclosing group is itself the pick-one that owns the input
+        if (input.dataset.group && !own?.pickOne) return groupByKey.get(input.dataset.group) ?? own;
+        return own;
+    }
+
+    /**
+     * The li.pm-node whose `attr` equals `value`, or null.
+     * @param {'data-key'|'data-node-key'} attr
+     * @param {string} value
+     * @returns {HTMLElement|null}
+     */
+    function findNode(attr, value) {
+        if (!value) return null;
+        const esc = typeof CSS !== 'undefined' && CSS.escape ? CSS.escape(value) : value.replace(/["\\]/g, '\\$&');
+        return /** @type {HTMLElement|null} */ (container.querySelector(`li.pm-node[${attr}="${esc}"]`));
+    }
+
+    /**
+     * Scroll a row into view and flash it briefly.
+     * @param {HTMLElement} el
+     */
+    function flash(el) {
+        el.scrollIntoView?.({ block: 'center' });
+        el.classList.add('pm-flash');
+        setTimeout(() => el.classList.remove('pm-flash'), 1200);
     }
 
     /**
@@ -531,6 +614,39 @@ export function createOutline(container, handlers) {
             inputClick(input);
             return;
         }
+        const unlink = /** @type {HTMLElement|null} */ (t.closest('.pm-remote-unlink'));
+        if (unlink) {
+            ev.stopPropagation();
+            const ref = /** @type {HTMLElement|null} */ (unlink.closest('li.pm-remote-ref'));
+            const gli = /** @type {HTMLElement|null} */ (unlink.closest('li.pm-node'));
+            if (ref?.dataset.key && gli?.dataset.nodeKey) {
+                void handlers.onOps([{ op: 'unlink', key: gli.dataset.nodeKey, keys: [ref.dataset.key] }]).catch(() => {});
+            }
+            return;
+        }
+        const jump = /** @type {HTMLElement|null} */ (t.closest('.pm-remote-jump'));
+        if (jump) {
+            ev.stopPropagation();
+            const target = findNode('data-key', jump.closest('li.pm-remote-ref')?.getAttribute('data-key') ?? '');
+            if (target) flash(target);
+            return;
+        }
+        const badge = /** @type {HTMLElement|null} */ (t.closest('.pm-link-badge'));
+        if (badge) {
+            ev.stopPropagation();
+            const target = findNode('data-node-key', badge.dataset.group ?? '');
+            if (target) {
+                flash(target);
+                const key = target.dataset.key || '';
+                if (key) {
+                    selectedKey = key;
+                    selectedSet = new Set([key]);
+                    handlers.onSelect([key]);
+                }
+            }
+            return;
+        }
+        if (t.closest('li.pm-remote-ref')) return; // a reference row selects nothing
         if (t.closest('.pm-caret')) {
             const li = /** @type {HTMLElement|null} */ (t.closest('li.pm-node'));
             handlers.onToggleCollapse?.(li?.dataset.nodeKey ?? '');
